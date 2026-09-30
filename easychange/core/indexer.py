@@ -93,6 +93,14 @@ class Indexer:
         finally:
             db.close()
 
+    def status(self) -> dict:
+        return {
+            "state": "READY" if self._fully_indexed else "WARMING",
+            "fts5": self._fts_enabled,
+            "background": bool(self._build_thread and self._build_thread.is_alive()),
+            "last_refresh": dict(self._last_refresh_result),
+        }
+
     @property
     def ready(self) -> bool:
         return self._fully_indexed
