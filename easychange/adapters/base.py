@@ -1,0 +1,13 @@
+from __future__ import annotations
+
+from typing import Protocol
+
+from easychange.core.workspace import Workspace
+
+
+class ProjectAdapter(Protocol):
+    name: str
+    def detect(self, workspace: Workspace) -> bool: ...
+    def describe(self, workspace: Workspace) -> dict: ...
+    def build(self, workspace: Workspace) -> list[str] | None: ...
+    def test(self, workspace: Workspace) -> list[str] | None: ...

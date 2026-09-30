@@ -1,0 +1,2 @@
+# Core runtime uses only the Python standard library.
+# Install optional interfaces with: pip install -e ".[gui,api,mcp]"
