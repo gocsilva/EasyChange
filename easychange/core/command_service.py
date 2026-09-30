@@ -42,7 +42,7 @@ class ProcessFailure(RuntimeError):
 
 
 class CommandService:
-    """Thread-safe control plane shared by CLI, GUI, HTTP, and MCP transports."""
+    """Thread-safe deterministic control plane for CLI diagnostics and HID-driven Machine GUI."""
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
         self.state_store = MachineSession(workspace.root_path / ".easychange" / "session.json", str(workspace.root_path))
@@ -1134,6 +1134,13 @@ class CommandService:
             if item.get("file"):
                 self.file_refs[item["id"]] = item["file"]
             registered.append(item)
+        # Result IDs are navigation aids, not an unbounded history database.
+        # Keep enough recent IDs for remote workflows without growing
+        # session.json forever during long AI sessions.
+        if len(self.results) > 512:
+            keep = set(list(self.results)[-512:])
+            self.results = {key: value for key, value in self.results.items() if key in keep}
+            self.file_refs = {key: value for key, value in self.file_refs.items() if key in keep}
         return registered
 
 
