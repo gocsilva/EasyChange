@@ -503,7 +503,8 @@ class CommandService:
                     "capabilities": {"workspace": True, "git": "GIT" in self.workspace.adapters,
                     "build_test": self.workspace.adapters, "index": True, "symbols": True,
                     "ai_machine": {"optical_protocol": "EC2", "qr_slots": 4, "chunked_results": True,
-                                   "composite_study": True, "read_many": True, "validate": True},
+                                   "composite_study": True, "read_many": True, "validate": True,
+                                   "cold_search": "git-grep", "warm_search": "sqlite-fts5"},
                     "remote_control": {"input": "ESP32_HID", "output": "HDMI",
                                        "mcp_on_remote_pc": False, "api_on_remote_pc": False}}}
         if name == "state":
@@ -514,7 +515,8 @@ class CommandService:
                     "file": self.state_store.data.get("current_file"), "line": self.state_store.data.get("line", 1),
                     "dirty": self.state_store.data.get("dirty", False), "git": git,
                     "transaction": self.transaction_id or "NONE", "process": self.processes.list(),
-                    "index": "READY" if (self.workspace.root_path / ".easychange" / "index.db").exists() else "NOT_BUILT",
+                    "index": "READY" if self.indexer.ready else "WARMING",
+                    "index_details": self.indexer.status(),
                     "machine_mode": self.machine, "focus": "COMMAND"}
         if name in {"pwd", "workspace"}:
             return {"path": str(self.workspace.root_path), "id": "W1", "type": self.workspace.kind}
