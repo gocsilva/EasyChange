@@ -56,7 +56,7 @@ class MainWindow(QMainWindow):
         self._optical_payloads: list[str] = []
         self._optical_page = 0
         self._optical_timer = QTimer(self)
-        self._optical_timer.setInterval(420)
+        self._optical_timer.setInterval(280)
         self._optical_timer.timeout.connect(self._render_optical_page)
 
         self.result_panel = QWidget(); result_layout = QHBoxLayout(self.result_panel)
@@ -260,10 +260,13 @@ class MainWindow(QMainWindow):
             code.make(fit=True)
             matrix = code.get_matrix()
             height = len(matrix); width = len(matrix[0])
-            image = QImage(width, height, QImage.Format.Format_RGB32)
-            for y, row in enumerate(matrix):
-                for x, dark in enumerate(row):
-                    image.setPixelColor(x, y, QColor(0, 0, 0) if dark else QColor(255, 255, 255))
+            # Build one grayscale buffer instead of thousands of Qt
+            # setPixelColor calls. This keeps optical page swaps cheap enough
+            # for the faster 280 ms cadence.
+            pixels = bytes(0 if dark else 255 for row in matrix for dark in row)
+            image = QImage(
+                pixels, width, height, width, QImage.Format.Format_Grayscale8
+            ).copy()
             # Never distort QR modules with fractional scaling. HDMI capture
             # decoders are much more reliable when every module occupies an
             # exact integer number of pixels.
