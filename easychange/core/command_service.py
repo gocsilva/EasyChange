@@ -887,7 +887,10 @@ class CommandService:
                                             error=build.error, code=build.code or "BUILD_FAILED"))
             test_result = None
             if include_test:
-                test_result = self.execute_tokens("test", [], raw=":test")
+                # validate has just completed a successful .NET build, so do
+                # not make dotnet test rebuild the same solution again.
+                test_args = ["dotnet", "test", "--no-build", "--no-restore"] if self.workspace.kind == "DOTNET" else []
+                test_result = self.execute_tokens("test", test_args, raw=":test")
                 if not test_result.ok:
                     raise ProcessFailure(Result(False, "validate", data={"diff": diff, "build": build.to_dict(),
                                                                           "test": test_result.to_dict()},
