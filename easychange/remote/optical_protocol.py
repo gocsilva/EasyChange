@@ -8,7 +8,7 @@ import zlib
 from typing import Any
 
 PROTOCOL = "EC2"
-DEFAULT_CHUNK_CHARS = 420
+DEFAULT_CHUNK_CHARS = 260
 
 
 def encode_result_chunks(result: Any, *, chunk_chars: int = DEFAULT_CHUNK_CHARS) -> list[str]:

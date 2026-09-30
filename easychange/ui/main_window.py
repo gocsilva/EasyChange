@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+from PySide6.QtWidgets import (QApplication, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QMessageBox, QPushButton,
                                QPlainTextEdit, QSplitter, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
@@ -41,19 +41,21 @@ class MainWindow(QMainWindow):
             self._populate_tree()
         self.editor = CodeEditor(); self.editor.setPlaceholderText("Open a file with :open <path> or select it in FILES")
 
-        self.output = QPlainTextEdit(); self.output.setReadOnly(True); self.output.setMaximumHeight(190)
+        self.output = QPlainTextEdit(); self.output.setReadOnly(True)
+        self.output.setMaximumHeight(330 if self._machine else 190)
         self.output.setObjectName("machineResultRegion")
         self.machine_qrs: list[QLabel] = []
-        for index in range(4):
+        for index in range(8):
             label = QLabel()
             label.setObjectName("machineResultQr" if index == 0 else f"machineResultQr{index + 1}")
-            label.setFixedSize(170, 170)
+            label.setFixedSize(160, 160)
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.hide()
             self.machine_qrs.append(label)
         self.machine_qr = self.machine_qrs[0]
 
         self._optical_payloads: list[str] = []
+        self._optical_pixmaps: dict[str, QPixmap] = {}
         self._optical_page = 0
         self._optical_timer = QTimer(self)
         self._optical_timer.setInterval(280)
@@ -63,8 +65,14 @@ class MainWindow(QMainWindow):
         result_layout.setContentsMargins(0, 0, 0, 0)
         result_layout.setSpacing(4)
         result_layout.addWidget(self.output, 1)
-        for label in self.machine_qrs:
-            result_layout.addWidget(label)
+        self.qr_panel = QWidget()
+        qr_layout = QGridLayout(self.qr_panel)
+        qr_layout.setContentsMargins(0, 0, 0, 0)
+        qr_layout.setHorizontalSpacing(4)
+        qr_layout.setVerticalSpacing(4)
+        for index, label in enumerate(self.machine_qrs):
+            qr_layout.addWidget(label, index // 4, index % 4)
+        result_layout.addWidget(self.qr_panel, 0)
 
         self.split = QSplitter(Qt.Orientation.Horizontal)
         self.split.addWidget(self.tree)
@@ -188,6 +196,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet("QWidget { background:#101820; color:#f2f5f7; font-family: Consolas, monospace; }" if self._machine else "")
         self.tree.setVisible(not self._machine)
         self.select_workspace_button.setVisible(not self._machine)
+        self.output.setMaximumHeight(330 if self._machine else 190)
         for label in self.machine_qrs:
             label.setVisible(self._machine and bool(label.pixmap()))
         self.editor.highlighter.setDocument(None)
@@ -224,6 +233,7 @@ class MainWindow(QMainWindow):
     def _update_machine_qr(self, result) -> None:
         self._optical_timer.stop()
         self._optical_payloads = []
+        self._optical_pixmaps.clear()
         self._optical_page = 0
         for label in self.machine_qrs:
             label.clear()
@@ -255,30 +265,35 @@ class MainWindow(QMainWindow):
             label.setVisible(False)
 
         for label, payload in zip(self.machine_qrs, payloads):
-            code = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=1, border=2)
-            code.add_data(payload)
-            code.make(fit=True)
-            matrix = code.get_matrix()
-            height = len(matrix); width = len(matrix[0])
-            # Build one grayscale buffer instead of thousands of Qt
-            # setPixelColor calls. This keeps optical page swaps cheap enough
-            # for the faster 280 ms cadence.
-            pixels = bytes(0 if dark else 255 for row in matrix for dark in row)
-            image = QImage(
-                pixels, width, height, width, QImage.Format.Format_Grayscale8
-            ).copy()
-            # Never distort QR modules with fractional scaling. HDMI capture
-            # decoders are much more reliable when every module occupies an
-            # exact integer number of pixels.
-            scale = max(1, min(label.width() // width, label.height() // height))
-            render_width = width * scale
-            render_height = height * scale
-            pixmap = QPixmap.fromImage(image).scaled(
-                render_width,
-                render_height,
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.FastTransformation,
-            )
+            pixmap = self._optical_pixmaps.get(payload)
+            if pixmap is None:
+                # Fixed mask avoids qrcode's expensive 8-mask visual scoring.
+                # EC2 is machine-readable, so a valid deterministic mask is
+                # preferable to spending CPU choosing the prettiest one.
+                code = qrcode.QRCode(
+                    error_correction=qrcode.constants.ERROR_CORRECT_L,
+                    box_size=1,
+                    border=2,
+                    mask_pattern=3,
+                )
+                code.add_data(payload)
+                code.make(fit=True)
+                matrix = code.get_matrix()
+                height = len(matrix); width = len(matrix[0])
+                pixels = bytes(0 if dark else 255 for row in matrix for dark in row)
+                image = QImage(
+                    pixels, width, height, width, QImage.Format.Format_Grayscale8
+                ).copy()
+                scale = max(1, min(label.width() // width, label.height() // height))
+                render_width = width * scale
+                render_height = height * scale
+                pixmap = QPixmap.fromImage(image).scaled(
+                    render_width,
+                    render_height,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.FastTransformation,
+                )
+                self._optical_pixmaps[payload] = pixmap
             label.setPixmap(pixmap)
             label.setVisible(True)
 

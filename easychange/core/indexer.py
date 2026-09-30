@@ -32,11 +32,9 @@ _SYMBOL_PATTERNS = (
 
 
 def _extract_symbols(relative_path: str, content: str) -> list[tuple[str, str, int, int, str]]:
-    suffix = Path(relative_path).suffix.casefold()
     output: list[tuple[str, str, int, int, str]] = []
     for line_number, line in enumerate(content.splitlines(), 1):
-        patterns = _SYMBOL_PATTERNS[:1] if suffix == ".py" else _SYMBOL_PATTERNS[1:]
-        for kind, pattern in patterns:
+        for kind, pattern in _SYMBOL_PATTERNS:
             match = pattern.match(line)
             if not match:
                 continue
@@ -248,18 +246,36 @@ class Indexer:
             return int(db.execute("SELECT COUNT(*) FROM files").fetchone()[0])
 
     def symbols(self, name: str | None = None, path: str | None = None) -> list[dict]:
-        # Cold symbol queries should never wait for the full repository index.
-        # Resolve only candidate files through git-grep (or the explicit path)
-        # while the background index continues warming.
+        def load_rows() -> list[tuple]:
+            clauses: list[str] = []
+            params: list[object] = []
+            if name is not None:
+                clauses.append("name = ?")
+                params.append(name)
+            if path is not None:
+                clauses.append("path = ?")
+                params.append(path.replace("\\", "/"))
+            where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+            with self._connect() as db:
+                return db.execute(
+                    "SELECT path,name,kind,line,column_no,signature FROM symbols"
+                    + where + " ORDER BY path,line",
+                    params,
+                ).fetchall()
+
+        # Cold definition queries should not block on a full Git workspace scan.
+        # Resolve candidate files with git-grep and parse only those while the
+        # persistent SQLite/FTS index warms in the background.
         if not self._fully_indexed and (name is not None or path is not None):
             self.start_background_refresh()
             candidate_paths: list[str] = []
             if path is not None:
                 candidate_paths = [path.replace("\\", "/")]
-            elif name is not None:
+            elif name is not None and (self.root / ".git").exists():
                 candidate_paths = list(dict.fromkeys(
                     file_path for file_path, _ in self._git_search(
-                        name, regex=False, extension=None, path_prefix=None, case_sensitive=True
+                        name, regex=False, extension=None,
+                        path_prefix=None, case_sensitive=True
                     )
                 ))
             if candidate_paths:
@@ -282,24 +298,34 @@ class Indexer:
                             "column": column,
                             "signature": signature,
                         })
-                return output
+                if output or path is not None:
+                    return output
+
+            # Non-Git workspaces have no cheap cold symbol locator.
+            if not (self.root / ".git").exists():
+                self.refresh(force=True)
 
         if not self._fully_indexed:
             self.refresh()
-        clauses: list[str] = []
-        params: list[object] = []
-        if name is not None:
-            clauses.append("name = ?")
-            params.append(name)
-        if path is not None:
-            clauses.append("path = ?")
-            params.append(path.replace("\\", "/"))
-        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        with self._connect() as db:
-            rows = db.execute(
-                "SELECT path,name,kind,line,column_no,signature FROM symbols" + where + " ORDER BY path,line",
-                params,
-            ).fetchall()
+
+        rows = load_rows()
+        if not rows and (name is not None or path is not None):
+            # The index may be hot while an external tool has just created or
+            # changed a source file. Refresh only concrete candidates when
+            # possible; fall back to one full refresh for non-Git workspaces.
+            if path is not None:
+                self.update_path(path)
+            elif name is not None and (self.root / ".git").exists():
+                live = self._git_search(
+                    name, regex=False, extension=None,
+                    path_prefix=None, case_sensitive=True
+                )
+                for file_path in dict.fromkeys(file_path for file_path, _ in live):
+                    self.update_path(file_path)
+            else:
+                self.refresh(force=True)
+            rows = load_rows()
+
         return [
             {"id": f"S{index}", "file": row[0], "name": row[1], "kind": row[2],
              "line": row[3], "column": row[4], "signature": row[5]}

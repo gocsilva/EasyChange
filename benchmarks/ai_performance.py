@@ -38,6 +38,10 @@ def main() -> int:
             encoding="utf-8",
         )
 
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "add", "src", "tests"], cwd=root, check=True)
+
         service = CommandService(Workspace.open(root))
         try:
             cold_ms, cold = timed(service, ":search TargetService")
@@ -67,6 +71,7 @@ def main() -> int:
                 or not warm.ok
                 or not study.ok
                 or not read.ok
+                or metrics["cold_search_ms"] > 1000
                 or metrics["warm_search_ms"] > 250
                 or metrics["read_many_ms"] > 250
             )

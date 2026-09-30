@@ -391,7 +391,8 @@ def test_large_journal_snapshots_are_content_addressed_and_restart_safe(tmp_path
     service = CommandService(Workspace.open(tmp_path))
     replacement = original.replace("line 200", "LINE 200")
     assert service.files.write("large.txt", replacement, force=True)
-    service._record("write", "large.txt", original, replacement)
+    service.last_command = "write"
+    service._record("large.txt", original, replacement)
     journal_path = tmp_path / ".easychange" / "journal.jsonl"
     assert journal_path.stat().st_size < len(original.encode("utf-8"))
     assert list((tmp_path / ".easychange" / "blobs").glob("*.zlib"))
@@ -411,3 +412,39 @@ def test_process_output_compaction_preserves_diagnostics(service):
     assert result["output_truncated"] is True
     assert len(result["stdout"]) <= 12000
     assert "CS1234" in result["diagnostics"]
+
+
+
+def test_git_watcher_reindexes_only_changed_paths(tmp_path):
+    import subprocess
+    from easychange.core.indexer import Indexer
+    from easychange.core.watcher import WorkspaceWatcher
+
+    source = tmp_path / "tracked.cs"
+    source.write_text("class Before {}\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tracked.cs"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=EasyChange Test", "-c", "user.email=test@example.invalid",
+         "commit", "-qm", "initial"],
+        cwd=tmp_path, check=True,
+    )
+
+    indexer = Indexer(tmp_path)
+    indexer.refresh(force=True)
+    watcher = WorkspaceWatcher(indexer)
+
+    first = watcher.poll_once()
+    assert first["backend"] == "git-incremental"
+    assert first["indexed"] == 0
+
+    source.write_text("class After {}\n", encoding="utf-8")
+    changed = watcher.poll_once()
+    assert changed["indexed"] == 1
+    assert changed["files"] == 1
+
+    unchanged = watcher.poll_once()
+    assert unchanged["indexed"] == 0
+    assert unchanged["files"] == 0
+    assert unchanged["cached"] is True
+    assert indexer.search("After")

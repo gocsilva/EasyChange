@@ -502,7 +502,7 @@ class CommandService:
                     "status", "diff", "branch", "log", "build", "test", "run", "processes", "stop", "errors", "next-error", "previous-error", "remote", "remote-guide", "remote-profile", "prepare-hid", "set", "machine", "human", "quit"],
                     "capabilities": {"workspace": True, "git": "GIT" in self.workspace.adapters,
                     "build_test": self.workspace.adapters, "index": True, "symbols": True,
-                    "ai_machine": {"optical_protocol": "EC2", "qr_slots": 4, "chunked_results": True,
+                    "ai_machine": {"optical_protocol": "EC2", "qr_slots": 8, "chunked_results": True,
                                    "composite_study": True, "read_many": True, "validate": True,
                                    "cold_search": "git-grep", "warm_search": "sqlite-fts5"},
                     "remote_control": {"input": "ESP32_HID", "output": "HDMI",
