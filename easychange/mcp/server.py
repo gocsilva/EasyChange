@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
+import json
 import sys
 from pathlib import Path
 
 from easychange.core.command_service import CommandService
 from easychange.core.workspace import Workspace
+from easychange.remote.agent_profile import REMOTE_PROFILE, remote_guide_markdown, remote_quickstart as make_remote_quickstart
 
 
 def create_server(workspace_path: str | Path = "."):
@@ -15,8 +18,28 @@ def create_server(workspace_path: str | Path = "."):
     except ImportError as exc:
         raise RuntimeError('MCP support is optional. Install with: pip install -e ".[mcp]"') from exc
     service = CommandService(Workspace.open(workspace_path))
-    server = MCPServer("EasyChange")
+    root = str(service.workspace.root_path)
+    server = MCPServer(
+        "EasyChange",
+        instructions=(
+            f"EasyChange is bound to workspace {root}. Start each task with state and capabilities. "
+            "Use remote_guide for HDMI+ESP32 HID or Android relay operation. When MCP tools are connected, "
+            "operate through them directly instead of OCR/HID. Keep paths in the bound workspace, inspect "
+            "diffs, preserve returned IDs, and use undo/transactions for reversible edits. The stdio server "
+            "is not network reachable."
+        ),
+    )
     server._easychange_service = service
+
+    @server.resource("easychange://remote-guide", name="EasyChange remote guide", mime_type="text/markdown")
+    def remote_guide() -> str:
+        """Persistent instructions for MCP, HDMI/ESP HID, and Android relay clients."""
+        return remote_guide_markdown()
+
+    @server.resource("easychange://remote-profile", name="EasyChange remote profile", mime_type="application/json")
+    def remote_profile() -> str:
+        """Machine-readable startup, workflow, and transport guidance."""
+        return json.dumps(REMOTE_PROFILE, ensure_ascii=False, separators=(",", ":"))
 
     @server.tool()
     def state() -> dict:
@@ -27,6 +50,31 @@ def create_server(workspace_path: str | Path = "."):
     def capabilities() -> dict:
         """List supported EasyChange commands."""
         return service.execute_tokens("capabilities", []).data
+
+    @server.tool()
+    def remote_quickstart() -> dict:
+        """Return ready-to-run GUI and MCP commands for this host and bound workspace."""
+        return make_remote_quickstart(service.workspace.root_path, sys.executable)
+
+    @server.tool()
+    def prepare_hid_session() -> dict:
+        """Set compact HID output and Machine Mode for the current EasyChange session."""
+        result = service.execute(":prepare-hid")
+        return {"result": result.to_dict(), "next": "Launch the GUI with --machine --hid, or focus its command field with Ctrl+K.",
+                "workspace": root}
+
+    @server.tool()
+    def launch_hid_gui() -> dict:
+        """Start the GUI on this host in Machine Mode with OCR-readable compact results."""
+        if importlib.util.find_spec("PySide6") is None:
+            return {"ok": False, "code": "GUI_DEPENDENCY_MISSING",
+                    "setup": make_remote_quickstart(service.workspace.root_path, sys.executable)["gui_setup_command"]}
+        process_id = service.ids.next("P")
+        outcome = service.processes.start(
+            [sys.executable, "-m", "easychange.gui", root, "--machine", "--hid"], process_id
+        )
+        service._persist_state()
+        return {"ok": True, **outcome, "workspace": root, "focus_shortcut": "Ctrl+K"}
 
     @server.tool()
     def command(text: str) -> dict:

@@ -22,9 +22,12 @@ class Result:
             import json
             return json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"))
         if output == "compact":
+            import json
             if not self.ok:
-                return f"ERR {self.code or 'ERROR'} {self.error or ''}".strip()
-            return f"OK {self.command_id or '-'} {self.command} {self.duration_ms}ms"
+                details = json.dumps({"error": self.error, "data": self.data}, ensure_ascii=False, separators=(",", ":"))
+                return f"ERR {self.command_id or '-'} {self.code or 'ERROR'} {self.command} {details}"
+            details = json.dumps(self.data, ensure_ascii=False, separators=(",", ":"))
+            return f"OK {self.command_id or '-'} {self.command} {self.duration_ms}ms {details}"
         status = "OK" if self.ok else "ERROR"
         lines = [status, f"COMMAND: {self.command.upper()}"]
         if self.command_id:

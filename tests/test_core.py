@@ -131,3 +131,32 @@ def test_high_level_rename_scaffold_git_router_and_clear(service, tmp_path):
     assert service.execute(":git status").code == "ADAPTER_UNAVAILABLE"
     service.execute(":search OldName")
     assert service.execute(":clear").data["cleared"]
+
+
+def test_compact_hid_results_keep_machine_readable_data():
+    from easychange.core.result import Result
+    import json
+
+    rendered = Result(True, "search", {"matches": [{"id": "R1", "file": "a.py"}]}, command_id="C4").render("compact")
+    payload = json.loads(rendered.split(" ", 4)[4])
+    assert payload["matches"][0]["id"] == "R1"
+    failed = Result(False, "write", error="conflict", code="EXTERNAL_CHANGE", command_id="C5").render("compact")
+    assert "EXTERNAL_CHANGE" in failed and "conflict" in failed
+
+
+def test_remote_quickstart_contains_local_gui_and_stdio_mcp_config(tmp_path):
+    import sys
+    from easychange.remote.agent_profile import remote_quickstart
+
+    setup = remote_quickstart(tmp_path, sys.executable)
+    assert "--machine --hid" in setup["gui_command"]
+    assert setup["mcp_config"]["transport"] == "stdio"
+    assert setup["mcp_config"]["args"][-1] == str(tmp_path.resolve())
+
+
+def test_remote_boot_card_and_prepare_hid(service):
+    boot = service.execute(":remote")
+    assert boot.ok and boot.data["next"] == [":state", ":capabilities", ":remote-guide"]
+    prepared = service.execute(":prepare-hid")
+    assert prepared.ok and prepared.data["transport"] == "hid"
+    assert service.machine and service.output == "compact"

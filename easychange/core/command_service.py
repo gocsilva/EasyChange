@@ -21,6 +21,7 @@ from .state import MachineSession
 from .symbol_service import SymbolService
 from .workspace import Workspace
 from .watcher import WorkspaceWatcher
+from ..remote.agent_profile import REMOTE_PROFILE, remote_guide_markdown
 
 
 @dataclass
@@ -181,7 +182,7 @@ class CommandService:
                     "new", "mkdir", "write", "append", "insert", "replace", "replace-line", "replace-range", "delete", "rename", "move", "stat", "hash", "exists",
                     "rename-symbol", "create-class", "create-interface", "create-test", "format", "fix-imports", "organize-imports",
                     "journal", "undo", "redo", "begin", "commit", "rollback", "snapshot", "lock", "unlock", "locks", "watch", "batch", "macro", "alias", "complete", "history", "repeat", "clear",
-                    "status", "diff", "branch", "log", "build", "test", "run", "processes", "stop", "errors", "next-error", "previous-error", "set", "machine", "human", "quit"],
+                    "status", "diff", "branch", "log", "build", "test", "run", "processes", "stop", "errors", "next-error", "previous-error", "remote", "remote-guide", "remote-profile", "prepare-hid", "set", "machine", "human", "quit"],
                     "capabilities": {"workspace": True, "git": "GIT" in self.workspace.adapters,
                     "build_test": self.workspace.adapters, "index": True, "symbols": True, "api": True, "mcp": True}}
         if name == "state":
@@ -538,6 +539,20 @@ class CommandService:
             else: raise ValueError("Supported settings: output=text|json|compact, transport=hid|local")
             self._persist_state()
             return {"setting": args[0], "value": args[1]}
+        if name == "remote":
+            return {"ready": True, "workspace": str(self.workspace.root_path),
+                    "mode": "MACHINE" if self.machine else "HUMAN",
+                    "transport": self.state_store.data.get("transport", "local").upper(), "output": self.output.upper(),
+                    "next": [":state", ":capabilities", ":remote-guide"],
+                    "workflow": REMOTE_PROFILE["workflow"], "command_focus": "Ctrl+K", "submit": "Enter"}
+        if name == "remote-guide": return {"guide": remote_guide_markdown()}
+        if name == "remote-profile": return REMOTE_PROFILE
+        if name == "prepare-hid":
+            self.machine = True; self.output = "compact"
+            self.state_store.data["transport"] = "hid"
+            self._persist_state()
+            return {"ready": True, "machine_mode": True, "transport": "hid", "workspace": str(self.workspace.root_path),
+                    "next": ":state", "focus": "Ctrl+K"}
         if name == "machine": self.machine = True; self._persist_state(); return {"machine_mode": True, "focus": "COMMAND"}
         if name == "human": self.machine = False; self._persist_state(); return {"machine_mode": False}
         if name in {"quit", "exit"}: return {"quit": True}

@@ -14,9 +14,16 @@ from easychange.ui.editor import BasicHighlighter, CodeEditor
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, workspace: Workspace) -> None:
+    def __init__(self, workspace: Workspace, *, machine_mode: bool | None = None, hid_mode: bool = False) -> None:
         super().__init__()
         self.service = CommandService(workspace)
+        self._machine = self.service.machine if machine_mode is None else machine_mode
+        self.service.machine = self._machine
+        if hid_mode:
+            self.service.output = "compact"
+            self.service.state_store.data["transport"] = "hid"
+            self.service.state_store.data["output_mode"] = "compact"
+            self.service._persist_state()
         self.setWindowTitle("EasyChange")
         self.resize(1100, 720)
         central = QWidget(); layout = QVBoxLayout(central)
@@ -28,14 +35,13 @@ class MainWindow(QMainWindow):
         self.output = QPlainTextEdit(); self.output.setReadOnly(True); self.output.setMaximumHeight(180)
         split = QSplitter(Qt.Orientation.Horizontal); split.addWidget(self.tree); split.addWidget(self.editor)
         split.setStretchFactor(1, 1)
-        self.command = QLineEdit(); self.command.setPlaceholderText("COMMAND > :help")
+        self.command = QLineEdit(); self.command.setPlaceholderText("COMMAND > :remote-guide | Ctrl+K | Enter")
         layout.addWidget(self.header); layout.addWidget(split, 1); layout.addWidget(self.output); layout.addWidget(self.command)
         self.setCentralWidget(central)
         self.command.returnPressed.connect(self.execute_command)
         self.tree.itemActivated.connect(self.open_selected)
         self.tree.itemDoubleClicked.connect(self.open_selected)
         self.tree.currentItemChanged.connect(self.preview_selected)
-        self._machine = False
         self._active_path: str | None = None
         self._add_shortcut("Ctrl+K", self.focus_command)
         self._add_shortcut("F12", self.toggle_machine)
@@ -54,7 +60,10 @@ class MainWindow(QMainWindow):
         self._add_shortcut("F7", lambda: self._run_command(":errors"))
         self._add_shortcut("F8", lambda: self._run_command(":next-error"))
         self._add_shortcut("Shift+F8", lambda: self._run_command(":previous-error"))
-        self.focus_command()
+        if self._machine:
+            self._apply_machine_style()
+        self._refresh_header()
+        self._run_command(":remote")
 
     def _add_shortcut(self, sequence: str, callback) -> None:
         shortcut = QShortcut(QKeySequence(sequence), self); shortcut.activated.connect(callback)
@@ -65,11 +74,19 @@ class MainWindow(QMainWindow):
     def toggle_machine(self) -> None:
         self._machine = not self._machine
         self.service.machine = self._machine
+        self.service._persist_state()
+        self._apply_machine_style()
+        self._refresh_header()
+        self.focus_command()
+
+    def _apply_machine_style(self) -> None:
         self.setStyleSheet("QWidget { background:#101820; color:#f2f5f7; font-family: Consolas, monospace; }" if self._machine else "")
-        self.header.setText(f"EasyChange {'MACHINE MODE' if self._machine else 'HUMAN MODE'} | {self.service.workspace.root_path} | FOCUS: COMMAND")
         self.editor.highlighter.setDocument(None)
         self.editor.highlighter = BasicHighlighter(self.editor.document(), high_contrast=self._machine)
-        self.focus_command()
+
+    def _refresh_header(self) -> None:
+        transport = "HID/COMPACT" if self.service.output == "compact" else "TEXT"
+        self.header.setText(f"EasyChange | {'MACHINE' if self._machine else 'HUMAN'} | {transport} | {self.service.workspace.root_path} | FOCUS: COMMAND")
 
     def execute_command(self) -> None:
         text = self.command.text(); self.command.clear()
@@ -77,6 +94,10 @@ class MainWindow(QMainWindow):
 
     def _run_command(self, text: str) -> None:
         result = self.service.execute(text)
+        if self._machine != self.service.machine:
+            self._machine = self.service.machine
+            self._apply_machine_style()
+        self._refresh_header()
         self.output.setPlainText(result.render(self.service.output))
         if result.ok and (result.data.get("path") or result.data.get("file")) and text.lstrip(":").split(maxsplit=1)[0] in {"open", "read", "context", "goto", "reload"}:
             try:
@@ -135,8 +156,8 @@ class MainWindow(QMainWindow):
         return '"' + value.replace('"', '\\"') + '"'
 
 
-def run(workspace_path: str = ".") -> int:
+def run(workspace_path: str = ".", *, machine_mode: bool | None = None, hid_mode: bool = False) -> int:
     app = QApplication.instance() or QApplication([])
-    window = MainWindow(Workspace.open(Path(workspace_path)))
+    window = MainWindow(Workspace.open(Path(workspace_path)), machine_mode=machine_mode, hid_mode=hid_mode)
     window.show()
     return app.exec()

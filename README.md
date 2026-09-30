@@ -50,7 +50,7 @@ Edits are recorded in a persistent `.easychange/` journal. Undo/redo checks file
 
 ## B.M.O. and remote operation
 
-Compact output, persisted short IDs, line-numbered reads, batch commands, and the keyboard-focused GUI reduce HDMI/HID interaction cost. The transport is neutral and does not itself control ESP hardware. See [REMOTE_CONTROL.md](docs/REMOTE_CONTROL.md), [PROTOCOL.md](docs/PROTOCOL.md), and [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Compact output with JSON payloads, persisted short IDs, line-numbered reads, batch commands, and the keyboard-focused GUI reduce HDMI/HID interaction cost. Start the remote UI with `scripts/Start-EasyChangeRemote.ps1 -Workspace '<project path>'`. MCP publishes an automatic remote guide/profile and can prepare or launch the HID GUI. Repository `AGENTS.md` and the Codex `easychange-remote-control` skill preserve these instructions for future agent tasks. See [REMOTE_CONTROL.md](docs/REMOTE_CONTROL.md), [ANDROID_REMOTE.md](docs/ANDROID_REMOTE.md), [PROTOCOL.md](docs/PROTOCOL.md), and [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 The current repository does not include Tree-sitter/LSP servers, authenticated network access, or physical HDMI/ESP32 firmware. The HTTP API binds to loopback by default.
 
