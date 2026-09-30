@@ -16,6 +16,7 @@ SKIP_DIRS = {".git", ".easychange", ".venv", "venv", "node_modules", "bin", "obj
              "__pycache__", ".gradle", ".idea", ".vs", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 MAX_INDEX_BYTES = 2 * 1024 * 1024
 _INDEX_WORKERS = max(2, min(8, os.cpu_count() or 4))
+_INDEX_VERSION = "2"
 
 _CS_MODIFIERS = r"(?:(?:public|private|protected|internal|sealed|abstract|static|partial|new|readonly|ref|unsafe)\s+)*"
 _SYMBOL_PATTERNS = (
@@ -59,8 +60,10 @@ class Indexer:
         self._last_refresh_at = 0.0
         self._last_refresh_result = {"indexed": 0, "removed": 0, "files": 0, "cached": False}
         self._fts_enabled = False
+        self._force_rebuild = False
         with self._connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, extension TEXT, size INTEGER, mtime_ns INTEGER, sha256 TEXT, language TEXT, content TEXT)")
+            db.execute("CREATE TABLE IF NOT EXISTS index_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             db.execute("""CREATE TABLE IF NOT EXISTS symbols(
                 path TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, line INTEGER NOT NULL,
                 column_no INTEGER NOT NULL, signature TEXT NOT NULL, file_hash TEXT NOT NULL
@@ -72,6 +75,8 @@ class Indexer:
                 self._fts_enabled = True
             except sqlite3.OperationalError:
                 self._fts_enabled = False
+            current_version = db.execute("SELECT value FROM index_meta WHERE key='version'").fetchone()
+            self._force_rebuild = not current_version or current_version[0] != _INDEX_VERSION
 
     @contextmanager
     def _connect(self):
@@ -172,7 +177,8 @@ class Indexer:
         seen: set[str] = set()
         changed: list[tuple[Path, str, int, int]] = []
         with self._lock, self._connect() as db:
-            existing = {row[0]: row[1:3] for row in db.execute("SELECT path,size,mtime_ns FROM files")}
+            persisted = {row[0]: row[1:3] for row in db.execute("SELECT path,size,mtime_ns FROM files")}
+        existing = {} if self._force_rebuild else persisted
 
         for path in self.root.rglob("*"):
             try:
@@ -195,7 +201,7 @@ class Indexer:
         else:
             loaded = []
 
-        removed = set(existing) - seen
+        removed = set(persisted) - seen
         with self._lock, self._connect() as db:
             for (path, relative, _, _), row in zip(changed, loaded):
                 rel, size, mtime_ns, digest, content, symbols = row
@@ -207,7 +213,9 @@ class Indexer:
                 db.executemany("DELETE FROM symbols WHERE path=?", [(item,) for item in removed])
                 if self._fts_enabled:
                     db.executemany("DELETE FROM files_fts WHERE path=?", [(item,) for item in removed])
+            db.execute("INSERT OR REPLACE INTO index_meta(key,value) VALUES('version',?)", (_INDEX_VERSION,))
 
+        self._force_rebuild = False
         result = {"indexed": len(loaded), "removed": len(removed), "files": len(seen),
                   "cached": False, "fts": self._fts_enabled}
         self._last_refresh_at = time.monotonic()
