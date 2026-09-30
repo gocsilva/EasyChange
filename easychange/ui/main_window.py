@@ -23,7 +23,10 @@ class MainWindow(QMainWindow):
     _OPTICAL_NORMAL_SLOTS = 4
     _OPTICAL_BURST_SLOTS = 16
     _OPTICAL_BURST_COLUMNS = 4
-    _OPTICAL_BURST_THRESHOLD = 8
+    # More than one 4-QR row should not rotate in compact mode.
+    # Switch to the 16-slot canvas so 5-16 chunks are visible simultaneously
+    # and duplicated padding adds optical redundancy.
+    _OPTICAL_BURST_THRESHOLD = 4
 
     def __init__(self, workspace: Workspace, *, machine_mode: bool | None = None, hid_mode: bool = False) -> None:
         super().__init__()
@@ -68,7 +71,7 @@ class MainWindow(QMainWindow):
         self._optical_page = 0
         self._optical_burst = False
         self._optical_timer = QTimer(self)
-        self._optical_timer.setInterval(280)
+        self._optical_timer.setInterval(420)
         self._optical_timer.timeout.connect(self._render_optical_page)
 
         self.result_panel = QWidget(); result_layout = QHBoxLayout(self.result_panel)
@@ -261,7 +264,9 @@ class MainWindow(QMainWindow):
             self.output.setVisible(True)
             self.result_panel.setMinimumHeight(0)
             self.result_panel.setMaximumHeight(340 if self._machine else 200)
-            self._optical_timer.setInterval(280)
+            # Normal multi-page mode is only used for <=4 visible slots;
+            # leave each page up long enough for HDMI capture + QR decode.
+            self._optical_timer.setInterval(420)
     def _update_machine_qr(self, result) -> None:
         self._optical_timer.stop()
         self._optical_payloads = []

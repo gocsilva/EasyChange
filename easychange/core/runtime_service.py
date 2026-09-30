@@ -295,21 +295,22 @@ class ProjectRuntimeService:
                            "urls": [], "swagger_candidates": []})
         return output
 
-    def profile(self, profile_id: str = "") -> dict[str, Any]:
-        profiles = self.profiles()
+    def profile(self, profile_id: str = "", *, profiles: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """Select a runtime profile, optionally reusing an already-detected list."""
+        available = profiles if profiles is not None else self.profiles()
         if profile_id:
-            for item in profiles:
+            for item in available:
                 if item.get("id") == profile_id or item.get("project") == profile_id:
                     return item
             raise LookupError(f"Runtime profile not found: {profile_id}")
-        runnable = [item for item in profiles if item.get("runnable")]
+        runnable = [item for item in available if item.get("runnable")]
         api = next((item for item in runnable if "api" in str(item.get("kind"))), None)
         if api:
             return api
         if runnable:
             return runnable[0]
-        if profiles:
-            return profiles[0]
+        if available:
+            return available[0]
         raise RuntimeError("No runtime profile detected")
 
     def start(self, process_id: str, profile_id: str = "") -> dict:
@@ -322,7 +323,7 @@ class ProjectRuntimeService:
 
     def smart_test(self, profile_id: str = "", timeout: int = 600) -> dict:
         profiles = self.profiles()
-        selected = self.profile(profile_id) if profile_id else None
+        selected = self.profile(profile_id, profiles=profiles) if profile_id else None
         commands = []
         if selected and selected.get("test_argv"):
             commands.append((selected["id"], list(selected["test_argv"])))
@@ -343,7 +344,7 @@ class ProjectRuntimeService:
         if commands:
             return {"passed": all(item.get("returncode") == 0 for item in results), "mode": "test", "results": results}
 
-        target = selected or self.profile("")
+        target = selected or self.profile("", profiles=profiles)
         if not target.get("run_argv"):
             raise RuntimeError("No tests or runnable smoke profile detected")
         process_id = f"SMOKE{int(time.time() * 1000) % 1000000}"

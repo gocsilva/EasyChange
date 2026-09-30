@@ -45,32 +45,84 @@ class ProcessService:
         self.last_execution: dict | None = None
 
     def run(self, argv: list[str], timeout: int = 300) -> dict:
+        """Run a command without buffering unbounded stdout/stderr in RAM."""
         if not argv:
             raise ValueError("Command is empty")
+
+        stamp = f"run-{time.time_ns()}"
+        stdout_path = self.root / f"{stamp}.out"
+        stderr_path = self.root / f"{stamp}.err"
         started = time.monotonic()
-        completed = subprocess.run(
-            argv, cwd=self.cwd, text=True, capture_output=True,
-            timeout=timeout, check=False, shell=False,
-        )
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
-        tail_limit = 4000 if completed.returncode == 0 else 12000
-        self.last_execution = {
-            "argv": argv,
-            "returncode": completed.returncode,
-            "stdout": stdout[-tail_limit:],
-            "stderr": stderr[-tail_limit:],
-            "diagnostics": _diagnostics(stdout, stderr),
-            "stdout_chars": len(stdout),
-            "stderr_chars": len(stderr),
-            "output_truncated": len(stdout) > tail_limit or len(stderr) > tail_limit,
-            "duration_ms": int((time.monotonic() - started) * 1000),
-        }
-        return self.last_execution
+
+        try:
+            with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+                completed = subprocess.run(
+                    argv,
+                    cwd=self.cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    timeout=timeout,
+                    check=False,
+                    shell=False,
+                )
+
+            stdout_size = stdout_path.stat().st_size if stdout_path.exists() else 0
+            stderr_size = stderr_path.stat().st_size if stderr_path.exists() else 0
+            tail_limit = 4000 if completed.returncode == 0 else 12000
+
+            def tail(path: Path, limit: int) -> str:
+                try:
+                    with path.open("rb") as handle:
+                        size = handle.seek(0, 2)
+                        handle.seek(max(0, size - limit))
+                        return handle.read().decode("utf-8", errors="replace")
+                except OSError:
+                    return ""
+
+            diagnostics: list[str] = []
+            seen: set[str] = set()
+            for path in (stdout_path, stderr_path):
+                try:
+                    with path.open("r", encoding="utf-8", errors="replace") as handle:
+                        for line in handle:
+                            if not _DIAGNOSTIC_RE.search(line):
+                                continue
+                            compact = line.strip()
+                            if compact and compact not in seen:
+                                seen.add(compact)
+                                diagnostics.append(compact)
+                                if len(diagnostics) > 400:
+                                    diagnostics = diagnostics[-200:]
+                except OSError:
+                    continue
+
+            self.last_execution = {
+                "argv": argv,
+                "returncode": completed.returncode,
+                "stdout": tail(stdout_path, tail_limit),
+                "stderr": tail(stderr_path, tail_limit),
+                "diagnostics": "\n".join(diagnostics[-200:])[-12000:],
+                "stdout_chars": stdout_size,
+                "stderr_chars": stderr_size,
+                "output_truncated": stdout_size > tail_limit or stderr_size > tail_limit,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "capture_backend": "tempfile-tail",
+            }
+            return self.last_execution
+        finally:
+            for path in (stdout_path, stderr_path):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def start(self, argv: list[str], process_id: str) -> dict:
         if not argv:
             raise ValueError("Command is empty")
+        existing = self._processes.get(process_id)
+        if existing is not None and existing.process.poll() is None:
+            raise RuntimeError(f"Process already running: {process_id}")
         stdout_path, stderr_path = self.root / f"{process_id}.out", self.root / f"{process_id}.err"
         stdout_file, stderr_file = stdout_path.open("wb"), stderr_path.open("wb")
         try:
@@ -116,8 +168,11 @@ class ProcessService:
             raise LookupError(f"Process not found: {process_id}")
         def tail(path: Path) -> str:
             try:
-                data = path.read_bytes()
-                return data[-max(512, int(limit)):].decode("utf-8", errors="replace")
+                size_limit = max(512, int(limit))
+                with path.open("rb") as handle:
+                    size = handle.seek(0, 2)
+                    handle.seek(max(0, size - size_limit))
+                    return handle.read().decode("utf-8", errors="replace")
             except OSError:
                 return ""
         return {

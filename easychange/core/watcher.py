@@ -77,23 +77,63 @@ class WorkspaceWatcher:
         return stat.st_size, stat.st_mtime_ns
 
     def _poll_git(self) -> dict:
-        dirty = self._git_paths(["diff", "HEAD", "--name-only", "-z", "--"])
-        dirty.update(self._git_paths(["ls-files", "--others", "--exclude-standard", "-z"]))
+        """Poll Git with one status process in the common no-HEAD-change case."""
+        raw = self._git([
+            "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all",
+        ])
+        records = raw.split(b"\0")
+        dirty: set[str] = set()
+        head: str | None = None
+        index = 0
 
-        head = self._head()
+        while index < len(records):
+            raw_record = records[index]
+            index += 1
+            if not raw_record:
+                continue
+            record = raw_record.decode("utf-8", errors="replace")
+
+            if record.startswith("# branch.oid "):
+                value = record[len("# branch.oid "):].strip()
+                head = None if value == "(initial)" else value
+                continue
+            if record.startswith("? "):
+                dirty.add(record[2:].replace("\\", "/"))
+                continue
+            if record.startswith("1 "):
+                parts = record.split(" ", 8)
+                if len(parts) == 9:
+                    dirty.add(parts[8].replace("\\", "/"))
+                continue
+            if record.startswith("u "):
+                parts = record.split(" ", 10)
+                if len(parts) >= 11:
+                    dirty.add(parts[-1].replace("\\", "/"))
+                continue
+            if record.startswith("2 "):
+                # Porcelain v2 -z stores the destination path in this record
+                # and the original path as the next NUL-delimited field.
+                parts = record.split(" ", 9)
+                if len(parts) == 10:
+                    dirty.add(parts[9].replace("\\", "/"))
+                if index < len(records) and records[index]:
+                    original = records[index].decode("utf-8", errors="replace")
+                    dirty.add(original.replace("\\", "/"))
+                    index += 1
+
         affected: set[str] = set()
         sentinel = object()
-
         for relative in dirty:
             fingerprint = self._fingerprint(relative)
             if self._fingerprints.get(relative, sentinel) != fingerprint:
                 affected.add(relative)
 
-        # A path disappearing from git status means it was reverted, deleted,
-        # committed, or otherwise returned to a clean state. Reindex it once.
+        # A path disappearing from status was reverted, committed or removed
+        # from the worktree. Reindex it once to restore the tracked contents.
         affected.update(set(self._fingerprints) - dirty)
 
-        if self._last_head and head and head != self._last_head:
+        head_changed = bool(self._last_head and head and head != self._last_head)
+        if head_changed:
             affected.update(
                 self._git_paths([
                     "diff", "--name-only", "-z",
@@ -120,6 +160,8 @@ class WorkspaceWatcher:
             "files": len(affected),
             "cached": not bool(affected),
             "backend": "git-incremental",
+            "status_backend": "porcelain-v2",
+            "git_processes": 1 + int(head_changed),
         }
 
     def poll_once(self) -> dict:

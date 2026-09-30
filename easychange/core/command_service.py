@@ -640,16 +640,32 @@ class CommandService:
                     "remote_control": {"input": "ESP32_HID", "output": "HDMI",
                                        "mcp_on_remote_pc": False, "api_on_remote_pc": False}}}
         if name == "state":
+            compact = "--compact" in args or "compact" in args
+            base = {
+                "state": "READY",
+                "workspace": str(self.workspace.root_path),
+                "workspace_id": "W1",
+                "instance_id": self.instance_id,
+                "file": self.state_store.data.get("current_file"),
+                "line": self.state_store.data.get("line", 1),
+                "transaction": self.transaction_id or "NONE",
+                "index": "READY" if self.indexer.ready else "WARMING",
+                "machine_mode": self.machine,
+                "focus": "COMMAND",
+            }
+            if compact:
+                return base
             git = self.git.status() if "GIT" in self.workspace.adapters else None
-            return {"state": "READY", "workspace": str(self.workspace.root_path), "workspace_id": "W1",
-                    "instance_id": self.instance_id,
-                    "name": self.workspace.name, "type": self.workspace.kind, "adapters": self.workspace.adapters,
-                    "file": self.state_store.data.get("current_file"), "line": self.state_store.data.get("line", 1),
-                    "dirty": self.state_store.data.get("dirty", False), "git": git,
-                    "transaction": self.transaction_id or "NONE", "process": self.processes.list(),
-                    "index": "READY" if self.indexer.ready else "WARMING",
-                    "index_details": self.indexer.status(),
-                    "machine_mode": self.machine, "focus": "COMMAND"}
+            return {
+                **base,
+                "name": self.workspace.name,
+                "type": self.workspace.kind,
+                "adapters": self.workspace.adapters,
+                "dirty": self.state_store.data.get("dirty", False),
+                "git": git,
+                "process": self.processes.list(),
+                "index_details": self.indexer.status(),
+            }
         if name in {"pwd", "workspace"}:
             return {"path": str(self.workspace.root_path), "id": "W1", "type": self.workspace.kind}
         if name in {"files", "tree", "projects"}:
@@ -725,18 +741,64 @@ class CommandService:
             term = args[0]
             limit = _option_int(args, "--limit", 8, minimum=1, maximum=20)
             radius = _option_int(args, "--context", 3, minimum=0, maximum=20)
-            matches = self._register_matches(self.indexer.search(term, limit=limit))
+            warnings = []
+
+            try:
+                matches = self._register_matches(self.indexer.search(term, limit=limit))
+            except Exception as exc:
+                matches = []
+                warnings.append({
+                    "stage": "search",
+                    "error": type(exc).__name__,
+                    "message": str(exc)[:300],
+                })
+
             for match in matches:
                 start = max(1, int(match["line"]) - radius)
-                match["context"] = self.files.read(match["file"], start, radius * 2 + 1)["lines"]
-            definitions = self.symbol_service.definition(term)
-            references = self._register_matches(self.symbol_service.references(term, min(24, limit * 3)))
+                try:
+                    match["context"] = self.files.read(
+                        match["file"], start, radius * 2 + 1
+                    )["lines"]
+                except Exception as exc:
+                    match["context"] = []
+                    warnings.append({
+                        "stage": "context",
+                        "file": match.get("file"),
+                        "line": match.get("line"),
+                        "error": type(exc).__name__,
+                        "message": str(exc)[:300],
+                    })
+
+            try:
+                definitions = self.symbol_service.definition(term)
+            except Exception as exc:
+                definitions = []
+                warnings.append({
+                    "stage": "definition",
+                    "error": type(exc).__name__,
+                    "message": str(exc)[:300],
+                })
+
+            try:
+                references = self._register_matches(
+                    self.symbol_service.references(term, min(24, limit * 3))
+                )
+            except Exception as exc:
+                references = []
+                warnings.append({
+                    "stage": "references",
+                    "error": type(exc).__name__,
+                    "message": str(exc)[:300],
+                })
+
             files = []
             seen = set()
             for item in [*definitions, *matches, *references]:
                 path = item.get("file")
                 if path and path not in seen:
-                    seen.add(path); files.append(path)
+                    seen.add(path)
+                    files.append(path)
+
             return {
                 "term": term,
                 "definitions": definitions[:8],
@@ -744,6 +806,8 @@ class CommandService:
                 "references": references,
                 "files": files[:16],
                 "index": "incremental",
+                "complete": not warnings,
+                "warnings": warnings,
             }
 
         if name == "read-many":

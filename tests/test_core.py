@@ -686,3 +686,175 @@ def test_structured_result_has_stable_schema_and_primary(service):
     assert result.data["count"] == 1
     assert result.data["primary"] == result.data["results"][0]
     assert result.data["primary"]["command"] == "read"
+
+
+
+def test_git_watcher_uses_one_status_process_when_head_is_stable(tmp_path):
+    from easychange.core.indexer import Indexer
+    from easychange.core.watcher import WorkspaceWatcher
+
+    indexer = Indexer(tmp_path)
+    watcher = WorkspaceWatcher(indexer)
+    calls = []
+
+    def fake_git(argv):
+        calls.append(list(argv))
+        return b"# branch.oid abc123\0# branch.head main\0"
+
+    watcher._git = fake_git
+    first = watcher._poll_git()
+    second = watcher._poll_git()
+
+    assert first["backend"] == "git-incremental"
+    assert first["status_backend"] == "porcelain-v2"
+    assert second["backend"] == "git-incremental"
+    assert calls == [
+        ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"],
+        ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"],
+    ]
+
+
+def test_process_run_uses_bounded_tempfile_capture(service):
+    import sys
+
+    result = service.processes.run([
+        sys.executable,
+        "-c",
+        "import sys; print('x' * 200000); print('ERROR CS9999: bounded capture', file=sys.stderr)",
+    ])
+    assert result["capture_backend"] == "tempfile-tail"
+    assert result["stdout_chars"] >= 200000
+    assert len(result["stdout"]) <= 4000
+    assert "CS9999" in result["diagnostics"]
+    assert not list((service.workspace.root_path / ".easychange" / "processes").glob("run-*.out"))
+    assert not list((service.workspace.root_path / ".easychange" / "processes").glob("run-*.err"))
+
+
+
+def test_compact_state_omits_expensive_detail(service):
+    result = service.execute(":state --compact")
+    assert result.ok
+    assert result.data["state"] == "READY"
+    assert "workspace" in result.data
+    assert "instance_id" in result.data
+    assert "git" not in result.data
+    assert "process" not in result.data
+    assert "index_details" not in result.data
+
+
+
+def test_git_status_uses_single_process_and_preserves_shape(tmp_path, monkeypatch):
+    from easychange.core.git_service import GitService
+
+    service = GitService(Workspace.open(tmp_path))
+    calls = []
+
+    def fake_run(*args):
+        calls.append(args)
+        return "## main...origin/main [ahead 1]\n M src/Foo.cs\n?? new.txt"
+
+    monkeypatch.setattr(service, "_run", fake_run)
+    result = service.status()
+    assert calls == [("status", "--short", "--branch")]
+    assert result == {
+        "branch": "main",
+        "changes": [" M src/Foo.cs", "?? new.txt"],
+        "clean": False,
+    }
+
+
+def test_smart_test_reuses_one_runtime_scan(tmp_path, monkeypatch):
+    from easychange.core.process_service import ProcessService
+    from easychange.core.runtime_service import ProjectRuntimeService
+
+    service = ProjectRuntimeService(Workspace.open(tmp_path), ProcessService(tmp_path))
+    calls = {"profiles": 0}
+
+    profile = {
+        "id": "custom:test", "ecosystem": "custom", "kind": "custom-test",
+        "project": "runtime_profiles.json", "runnable": False, "run_argv": None,
+        "test_argv": ["python", "-c", "print('ok')"], "urls": [], "swagger_candidates": [],
+    }
+
+    def fake_profiles():
+        calls["profiles"] += 1
+        return [dict(profile)]
+
+    monkeypatch.setattr(service, "profiles", fake_profiles)
+    result = service.smart_test("custom:test", timeout=30)
+    assert result["passed"] is True
+    assert calls["profiles"] == 1
+
+
+
+def test_study_keeps_primary_results_when_references_fail(service, monkeypatch):
+    monkeypatch.setattr(
+        service.symbol_service,
+        "references",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AttributeError("'NoneType' object has no attribute 'splitlines'")
+        ),
+    )
+    result = service.execute(":study NumeroProtocolo --limit 4 --context 1")
+    assert result.ok
+    assert result.data["matches"]
+    assert result.data["complete"] is False
+    assert result.data["references"] == []
+    assert any(item["stage"] == "references" for item in result.data["warnings"])
+
+
+def test_git_search_tolerates_none_stdout(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    from easychange.core.indexer import Indexer
+
+    (tmp_path / ".git").mkdir()
+    indexer = Indexer(tmp_path)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=None, stderr=None),
+    )
+    assert indexer._git_search(
+        "Anything", regex=False, extension=None, path_prefix=None, case_sensitive=False
+    ) == []
+
+
+
+def test_background_process_rejects_duplicate_running_id(tmp_path):
+    import sys
+    from easychange.core.process_service import ProcessService
+
+    service = ProcessService(tmp_path)
+    started = service.start(
+        [sys.executable, "-c", "import time; time.sleep(5)"],
+        "P1",
+    )
+    assert started["state"] == "RUNNING"
+    try:
+        with pytest.raises(RuntimeError, match="already running"):
+            service.start(
+                [sys.executable, "-c", "print('replacement')"],
+                "P1",
+            )
+    finally:
+        service.stop("P1")
+
+
+def test_database_cli_query_uses_bounded_tempfile_capture(monkeypatch):
+    import os
+    import sys
+    from easychange.core.database_service import DatabaseService
+
+    argv = [
+        sys.executable,
+        "-c",
+        "import sys; [print('row-%d' % i) for i in range(1000)]",
+    ]
+    result = DatabaseService._cli_query(
+        "test", argv, dict(os.environ), max_rows=10, timeout=30
+    )
+    assert result["row_count"] == 10
+    assert result["truncated"] is True
+    assert result["capture_backend"] == "tempfile-bounded"
+    assert result["rows"][0] == "row-0"

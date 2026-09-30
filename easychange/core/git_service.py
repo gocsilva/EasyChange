@@ -17,9 +17,19 @@ class GitService:
         return result.stdout.strip()
 
     def status(self) -> dict:
-        branch = self._run("branch", "--show-current")
-        lines = self._run("status", "--short").splitlines()
-        return {"branch": branch, "changes": lines, "clean": not lines}
+        """Return branch + short changes with one Git process."""
+        output = self._run("status", "--short", "--branch")
+        lines = output.splitlines()
+        header = lines[0] if lines and lines[0].startswith("## ") else ""
+        changes = lines[1:] if header else lines
+        branch = ""
+        if header:
+            branch_text = header[3:].strip()
+            if branch_text.startswith("HEAD "):
+                branch = "HEAD"
+            else:
+                branch = branch_text.split("...", 1)[0].split(" ", 1)[0]
+        return {"branch": branch, "changes": changes, "clean": not changes}
 
     def diff(self, path: str | None = None) -> str:
         return self._run("diff", "--no-ext-diff", "--", *( [path] if path else [] ))

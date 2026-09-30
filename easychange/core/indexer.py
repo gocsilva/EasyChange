@@ -392,7 +392,7 @@ class Indexer:
         if completed.returncode not in {0, 1}:
             return []
         rows: list[tuple[str, str]] = []
-        for line in completed.stdout.splitlines():
+        for line in (completed.stdout or "").splitlines():
             parts = line.split(":", 2)
             if len(parts) == 3:
                 rows.append((parts[0].replace("\\", "/"), parts[1] + ":" + parts[2]))

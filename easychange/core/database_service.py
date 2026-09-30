@@ -1,4 +1,5 @@
 from __future__ import annotations
+import tempfile
 
 import json
 import os
@@ -256,16 +257,52 @@ class DatabaseService:
         return self._cli_query("mysql", argv, self._secret_env(cfg, "MYSQL_PWD"), max_rows, timeout)
 
     @staticmethod
+    @staticmethod
     def _cli_query(provider: str, argv: list[str], env: dict, max_rows: int, timeout: int) -> dict:
+        """Run a DB CLI with disk-backed capture so large query output cannot exhaust RAM."""
         started = time.monotonic()
-        completed = subprocess.run(argv, text=True, capture_output=True, env=env, timeout=timeout,
-                                   check=False, shell=False)
-        if completed.returncode:
-            raise RuntimeError((completed.stderr or completed.stdout or f"{provider} query failed")[-2000:])
-        lines = (completed.stdout or "").splitlines()
-        truncated = len(lines) > max_rows
-        return {"provider": provider, "rows": lines[:max_rows], "row_count": min(len(lines), max_rows),
-                "truncated": truncated, "duration_ms": int((time.monotonic() - started) * 1000)}
+        max_rows = max(1, min(5000, int(max_rows)))
+
+        with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(mode="w+b") as stderr_file:
+            completed = subprocess.run(
+                argv,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                env=env,
+                timeout=timeout,
+                check=False,
+                shell=False,
+            )
+
+            if completed.returncode:
+                def tail_text(handle, limit: int = 2000) -> str:
+                    handle.seek(0, 2)
+                    size = handle.tell()
+                    handle.seek(max(0, size - limit))
+                    return handle.read().decode("utf-8", errors="replace")
+
+                stderr = tail_text(stderr_file)
+                stdout = tail_text(stdout_file)
+                raise RuntimeError((stderr or stdout or f"{provider} query failed")[-2000:])
+
+            stdout_file.seek(0)
+            rows = []
+            for _ in range(max_rows + 1):
+                raw = stdout_file.readline()
+                if not raw:
+                    break
+                rows.append(raw.decode("utf-8", errors="replace").rstrip("\r\n"))
+
+            truncated = len(rows) > max_rows
+            rows = rows[:max_rows]
+            return {
+                "provider": provider,
+                "rows": rows,
+                "row_count": len(rows),
+                "truncated": truncated,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "capture_backend": "tempfile-bounded",
+            }
 
 
 def _rel(root: Path, path: Path) -> str:

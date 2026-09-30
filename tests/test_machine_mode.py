@@ -84,3 +84,21 @@ def test_optical_burst_pads_final_page_to_all_16_visible_slots(tmp_path):
     app.processEvents()
     assert all(label.pixmap() is not None for label in window.machine_qrs)
     window.close(); app.processEvents()
+
+
+
+def test_five_chunk_result_enters_single_page_burst_with_redundancy(tmp_path, monkeypatch):
+    from easychange.ui.main_window import MainWindow
+    from easychange.core.result import Result
+
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    monkeypatch.setattr(
+        "easychange.ui.main_window.encode_result_chunks",
+        lambda result: [f'{{"p":"EC2","s":"QX","i":{i},"n":5,"d":"{i}"}}' for i in range(5)],
+    )
+    window._update_machine_qr(Result(True, "study", {"x": 1}, sequence="QX"))
+    assert window._optical_burst is True
+    assert window._optical_timer.isActive() is False
+    assert len(window._optical_payloads) == 5
+    assert sum(1 for label in window.machine_qrs if label.pixmap() and not label.pixmap().isNull()) == 16
+    window.close()
