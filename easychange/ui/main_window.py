@@ -16,6 +16,12 @@ from easychange.ui.editor import BasicHighlighter, CodeEditor
 
 
 class MainWindow(QMainWindow):
+    # Small results keep the editor visible. Large results temporarily turn
+    # the HDMI surface into a 4x4 optical modem for maximum AI throughput.
+    _OPTICAL_NORMAL_SLOTS = 4
+    _OPTICAL_BURST_SLOTS = 16
+    _OPTICAL_BURST_THRESHOLD = 8
+
     def __init__(self, workspace: Workspace, *, machine_mode: bool | None = None, hid_mode: bool = False) -> None:
         super().__init__()
         self.service = CommandService(workspace)
@@ -45,7 +51,7 @@ class MainWindow(QMainWindow):
         self.output.setMaximumHeight(330 if self._machine else 190)
         self.output.setObjectName("machineResultRegion")
         self.machine_qrs: list[QLabel] = []
-        for index in range(8):
+        for index in range(self._OPTICAL_BURST_SLOTS):
             label = QLabel()
             label.setObjectName("machineResultQr" if index == 0 else f"machineResultQr{index + 1}")
             label.setFixedSize(160, 160)
@@ -57,6 +63,7 @@ class MainWindow(QMainWindow):
         self._optical_payloads: list[str] = []
         self._optical_pixmaps: dict[str, QPixmap] = {}
         self._optical_page = 0
+        self._optical_burst = False
         self._optical_timer = QTimer(self)
         self._optical_timer.setInterval(280)
         self._optical_timer.timeout.connect(self._render_optical_page)
@@ -72,7 +79,7 @@ class MainWindow(QMainWindow):
         qr_layout.setVerticalSpacing(4)
         for index, label in enumerate(self.machine_qrs):
             qr_layout.addWidget(label, index // 4, index % 4)
-        result_layout.addWidget(self.qr_panel, 0)
+        result_layout.addWidget(self.qr_panel, 0, Qt.AlignmentFlag.AlignCenter)
 
         self.split = QSplitter(Qt.Orientation.Horizontal)
         self.split.addWidget(self.tree)
@@ -197,6 +204,11 @@ class MainWindow(QMainWindow):
         self.tree.setVisible(not self._machine)
         self.select_workspace_button.setVisible(not self._machine)
         self.output.setMaximumHeight(330 if self._machine else 190)
+        if not self._machine:
+            self._set_optical_burst(False)
+        elif self._optical_burst:
+            self.split.setVisible(False)
+            self.output.setVisible(False)
         for label in self.machine_qrs:
             label.setVisible(self._machine and bool(label.pixmap()))
         self.editor.highlighter.setDocument(None)
@@ -230,6 +242,21 @@ class MainWindow(QMainWindow):
                 self.output.setPlainText(f"ERROR: {exc}")
         self.focus_command()
 
+    def _set_optical_burst(self, enabled: bool) -> None:
+        enabled = bool(enabled and self._machine)
+        self._optical_burst = enabled
+        if enabled:
+            self.split.setVisible(False)
+            self.output.setVisible(False)
+            self.result_panel.setMinimumHeight(660)
+            self.result_panel.setMaximumHeight(16777215)
+            self._optical_timer.setInterval(180)
+        else:
+            self.split.setVisible(True)
+            self.output.setVisible(True)
+            self.result_panel.setMinimumHeight(0)
+            self.result_panel.setMaximumHeight(340 if self._machine else 200)
+            self._optical_timer.setInterval(280)
     def _update_machine_qr(self, result) -> None:
         self._optical_timer.stop()
         self._optical_payloads = []
@@ -239,13 +266,17 @@ class MainWindow(QMainWindow):
             label.clear()
             label.setVisible(False)
         if not self._machine:
+            self._set_optical_burst(False)
             return
         try:
             self._optical_payloads = encode_result_chunks(result)
+            self._set_optical_burst(len(self._optical_payloads) > self._OPTICAL_BURST_THRESHOLD)
             self._render_optical_page()
-            if len(self._optical_payloads) > len(self.machine_qrs):
+            slots = self._OPTICAL_BURST_SLOTS if self._optical_burst else self._OPTICAL_NORMAL_SLOTS
+            if len(self._optical_payloads) > slots:
                 self._optical_timer.start()
         except (ImportError, ValueError, RuntimeError):
+            self._set_optical_burst(False)
             # Compact EC1 text remains a correlation fallback.
             return
 
@@ -254,17 +285,27 @@ class MainWindow(QMainWindow):
             return
         import qrcode
 
-        slots = len(self.machine_qrs)
+        requested_slots = self._OPTICAL_BURST_SLOTS if self._optical_burst else self._OPTICAL_NORMAL_SLOTS
+        slots = min(requested_slots, len(self.machine_qrs))
         page_count = max(1, (len(self._optical_payloads) + slots - 1) // slots)
         page = self._optical_page % page_count
         start = page * slots
         payloads = self._optical_payloads[start:start + slots]
+        # In burst mode keep all 16 optical cells populated even on the final
+        # partial page. Repeating already-present chunks costs no protocol state
+        # and lets the HDMI decoder reliably identify the dense 4x4 grid.
+        if self._optical_burst and payloads and len(payloads) < slots:
+            original = list(payloads)
+            index = 0
+            while len(payloads) < slots:
+                payloads.append(original[index % len(original)])
+                index += 1
 
         for label in self.machine_qrs:
             label.clear()
             label.setVisible(False)
 
-        for label, payload in zip(self.machine_qrs, payloads):
+        for label, payload in zip(self.machine_qrs[:slots], payloads):
             pixmap = self._optical_pixmaps.get(payload)
             if pixmap is None:
                 # Fixed mask avoids qrcode's expensive 8-mask visual scoring.

@@ -88,8 +88,10 @@ class CommandService:
         self._ec_result_cache: dict[str, Result] = {}
 
     def close(self) -> None:
-        if self.watcher: self.watcher.stop()
+        if self.watcher:
+            self.watcher.stop()
         self.processes.stop_all()
+        self.indexer.close()
         self.locks.release_owner(self.instance_id, self.session_id)
         self._persist_state(self.last_result)
 
@@ -229,7 +231,7 @@ class CommandService:
         started = time.monotonic()
         operation = str(payload.get("op") or "").casefold()
         operations = payload.get("operations") if operation == "batch" else [payload]
-        if not isinstance(operations, list) or not 1 <= len(operations) <= 16:
+        if not isinstance(operations, list) or not 1 <= len(operations) <= 32:
             return Result(False, "structured", error="OPERATION_COUNT_LIMIT", code="INVALID_STRUCTURED_PAYLOAD")
 
         mutation_types = {"write_file", "create_file", "replace_line", "replace_range", "replace_text", "insert", "append"}
@@ -249,7 +251,30 @@ class CommandService:
                 result = Result(False, "structured", error="OPERATION_OBJECT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
             else:
                 kind = str(item.get("type") or "").casefold()
-                if kind in {"write_file", "create_file"}:
+                guard_error = None
+                expected_hash = item.get("expected_hash")
+                guard_path = item.get("path")
+                if expected_hash is not None and kind in mutation_types:
+                    if not isinstance(expected_hash, str) or not expected_hash.strip() or not isinstance(guard_path, str):
+                        guard_error = Result(False, kind, error="EXPECTED_HASH_REQUIRES_PATH",
+                                             code="INVALID_STRUCTURED_PAYLOAD")
+                    elif self.files.exists(guard_path):
+                        actual_hash = self.files.hash(guard_path)
+                        wanted = expected_hash.strip().casefold()
+                        if not actual_hash.casefold().startswith(wanted):
+                            guard_error = Result(
+                                False, kind, error="File changed since study",
+                                code="STALE_FILE",
+                                data={"path": guard_path, "expected_hash": wanted,
+                                      "actual_hash": actual_hash},
+                            )
+                    elif kind != "create_file":
+                        guard_error = Result(False, kind, error=f"File not found: {guard_path}",
+                                             code="FILE_NOT_FOUND")
+
+                if guard_error is not None:
+                    result = guard_error
+                elif kind in {"write_file", "create_file"}:
                     path, content = item.get("path"), item.get("content")
                     if not isinstance(path, str) or not isinstance(content, str):
                         result = Result(False, kind, error="PATH_AND_CONTENT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
@@ -329,6 +354,8 @@ class CommandService:
                         args = list(paths)
                         if isinstance(item.get("count"), int):
                             args += ["--count", str(item["count"])]
+                        if isinstance(item.get("max_bytes"), int):
+                            args += ["--max-bytes", str(item["max_bytes"])]
                         result = self.execute_tokens("read-many", args, raw="EC1 read-many")
                 elif kind == "validate":
                     args = ["--test"] if item.get("test") else []
@@ -502,9 +529,11 @@ class CommandService:
                     "status", "diff", "branch", "log", "build", "test", "run", "processes", "stop", "errors", "next-error", "previous-error", "remote", "remote-guide", "remote-profile", "prepare-hid", "set", "machine", "human", "quit"],
                     "capabilities": {"workspace": True, "git": "GIT" in self.workspace.adapters,
                     "build_test": self.workspace.adapters, "index": True, "symbols": True,
-                    "ai_machine": {"optical_protocol": "EC2", "qr_slots": 8, "chunked_results": True,
-                                   "composite_study": True, "read_many": True, "validate": True,
-                                   "cold_search": "git-grep", "warm_search": "sqlite-fts5"},
+                    "ai_machine": {"optical_protocol": "EC2", "qr_slots": 16, "chunked_results": True,
+                                   "optical_burst": True, "composite_study": True, "read_many": True,
+                                   "read_many_max_files": 32, "read_many_byte_budget": True,
+                                   "structured_max_operations": 32, "expected_hash_guards": True,
+                                   "validate": True, "cold_search": "git-grep", "warm_search": "sqlite-fts5"},
                     "remote_control": {"input": "ESP32_HID", "output": "HDMI",
                                        "mcp_on_remote_pc": False, "api_on_remote_pc": False}}}
         if name == "state":
@@ -616,20 +645,55 @@ class CommandService:
 
         if name == "read-many":
             _require(args, 1, "one or more paths")
-            count = _option_int(args, "--count", 120, minimum=1, maximum=600)
+            count = _option_int(args, "--count", 180, minimum=1, maximum=1200)
+            max_bytes = _option_int(args, "--max-bytes", 786432, minimum=32768, maximum=2097152)
             paths = []
             skip = False
-            for index, item in enumerate(args):
+            option_names = {"--count", "--max-bytes"}
+            for item in args:
                 if skip:
                     skip = False
                     continue
-                if item == "--count":
+                if item in option_names:
                     skip = True
                     continue
                 paths.append(self._resolve_ref(item))
-            if not paths or len(paths) > 8:
-                raise ValueError("read-many requires 1 to 8 paths")
-            return {"files": [self.files.read(path, 1, count) for path in paths], "count": len(paths)}
+            if not paths or len(paths) > 32:
+                raise ValueError("read-many requires 1 to 32 paths")
+
+            files = []
+            skipped = []
+            total_bytes = 0
+            for position, path in enumerate(paths):
+                info = self.files.read(path, 1, count)
+                encoded = json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                if total_bytes + len(encoded) > max_bytes:
+                    if not files:
+                        # A single very large read is progressively trimmed so
+                        # the optical response remains bounded.
+                        lines = list(info.get("lines") or [])
+                        while len(encoded) > max_bytes and len(lines) > 1:
+                            lines = lines[:max(1, len(lines) // 2)]
+                            info = {**info, "lines": lines, "budget_truncated": True}
+                            encoded = json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                        files.append(info)
+                        total_bytes += len(encoded)
+                        skipped.extend(paths[position + 1:])
+                    else:
+                        skipped.extend(paths[position:])
+                    break
+                files.append(info)
+                total_bytes += len(encoded)
+
+            return {
+                "files": files,
+                "count": len(files),
+                "requested": len(paths),
+                "raw_bytes": total_bytes,
+                "byte_budget": max_bytes,
+                "truncated": bool(skipped) or any(bool(item.get("budget_truncated")) for item in files),
+                "skipped": skipped,
+            }
 
         if name == "edit-result":
             _require(args, 2, "search result ID and replacement line")

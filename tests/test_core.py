@@ -448,3 +448,42 @@ def test_git_watcher_reindexes_only_changed_paths(tmp_path):
     assert unchanged["files"] == 0
     assert unchanged["cached"] is True
     assert indexer.search("After")
+
+
+
+def test_read_many_supports_32_paths_with_byte_budget(service, tmp_path):
+    paths = []
+    for index in range(20):
+        path = tmp_path / f"bulk_{index}.py"
+        path.write_text("\n".join(f"value_{line} = '{index}-{line}'" for line in range(50)), encoding="utf-8")
+        paths.append(path.name)
+    result = service.execute(":read-many " + " ".join(paths) + " --count 100 --max-bytes 262144")
+    assert result.ok
+    assert result.data["requested"] == 20
+    assert result.data["count"] == 20
+    assert result.data["raw_bytes"] <= result.data["byte_budget"]
+
+
+def test_structured_expected_hash_rejects_stale_patch(service, tmp_path):
+    current = service.files.hash("sample.py")
+    good = service._execute_structured({
+        "op": "operation", "type": "replace_line", "path": "sample.py",
+        "line": 1, "content": "NumeroProtocolo = 2", "expected_hash": current,
+    })
+    assert good.ok
+    stale = service._execute_structured({
+        "op": "operation", "type": "replace_line", "path": "sample.py",
+        "line": 1, "content": "NumeroProtocolo = 3", "expected_hash": current,
+    })
+    assert not stale.ok
+    assert stale.data["results"][0]["code"] == "STALE_FILE"
+
+
+
+def test_service_close_joins_background_indexer(tmp_path):
+    for index in range(80):
+        (tmp_path / f"warm_{index}.py").write_text(f"value = {index}\n", encoding="utf-8")
+    service = CommandService(Workspace.open(tmp_path))
+    service.close()
+    thread = service.indexer._build_thread
+    assert thread is None or not thread.is_alive()

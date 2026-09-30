@@ -114,6 +114,12 @@ class Indexer:
         self._build_thread = threading.Thread(target=worker, name="easychange-index", daemon=True)
         self._build_thread.start()
 
+    def close(self, timeout: float = 15.0) -> None:
+        """Wait for background index warm-up so SQLite handles are closed before workspace teardown."""
+        thread = self._build_thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(max(0.1, float(timeout)))
+
     def invalidate(self) -> None:
         self._fully_indexed = False
         self._last_refresh_at = 0.0
