@@ -57,16 +57,24 @@ def main() -> int:
             study_ms, study = timed(service, ":study TargetService --limit 8 --context 3")
             paths = [f"src/Service{i}.cs" for i in range(8)]
             read_ms, read = timed(service, ":read-many " + " ".join(paths) + " --count 120")
+            paths64 = [f"src/Service{i}.cs" for i in range(64)]
+            read64_ms, read64 = timed(
+                service,
+                ":read-many " + " ".join(paths64) + " --count 120 --max-bytes 8388608",
+            )
 
             metrics = {
                 "cold_search_ms": round(cold_ms, 2),
                 "warm_search_ms": round(warm_ms, 2),
                 "study_ms": round(study_ms, 2),
                 "read_many_ms": round(read_ms, 2),
+                "read_many_64_ms": round(read64_ms, 2),
+                "read_many_64_workers": read64.data.get("parallel_workers"),
                 "cold_matches": len(cold.data.get("matches", [])),
                 "warm_matches": len(warm.data.get("matches", [])),
                 "study_files": len(study.data.get("files", [])),
                 "read_files": len(read.data.get("files", [])),
+                "read_64_files": len(read64.data.get("files", [])),
                 "index_ready": service.indexer.ready,
             }
             print(json.dumps(metrics, indent=2))
@@ -76,9 +84,11 @@ def main() -> int:
                 or not warm.ok
                 or not study.ok
                 or not read.ok
+                or not read64.ok
                 or metrics["cold_search_ms"] > 1000
                 or metrics["warm_search_ms"] > 250
                 or metrics["read_many_ms"] > 250
+                or metrics["read_many_64_ms"] > 600
             )
         finally:
             service.close()

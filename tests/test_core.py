@@ -487,3 +487,184 @@ def test_service_close_joins_background_indexer(tmp_path):
     service.close()
     thread = service.indexer._build_thread
     assert thread is None or not thread.is_alive()
+
+
+
+def test_runtime_service_detects_dotnet_api_worker_and_test_profiles(tmp_path):
+    from easychange.core.process_service import ProcessService
+    from easychange.core.runtime_service import ProjectRuntimeService
+
+    api = tmp_path / "Api"; api.mkdir()
+    (api / "Api.csproj").write_text(
+        '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>',
+        encoding="utf-8",
+    )
+    (api / "Program.cs").write_text(
+        "var app = WebApplication.CreateBuilder(args).Build(); app.MapControllers();",
+        encoding="utf-8",
+    )
+    props = api / "Properties"; props.mkdir()
+    (props / "launchSettings.json").write_text(
+        '{"profiles":{"http":{"applicationUrl":"http://localhost:5123;https://localhost:7123"}}}',
+        encoding="utf-8",
+    )
+
+    worker = tmp_path / "Worker"; worker.mkdir()
+    (worker / "Worker.csproj").write_text(
+        '<Project Sdk="Microsoft.NET.Sdk.Worker"><PropertyGroup><OutputType>Exe</OutputType></PropertyGroup></Project>',
+        encoding="utf-8",
+    )
+    (worker / "Worker.cs").write_text("public class Worker : BackgroundService {}", encoding="utf-8")
+
+    tests = tmp_path / "Tests"; tests.mkdir()
+    (tests / "Tests.csproj").write_text(
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><IsTestProject>true</IsTestProject></PropertyGroup></Project>',
+        encoding="utf-8",
+    )
+
+    service = ProjectRuntimeService(Workspace.open(tmp_path), ProcessService(tmp_path))
+    profiles = service.profiles()
+    kinds = {item["kind"] for item in profiles}
+    assert {"dotnet-api", "dotnet-worker", "dotnet-test"} <= kinds
+    api_profile = next(item for item in profiles if item["kind"] == "dotnet-api")
+    assert "http://localhost:5123/swagger/index.html" in api_profile["swagger_candidates"]
+
+
+def test_database_service_sqlite_read_only_and_schema(tmp_path):
+    import sqlite3
+    from easychange.core.database_service import DatabaseService
+
+    database = tmp_path / "sample.db"
+    connection = sqlite3.connect(database)
+    connection.execute("create table people(id integer primary key, name text)")
+    connection.execute("insert into people(name) values ('Ada'),('Linus')")
+    connection.commit(); connection.close()
+
+    service = DatabaseService(Workspace.open(tmp_path))
+    result = service.query("sample.db", "select id,name from people order by id")
+    assert result["row_count"] == 2
+    assert result["rows"][0][1] == "Ada"
+    schema = service.schema("sample.db")
+    assert any(row[0] == "people" for row in schema["rows"])
+    with pytest.raises(PermissionError):
+        service.query("sample.db", "delete from people")
+
+
+def test_runtime_evidence_creates_local_report(tmp_path):
+    from easychange.core.process_service import ProcessService
+    from easychange.core.runtime_service import ProjectRuntimeService
+
+    service = ProjectRuntimeService(Workspace.open(tmp_path), ProcessService(tmp_path))
+    evidence = service.evidence("unit-test")
+    assert (tmp_path / evidence["evidence_json"]).exists()
+    assert (tmp_path / evidence["report"]).exists()
+
+
+def test_command_service_exposes_runtime_and_database_capabilities(tmp_path):
+    import sqlite3
+
+    database = tmp_path / "sample.db"
+    connection = sqlite3.connect(database)
+    connection.execute("create table items(id integer)")
+    connection.execute("insert into items(id) values (1)")
+    connection.commit(); connection.close()
+
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        capabilities = service.execute(":capabilities")
+        assert capabilities.ok
+        assert capabilities.data["capabilities"]["runtime"]["smart_test"] is True
+        assert capabilities.data["capabilities"]["database"]["read_only_default"] is True
+        query = service.execute(":db-query sample.db select id from items")
+        assert query.ok
+        assert query.data["rows"] == [[1]]
+        evidence = service.execute(":evidence --title smoke")
+        assert evidence.ok
+        assert (tmp_path / evidence.data["report"]).exists()
+    finally:
+        service.close()
+
+
+
+def test_database_configure_persists_alias_without_secret_values(tmp_path):
+    from easychange.core.database_service import DatabaseService
+
+    service = DatabaseService(Workspace.open(tmp_path))
+    result = service.configure(
+        "local-sql", "sqlserver",
+        {"server_env": "DB_SERVER", "database_env": "DB_NAME",
+         "user_env": "DB_USER", "password_env": "DB_PASSWORD"},
+    )
+    assert result["connection"]["provider"] == "sqlserver"
+    assert service.connections()["connections"]["local-sql"]["password_env"] == "DB_PASSWORD"
+    with pytest.raises(ValueError):
+        service.configure("bad", "sqlserver", {"password": "secret"})
+
+
+
+def test_read_many_parallel_bulk_64_files(service, tmp_path):
+    paths = []
+    for index in range(64):
+        path = tmp_path / f"parallel_{index}.py"
+        path.write_text("\n".join(f"value_{line} = {line}" for line in range(40)), encoding="utf-8")
+        paths.append(path.name)
+    result = service.execute(
+        ":read-many " + " ".join(paths) + " --count 80 --max-bytes 8388608"
+    )
+    assert result.ok
+    assert result.data["count"] == 64
+    assert result.data["parallel_workers"] > 1
+    assert result.data["requested"] == 64
+
+
+def test_custom_runtime_profile_supports_arbitrary_project_type(tmp_path):
+    from easychange.core.process_service import ProcessService
+    from easychange.core.runtime_service import ProjectRuntimeService
+
+    runtime = ProjectRuntimeService(Workspace.open(tmp_path), ProcessService(tmp_path))
+    configured = runtime.configure_profile(
+        "cron-nightly",
+        kind="cron",
+        run_argv=["python", "cron.py"],
+        test_argv=["python", "-m", "pytest", "-q"],
+        urls=[],
+    )
+    assert configured["profile"]["kind"] == "cron"
+    profile = runtime.profile("cron-nightly")
+    assert profile["run_argv"] == ["python", "cron.py"]
+    assert profile["test_argv"] == ["python", "-m", "pytest", "-q"]
+    assert profile["configured"] is True
+
+
+def test_runtime_dotnet_no_restore_only_after_assets_exist(tmp_path):
+    from easychange.core.process_service import ProcessService
+    from easychange.core.runtime_service import ProjectRuntimeService
+
+    project = tmp_path / "App"; project.mkdir()
+    (project / "App.csproj").write_text(
+        '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>',
+        encoding="utf-8",
+    )
+    (project / "Program.cs").write_text("var app = WebApplication.CreateBuilder(args).Build();", encoding="utf-8")
+    runtime = ProjectRuntimeService(Workspace.open(tmp_path), ProcessService(tmp_path))
+    first = next(item for item in runtime.profiles() if item["project"] == "App/App.csproj")
+    assert "--no-restore" not in first["run_argv"]
+
+    obj = project / "obj"; obj.mkdir()
+    (obj / "project.assets.json").write_text("{}", encoding="utf-8")
+    second = next(item for item in runtime.profiles() if item["project"] == "App/App.csproj")
+    assert "--no-restore" in second["run_argv"]
+
+
+
+def test_database_read_only_classifier_rejects_mutating_cte_and_select_into():
+    from easychange.core.database_service import DatabaseService
+
+    assert DatabaseService._is_read_only("SELECT 'delete' AS word") is True
+    assert DatabaseService._is_read_only("WITH x AS (SELECT 1) SELECT * FROM x") is True
+    assert DatabaseService._is_read_only("WITH x AS (SELECT 1) DELETE FROM target") is False
+    assert DatabaseService._is_read_only("SELECT * INTO backup_table FROM source_table") is False
+    assert DatabaseService._is_read_only("EXPLAIN SELECT * FROM source_table") is True
+    assert DatabaseService._is_read_only("EXPLAIN UPDATE target SET x=1") is False
+    assert DatabaseService._is_read_only("PRAGMA table_info(users)") is True
+    assert DatabaseService._is_read_only("PRAGMA journal_mode=WAL") is False

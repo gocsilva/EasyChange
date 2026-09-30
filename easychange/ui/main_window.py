@@ -17,9 +17,10 @@ from easychange.ui.editor import BasicHighlighter, CodeEditor
 
 class MainWindow(QMainWindow):
     # Small results keep the editor visible. Large results temporarily turn
-    # the HDMI surface into a 4x4 optical modem for maximum AI throughput.
+    # the HDMI surface into an 8x4 optical modem for maximum AI throughput.
     _OPTICAL_NORMAL_SLOTS = 4
-    _OPTICAL_BURST_SLOTS = 16
+    _OPTICAL_BURST_SLOTS = 32
+    _OPTICAL_BURST_COLUMNS = 8
     _OPTICAL_BURST_THRESHOLD = 8
 
     def __init__(self, workspace: Workspace, *, machine_mode: bool | None = None, hid_mode: bool = False) -> None:
@@ -78,7 +79,7 @@ class MainWindow(QMainWindow):
         qr_layout.setHorizontalSpacing(4)
         qr_layout.setVerticalSpacing(4)
         for index, label in enumerate(self.machine_qrs):
-            qr_layout.addWidget(label, index // 4, index % 4)
+            qr_layout.addWidget(label, index // self._OPTICAL_BURST_COLUMNS, index % self._OPTICAL_BURST_COLUMNS)
         result_layout.addWidget(self.qr_panel, 0, Qt.AlignmentFlag.AlignCenter)
 
         self.split = QSplitter(Qt.Orientation.Horizontal)
@@ -291,9 +292,9 @@ class MainWindow(QMainWindow):
         page = self._optical_page % page_count
         start = page * slots
         payloads = self._optical_payloads[start:start + slots]
-        # In burst mode keep all 16 optical cells populated even on the final
+        # In burst mode keep all optical cells populated even on the final
         # partial page. Repeating already-present chunks costs no protocol state
-        # and lets the HDMI decoder reliably identify the dense 4x4 grid.
+        # and lets the HDMI decoder reliably identify the dense burst grid.
         if self._optical_burst and payloads and len(payloads) < slots:
             original = list(payloads)
             index = 0

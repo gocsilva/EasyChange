@@ -1,4 +1,7 @@
 from __future__ import annotations
+from .runtime_service import ProjectRuntimeService
+from .database_service import DatabaseService
+from concurrent.futures import ThreadPoolExecutor
 
 import shlex
 import time
@@ -51,6 +54,8 @@ class CommandService:
         self.files = FileService(workspace, self.state_store.data.get("file_hashes", {}))
         self.git = GitService(workspace)
         self.processes = ProcessService(workspace.root_path)
+        self.runtime = ProjectRuntimeService(workspace, self.processes)
+        self.database = DatabaseService(workspace)
         self.ids = IdFactory(self.state_store.data.get("id_counts"))
         self.output = self.state_store.data.get("output_mode", "text")
         self.machine = self.state_store.data.get("mode", "human") == "machine"
@@ -231,7 +236,7 @@ class CommandService:
         started = time.monotonic()
         operation = str(payload.get("op") or "").casefold()
         operations = payload.get("operations") if operation == "batch" else [payload]
-        if not isinstance(operations, list) or not 1 <= len(operations) <= 32:
+        if not isinstance(operations, list) or not 1 <= len(operations) <= 64:
             return Result(False, "structured", error="OPERATION_COUNT_LIMIT", code="INVALID_STRUCTURED_PAYLOAD")
 
         mutation_types = {"write_file", "create_file", "replace_line", "replace_range", "replace_text", "insert", "append"}
@@ -357,6 +362,90 @@ class CommandService:
                         if isinstance(item.get("max_bytes"), int):
                             args += ["--max-bytes", str(item["max_bytes"])]
                         result = self.execute_tokens("read-many", args, raw="EC1 read-many")
+                elif kind == "runtime_profiles":
+                    result = Result(True, kind, data={"profiles": self.runtime.profiles()})
+                elif kind == "runtime_configure":
+                    result = Result(True, kind, data=self.runtime.configure_profile(
+                        str(item.get("profile_id") or ""), kind=str(item.get("kind") or "custom"),
+                        run_argv=item.get("run_argv"), test_argv=item.get("test_argv"),
+                        urls=item.get("urls") if isinstance(item.get("urls"), list) else None,
+                    ))
+                elif kind == "run_project":
+                    profile = str(item.get("profile") or "")
+                    process_id = self.ids.next("P")
+                    result = Result(True, kind, data=self.runtime.start(process_id, profile))
+                elif kind == "test_smart":
+                    profile = str(item.get("profile") or "")
+                    timeout = max(5, min(3600, int(item.get("timeout") or 600)))
+                    data = self.runtime.smart_test(profile, timeout)
+                    result = Result(bool(data.get("passed")), kind, data=data,
+                                    error=None if data.get("passed") else "Smart test failed",
+                                    code=None if data.get("passed") else "TEST_FAILED")
+                elif kind == "test_evidence":
+                    profile = str(item.get("profile") or "")
+                    timeout = max(5, min(3600, int(item.get("timeout") or 600)))
+                    data = self.runtime.test_with_evidence(
+                        profile, timeout, str(item.get("title") or "test-evidence")
+                    )
+                    result = Result(bool(data.get("passed")), kind, data=data,
+                                    error=None if data.get("passed") else "Test evidence failed",
+                                    code=None if data.get("passed") else "TEST_FAILED")
+                elif kind == "process_logs":
+                    process_id = str(item.get("process_id") or "")
+                    result = Result(True, kind, data=self.processes.logs(
+                        process_id, limit=max(512, min(100000, int(item.get("limit") or 12000)))
+                    ))
+                elif kind == "stop_process":
+                    process_id = str(item.get("process_id") or "")
+                    result = Result(True, kind, data=self.processes.stop(process_id))
+                elif kind == "swagger_evidence":
+                    profile = str(item.get("profile") or "")
+                    url = str(item.get("url") or "")
+                    timeout = max(5.0, min(180.0, float(item.get("timeout") or 45.0)))
+                    process_id = self.ids.next("P")
+                    data = self.runtime.swagger_evidence(
+                        process_id, profile, url, timeout,
+                        bool(item.get("screenshot", True)), bool(item.get("start_if_needed", True)),
+                        bool(item.get("keep_running", False))
+                    )
+                    result = Result(bool(data.get("ok")), kind, data=data,
+                                    error=None if data.get("ok") else "Swagger evidence failed",
+                                    code=None if data.get("ok") else "EVIDENCE_FAILED")
+                elif kind == "evidence":
+                    result = Result(True, kind, data=self.runtime.evidence(
+                        str(item.get("title") or "test-evidence"), str(item.get("process_id") or "")
+                    ))
+                elif kind == "db_connections":
+                    result = Result(True, kind, data=self.database.connections())
+                elif kind == "db_configure":
+                    result = Result(True, kind, data=self.database.configure(
+                        str(item.get("name") or ""), str(item.get("provider") or ""),
+                        item.get("settings") if isinstance(item.get("settings"), dict) else {},
+                    ))
+                elif kind == "db_schema":
+                    connection = str(item.get("connection") or "")
+                    if not connection:
+                        result = Result(False, kind, error="CONNECTION_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        result = Result(True, kind, data=self.database.schema(
+                            connection, max_rows=max(1, min(5000, int(item.get("max_rows") or 500)))
+                        ))
+                elif kind == "db_query":
+                    connection = str(item.get("connection") or "")
+                    sql = str(item.get("sql") or "")
+                    allow_write = bool(item.get("allow_write", False))
+                    if len(operations) > 1 and allow_write:
+                        result = Result(False, kind, error="WRITE_DB_QUERY_CANNOT_BE_MIXED_IN_BATCH",
+                                        code="NON_ATOMIC_EXTERNAL_WRITE")
+                    elif not connection or not sql:
+                        result = Result(False, kind, error="CONNECTION_AND_SQL_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        data = self.database.query(
+                            connection, sql, allow_write=allow_write,
+                            max_rows=max(1, min(5000, int(item.get("max_rows") or 200))),
+                            timeout=max(1, min(300, int(item.get("timeout") or 30))),
+                        )
+                        result = Result(True, kind, data=data)
                 elif kind == "validate":
                     args = ["--test"] if item.get("test") else []
                     result = self.execute_tokens("validate", args, raw="EC1 validate")
@@ -523,17 +612,24 @@ class CommandService:
             return {"commands": ["state", "workspace", "pwd", "files", "tree", "next", "prev", "read", "head", "tail", "context", "goto",
                     "search", "find", "index", "symbols", "symbol", "definition", "references", "implementations", "outline", "file-summary",
                     "locate", "study", "read-many", "validate", "edit-result",
+                    "runtime-profile", "run-project", "test-smart", "test-evidence",
+                    "swagger-evidence", "evidence", "process-logs",
+                    "db-connections", "db-schema", "db-query",
                     "new", "mkdir", "write", "append", "insert", "replace", "replace-line", "replace-range", "delete", "rename", "move", "stat", "hash", "exists",
                     "rename-symbol", "create-class", "create-interface", "create-test", "format", "fix-imports", "organize-imports",
                     "journal", "undo", "redo", "begin", "commit", "rollback", "snapshot", "lock", "unlock", "locks", "watch", "batch", "macro", "alias", "complete", "history", "repeat", "clear",
                     "status", "diff", "branch", "log", "build", "test", "run", "processes", "stop", "errors", "next-error", "previous-error", "remote", "remote-guide", "remote-profile", "prepare-hid", "set", "machine", "human", "quit"],
                     "capabilities": {"workspace": True, "git": "GIT" in self.workspace.adapters,
                     "build_test": self.workspace.adapters, "index": True, "symbols": True,
-                    "ai_machine": {"optical_protocol": "EC2", "qr_slots": 16, "chunked_results": True,
+                    "ai_machine": {"optical_protocol": "EC2", "qr_slots": 32, "chunked_results": True,
                                    "optical_burst": True, "composite_study": True, "read_many": True,
-                                   "read_many_max_files": 32, "read_many_byte_budget": True,
-                                   "structured_max_operations": 32, "expected_hash_guards": True,
+                                   "read_many_max_files": 64, "read_many_byte_budget": True,
+                                   "structured_max_operations": 64, "expected_hash_guards": True,
                                    "validate": True, "cold_search": "git-grep", "warm_search": "sqlite-fts5"},
+                    "runtime": {"profiles": True, "smart_test": True, "background_run": True,
+                                "swagger_evidence": True, "local_screenshots": True},
+                    "database": {"read_only_default": True, "sqlite": True, "sqlserver_cli": True,
+                                 "postgres_cli": True, "mysql_cli": True},
                     "remote_control": {"input": "ESP32_HID", "output": "HDMI",
                                        "mcp_on_remote_pc": False, "api_on_remote_pc": False}}}
         if name == "state":
@@ -645,8 +741,8 @@ class CommandService:
 
         if name == "read-many":
             _require(args, 1, "one or more paths")
-            count = _option_int(args, "--count", 180, minimum=1, maximum=1200)
-            max_bytes = _option_int(args, "--max-bytes", 786432, minimum=32768, maximum=2097152)
+            count = _option_int(args, "--count", 240, minimum=1, maximum=2400)
+            max_bytes = _option_int(args, "--max-bytes", 2097152, minimum=32768, maximum=8388608)
             paths = []
             skip = False
             option_names = {"--count", "--max-bytes"}
@@ -658,14 +754,16 @@ class CommandService:
                     skip = True
                     continue
                 paths.append(self._resolve_ref(item))
-            if not paths or len(paths) > 32:
-                raise ValueError("read-many requires 1 to 32 paths")
+            if not paths or len(paths) > 64:
+                raise ValueError("read-many requires 1 to 64 paths")
 
             files = []
             skipped = []
             total_bytes = 0
-            for position, path in enumerate(paths):
-                info = self.files.read(path, 1, count)
+            workers = min(12, len(paths))
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="easychange-read") as pool:
+                loaded = list(pool.map(lambda path: self.files.read(path, 1, count), paths))
+            for position, (path, info) in enumerate(zip(paths, loaded)):
                 encoded = json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                 if total_bytes + len(encoded) > max_bytes:
                     if not files:
@@ -693,6 +791,7 @@ class CommandService:
                 "byte_budget": max_bytes,
                 "truncated": bool(skipped) or any(bool(item.get("budget_truncated")) for item in files),
                 "skipped": skipped,
+                "parallel_workers": workers,
             }
 
         if name == "edit-result":
@@ -944,6 +1043,72 @@ class CommandService:
             entry = redone[0]; change = Change(entry.path, entry.before, entry.after, entry.change_id, entry.command)
             self._apply_after(change); self.journal.append(change)
             return {"redone": change.path, "change_id": change.change_id}
+        if name == "runtime-profile":
+            if args:
+                return {"profile": self.runtime.profile(args[0]), "profiles": self.runtime.profiles()}
+            return {"profiles": self.runtime.profiles()}
+        if name == "run-project":
+            profile = args[0] if args and not args[0].startswith("--") else ""
+            process_id = self.ids.next("P")
+            return self.runtime.start(process_id, profile)
+        if name == "test-smart":
+            profile = args[0] if args and not args[0].startswith("--") else ""
+            timeout = _option_int(args, "--timeout", 600, minimum=5, maximum=3600)
+            result = self.runtime.smart_test(profile, timeout)
+            if not result.get("passed"):
+                raise ProcessFailure(Result(False, "test-smart", data=result, error="Smart test failed", code="TEST_FAILED"))
+            return result
+        if name == "test-evidence":
+            profile = _option_value(args, "--profile", "")
+            timeout = _option_int(args, "--timeout", 600, minimum=5, maximum=3600)
+            title = _option_value(args, "--title", "test-evidence")
+            data = self.runtime.test_with_evidence(profile, timeout, title)
+            if not data.get("passed"):
+                raise ProcessFailure(Result(False, "test-evidence", data=data, error="Test evidence failed", code="TEST_FAILED"))
+            return data
+        if name == "process-logs":
+            _require(args, 1, "process ID")
+            return self.processes.logs(args[0], limit=_option_int(args, "--limit", 12000, minimum=512, maximum=100000))
+        if name == "swagger-evidence":
+            profile = _option_value(args, "--profile", "")
+            url = _option_value(args, "--url", "")
+            timeout = float(_option_value(args, "--timeout", "45") or 45)
+            process_id = self.ids.next("P")
+            return self.runtime.swagger_evidence(
+                process_id, profile, url, timeout,
+                "--no-screenshot" not in args, "--no-start" not in args,
+                "--keep-running" in args
+            )
+        if name == "evidence":
+            title = _option_value(args, "--title", "test-evidence")
+            process_id = _option_value(args, "--process", "")
+            return self.runtime.evidence(title, process_id)
+        if name == "db-connections":
+            return self.database.connections()
+        if name == "db-schema":
+            _require(args, 1, "connection name")
+            return self.database.schema(args[0], max_rows=_option_int(args, "--max-rows", 500, minimum=1, maximum=5000))
+        if name == "db-query":
+            _require(args, 2, "connection name and SQL")
+            connection = args[0]
+            filtered = []
+            skip = False
+            for index, value in enumerate(args[1:], 1):
+                if skip:
+                    skip = False
+                    continue
+                if value in {"--max-rows", "--timeout"}:
+                    skip = True
+                    continue
+                if value == "--write":
+                    continue
+                filtered.append(value)
+            sql = " ".join(filtered)
+            return self.database.query(
+                connection, sql, allow_write="--write" in args,
+                max_rows=_option_int(args, "--max-rows", 200, minimum=1, maximum=5000),
+                timeout=_option_int(args, "--timeout", 30, minimum=1, maximum=300),
+            )
         if name == "validate":
             include_test = "--test" in args or "test" in args
             diff = self.git.diff() if "GIT" in self.workspace.adapters else ""
@@ -1249,6 +1414,11 @@ def _option_int(args: list[str], name: str, default: int, *, minimum: int, maxim
     return default
 
 
+def _option_value(args: list[str], name: str, default: str = "") -> str:
+    for index, value in enumerate(args[:-1]):
+        if value == name:
+            return str(args[index + 1])
+    return default
 def _search_args(args: list[str]) -> tuple[str, str | None, str | None, bool]:
     query_parts = []
     extension = path_prefix = None

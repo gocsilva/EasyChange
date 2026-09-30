@@ -110,6 +110,24 @@ class ProcessService:
                 item.process.wait(timeout=3)
         return {"process_id": process_id, "state": "STOPPED", "returncode": item.process.returncode}
 
+    def logs(self, process_id: str, limit: int = 12000) -> dict:
+        item = self._processes.get(process_id)
+        if item is None:
+            raise LookupError(f"Process not found: {process_id}")
+        def tail(path: Path) -> str:
+            try:
+                data = path.read_bytes()
+                return data[-max(512, int(limit)):].decode("utf-8", errors="replace")
+            except OSError:
+                return ""
+        return {
+            "process_id": process_id,
+            "state": "RUNNING" if item.process.poll() is None else "EXITED",
+            "returncode": item.process.poll(),
+            "stdout": tail(item.stdout_path),
+            "stderr": tail(item.stderr_path),
+        }
+
     def stop_all(self) -> None:
         for process_id, item in list(self._processes.items()):
             if item.process.poll() is None:
