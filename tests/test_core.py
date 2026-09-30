@@ -668,3 +668,21 @@ def test_database_read_only_classifier_rejects_mutating_cte_and_select_into():
     assert DatabaseService._is_read_only("EXPLAIN UPDATE target SET x=1") is False
     assert DatabaseService._is_read_only("PRAGMA table_info(users)") is True
     assert DatabaseService._is_read_only("PRAGMA journal_mode=WAL") is False
+
+
+
+def test_structured_result_has_stable_schema_and_primary(service):
+    result = service._execute_structured({
+        "op": "operation",
+        "type": "read",
+        "path": "sample.py",
+        "start": 1,
+        "count": 1,
+    })
+    assert result.ok
+    assert result.command == "structured"
+    assert result.data["schema"] == "easychange.structured/2"
+    assert result.data["operation"] == "operation"
+    assert result.data["count"] == 1
+    assert result.data["primary"] == result.data["results"][0]
+    assert result.data["primary"]["command"] == "read"

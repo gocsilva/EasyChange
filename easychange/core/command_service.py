@@ -465,7 +465,14 @@ class CommandService:
         result = Result(
             ok,
             "structured",
-            data={"results": results, "count": len(results), "transaction": transaction_data},
+            data={
+                "schema": "easychange.structured/2",
+                "operation": operation or "operation",
+                "results": results,
+                "primary": results[0] if len(results) == 1 else None,
+                "count": len(results),
+                "transaction": transaction_data,
+            },
             error=None if ok else ("Structured batch failed and was rolled back" if transactional else "Structured read batch failed"),
             code=None if ok else "STRUCTURED_BATCH_FAILED",
             command_id=self.ids.next("C"),

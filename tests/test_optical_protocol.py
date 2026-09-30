@@ -23,3 +23,30 @@ def test_compact_large_result_advertises_optical_transport():
     assert rendered.startswith("EC1 QOPT9999 OK")
     assert '"optical":"EC2"' in rendered
     assert len(rendered) < 1200
+
+
+
+def test_ec2_duplicate_chunks_are_idempotent():
+    import json
+
+    result = Result(True, "read", {"value": "x" * 2000}, sequence="QDUP1234")
+    packets = encode_result_chunks(result, chunk_chars=180)
+    duplicated = packets + [packets[0], packets[-1]]
+    decoded = decode_result_chunks(duplicated)
+    assert decoded["sequence"] == "QDUP1234"
+    assert decoded["data"]["value"] == "x" * 2000
+    first = json.loads(packets[0])
+    assert first["v"] == 2
+    assert first["rt"] == "result"
+
+
+def test_ec2_conflicting_duplicate_chunk_is_rejected():
+    import json
+    import pytest
+
+    result = Result(True, "read", {"value": "x" * 2000}, sequence="QDUP5678")
+    packets = encode_result_chunks(result, chunk_chars=180)
+    bad = json.loads(packets[0])
+    bad["d"] = bad["d"] + "A"
+    with pytest.raises(ValueError, match="conflicting duplicate"):
+        decode_result_chunks(packets + [json.dumps(bad, separators=(",", ":"))])
