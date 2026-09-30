@@ -29,7 +29,10 @@ class WorkspaceWatcher:
         if self._thread: self._thread.join(timeout)
 
     def poll_once(self) -> dict:
-        result = self.indexer.refresh()
+        # Watch mode is explicit and correctness-first: force metadata refresh.
+        # Normal AI commands keep the hot index O(1) and use update_path() for
+        # EasyChange-owned mutations.
+        result = self.indexer.refresh(force=True)
         if result["indexed"] or result["removed"]:
             self.last_change = result
             if self.on_change: self.on_change(result)
