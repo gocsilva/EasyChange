@@ -232,6 +232,42 @@ class Indexer:
             return int(db.execute("SELECT COUNT(*) FROM files").fetchone()[0])
 
     def symbols(self, name: str | None = None, path: str | None = None) -> list[dict]:
+        # Cold symbol queries should never wait for the full repository index.
+        # Resolve only candidate files through git-grep (or the explicit path)
+        # while the background index continues warming.
+        if not self._fully_indexed and (name is not None or path is not None):
+            self.start_background_refresh()
+            candidate_paths: list[str] = []
+            if path is not None:
+                candidate_paths = [path.replace("\\", "/")]
+            elif name is not None:
+                candidate_paths = list(dict.fromkeys(
+                    file_path for file_path, _ in self._git_search(
+                        name, regex=False, extension=None, path_prefix=None, case_sensitive=True
+                    )
+                ))
+            if candidate_paths:
+                output: list[dict] = []
+                for file_path in candidate_paths[:64]:
+                    target = self.root / Path(file_path)
+                    try:
+                        content = target.read_text(encoding="utf-8-sig")
+                    except (OSError, UnicodeDecodeError):
+                        continue
+                    for symbol_name, kind, line, column, signature in _extract_symbols(file_path, content):
+                        if name is not None and symbol_name != name:
+                            continue
+                        output.append({
+                            "id": f"S{len(output) + 1}",
+                            "file": file_path,
+                            "name": symbol_name,
+                            "kind": kind,
+                            "line": line,
+                            "column": column,
+                            "signature": signature,
+                        })
+                return output
+
         if not self._fully_indexed:
             self.refresh()
         clauses: list[str] = []
@@ -253,6 +289,7 @@ class Indexer:
              "line": row[3], "column": row[4], "signature": row[5]}
             for index, row in enumerate(rows, 1)
         ]
+
 
     @staticmethod
     def _score_match(query: str, file_path: str, line: str) -> int:
