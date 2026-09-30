@@ -371,6 +371,37 @@ class Indexer:
             self.refresh()
 
         rows = self._candidate_rows(query, regex=regex, extension=extension, path_prefix=path_prefix)
+
+        # Preserve external-edit correctness without making every warm search
+        # walk the repository. Validate only candidate files. On a miss in a
+        # Git workspace, git-grep can cheaply detect changed tracked content;
+        # non-Git workspaces pay for one explicit refresh on a miss.
+        stale_paths: list[str] = []
+        for file_path, _, indexed_size, indexed_mtime in rows:
+            try:
+                stat = (self.root / Path(file_path)).stat()
+            except OSError:
+                stale_paths.append(file_path)
+                continue
+            if stat.st_size != indexed_size or stat.st_mtime_ns != indexed_mtime:
+                stale_paths.append(file_path)
+        for file_path in stale_paths:
+            self.update_path(file_path)
+        if stale_paths:
+            rows = self._candidate_rows(query, regex=regex, extension=extension, path_prefix=path_prefix)
+        elif not rows:
+            if (self.root / ".git").exists():
+                live = self._git_search(query, regex=regex, extension=extension,
+                                        path_prefix=path_prefix, case_sensitive=case_sensitive)
+                touched = {file_path for file_path, _ in live}
+                for file_path in touched:
+                    self.update_path(file_path)
+                if touched:
+                    rows = self._candidate_rows(query, regex=regex, extension=extension, path_prefix=path_prefix)
+            else:
+                self.refresh(force=True)
+                rows = self._candidate_rows(query, regex=regex, extension=extension, path_prefix=path_prefix)
+
         found = []
         pattern = re.compile(query, 0 if case_sensitive else re.IGNORECASE) if regex else None
         needle = query if case_sensitive else query.casefold()
