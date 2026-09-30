@@ -336,11 +336,14 @@ class Indexer:
             argv.append("-i")
         argv.append("-E" if regex else "-F")
         argv += [query, "--"]
-        if path_prefix:
-            argv.append(path_prefix.replace("\\", "/").rstrip("/") + "/**")
-        if extension:
-            ext = extension if extension.startswith(".") else "." + extension
-            argv.append(f"*{ext}")
+        prefix = path_prefix.replace("\\", "/").rstrip("/") if path_prefix else ""
+        ext = (extension if extension.startswith(".") else "." + extension) if extension else ""
+        if prefix and ext:
+            argv.append(f":(glob){prefix}/**/*{ext}")
+        elif prefix:
+            argv.append(f":(glob){prefix}/**")
+        elif ext:
+            argv.append(f":(glob)**/*{ext}")
         try:
             completed = subprocess.run(argv, cwd=self.root, text=True, capture_output=True,
                                        timeout=8, check=False, shell=False)
