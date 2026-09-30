@@ -9,7 +9,7 @@ Python 3.10 or newer is required. The core uses only the standard library.
 ```powershell
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev,gui,api]"
+python -m pip install -e ".[dev,gui]"
 python -m easychange C:\path\to\workspace
 ```
 
@@ -37,10 +37,9 @@ Output can be changed with `:set output text|json|compact`; `:set transport hid`
 
 ## Interfaces
 
-- **CLI:** included, interactive and JSON-capable.
-- **GUI:** optional PySide6 (`pip install -e ".[gui]"`).
-- **HTTP API:** optional FastAPI/Uvicorn for MCP_HOST-local workspaces (`pip install -e ".[api]"`); loopback only by default. This API is not a REMOTE_PC control path.
-- **MCP:** optional stdio server for MCP_HOST-local workspaces (`pip install -e ".[mcp]"`). Do not install or launch it on REMOTE_PC for B.M.O. control; remote input is ESP32 HID and output is HDMI.
+- **Machine GUI:** the production AI control surface. Commands enter only through keyboard/HID and results leave through the visible HDMI surface using compact EC1 text plus chunked EC2 optical QR packets.
+- **CLI:** retained for local diagnostics, development, and automated tests.
+- **No HTTP or MCP server is embedded in EasyChange.** B.M.O./MCP remains outside EasyChange and may interact with it only through the physical ESP32 HID + HDMI boundary.
 
 ## Adapters and persistence
 
@@ -50,9 +49,9 @@ Edits are recorded in a persistent `.easychange/` journal. Undo/redo checks file
 
 ## B.M.O. and remote operation
 
-Compact results, persistent IDs, `:locate`, `:edit-result`, atomic batches, EC1 sequences, CRC-checked compression, and the keyboard-focused GUI reduce HDMI/HID interactions. Start the remote UI with `scripts/Start-EasyChangeRemote.ps1 -Workspace '<project path>'`. MCP-local tools are for MCP_HOST workspaces only. See [REMOTE_BOUNDARY.md](docs/REMOTE_BOUNDARY.md), [REMOTE_CONTROL.md](docs/REMOTE_CONTROL.md), [ANDROID_REMOTE.md](docs/ANDROID_REMOTE.md), [ESP32_HID_CONTRACT.md](docs/ESP32_HID_CONTRACT.md), [PROTOCOL.md](docs/PROTOCOL.md), and [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Compact results, persistent IDs, ranked `:locate`, `:study`, `:read-many`, atomic batches, EC1 request sequences, EC2 chunked/compressed QR results, CRC/SHA verification, and the keyboard-focused Machine GUI reduce HDMI/HID round trips. Start the remote UI with `scripts/Start-EasyChangeRemote.ps1 -Workspace '<project path>'`. See [REMOTE_BOUNDARY.md](docs/REMOTE_BOUNDARY.md), [REMOTE_CONTROL.md](docs/REMOTE_CONTROL.md), [ANDROID_REMOTE.md](docs/ANDROID_REMOTE.md), [ESP32_HID_CONTRACT.md](docs/ESP32_HID_CONTRACT.md), [PROTOCOL.md](docs/PROTOCOL.md), and [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-The current repository does not include Tree-sitter/LSP servers, authenticated network access, or physical HDMI/ESP32 firmware. The HTTP API binds to loopback by default.
+The current repository does not include Tree-sitter/LSP servers, network control endpoints, or physical HDMI/ESP32 firmware. EasyChange itself stays transport-agnostic and visible; the external controller owns ESP32 HID and HDMI capture.
 
 ## Tests
 

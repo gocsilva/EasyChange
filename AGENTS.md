@@ -7,4 +7,4 @@ When this repository controls or edits another software workspace, use EasyChang
 - For edits, search and read context first, make the smallest suitable journaled change, inspect `:diff`, run the detected `:test`, and use `:undo` or a transaction when a revert is needed.
 - Keep every path within the workspace bound to the service. Do not use raw shell commands for file changes when EasyChange can perform the operation.
 - Android is a relay/operator surface only when an explicit remote desktop/keyboard bridge or MCP client is connected. Do not assume Android can reach an stdio MCP process or the PC's loopback HTTP API.
-- Read [docs/REMOTE_CONTROL.md](docs/REMOTE_CONTROL.md), [docs/ANDROID_REMOTE.md](docs/ANDROID_REMOTE.md), and [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) for setup details and limitations.
+- Read [docs/REMOTE_CONTROL.md](docs/REMOTE_CONTROL.md), [docs/ANDROID_REMOTE.md](docs/ANDROID_REMOTE.md), and [docs/REMOTE_BOUNDARY.md](docs/REMOTE_BOUNDARY.md) for setup details and limitations.

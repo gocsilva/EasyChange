@@ -1,4 +1,5 @@
 from __future__ import annotations
+from easychange.remote.optical_protocol import encode_result_chunks
 
 from pathlib import Path
 
@@ -27,36 +28,60 @@ class MainWindow(QMainWindow):
             self.service.state_store.data["output_mode"] = "compact"
             self.service._persist_state()
         self.setWindowTitle(f"EasyChange — {workspace.name}")
-        self.resize(1100, 720)
+        self.resize(1400, 820)
         central = QWidget(); layout = QVBoxLayout(central)
         self.header = QLabel(f"EasyChange | {workspace.name} | {workspace.kind} | FOCUS: COMMAND")
         self.select_workspace_button = QPushButton("Selecionar projeto…")
         self.select_workspace_button.setObjectName("selectWorkspaceButton")
         self.select_workspace_button.clicked.connect(self.select_workspace)
         header_row = QHBoxLayout(); header_row.addWidget(self.header, 1); header_row.addWidget(self.select_workspace_button)
+
         self.tree = QTreeWidget(); self.tree.setHeaderLabel("FILES")
-        for item in self.service.files.list_files():
-            QTreeWidgetItem(self.tree, [item["path"]])
+        if not self._machine:
+            self._populate_tree()
         self.editor = CodeEditor(); self.editor.setPlaceholderText("Open a file with :open <path> or select it in FILES")
-        self.output = QPlainTextEdit(); self.output.setReadOnly(True); self.output.setMaximumHeight(180)
+
+        self.output = QPlainTextEdit(); self.output.setReadOnly(True); self.output.setMaximumHeight(190)
         self.output.setObjectName("machineResultRegion")
-        self.machine_qr = QLabel(); self.machine_qr.setObjectName("machineResultQr")
-        self.machine_qr.setFixedSize(160, 160); self.machine_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.machine_qrs: list[QLabel] = []
+        for index in range(4):
+            label = QLabel()
+            label.setObjectName("machineResultQr" if index == 0 else f"machineResultQr{index + 1}")
+            label.setFixedSize(170, 170)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.hide()
+            self.machine_qrs.append(label)
+        self.machine_qr = self.machine_qrs[0]
+
+        self._optical_payloads: list[str] = []
+        self._optical_page = 0
+        self._optical_timer = QTimer(self)
+        self._optical_timer.setInterval(420)
+        self._optical_timer.timeout.connect(self._render_optical_page)
+
         self.result_panel = QWidget(); result_layout = QHBoxLayout(self.result_panel)
-        result_layout.setContentsMargins(0, 0, 0, 0); result_layout.addWidget(self.output, 1); result_layout.addWidget(self.machine_qr)
-        self.machine_qr.hide()
-        split = QSplitter(Qt.Orientation.Horizontal); split.addWidget(self.tree); split.addWidget(self.editor)
-        split.setStretchFactor(1, 1)
+        result_layout.setContentsMargins(0, 0, 0, 0)
+        result_layout.setSpacing(4)
+        result_layout.addWidget(self.output, 1)
+        for label in self.machine_qrs:
+            result_layout.addWidget(label)
+
+        self.split = QSplitter(Qt.Orientation.Horizontal)
+        self.split.addWidget(self.tree)
+        self.split.addWidget(self.editor)
+        self.split.setStretchFactor(1, 1)
+
         self.command = QLineEdit(); self.command.setPlaceholderText("COMMAND > :remote-guide | Ctrl+K | Enter")
         self.command.setMaxLength(65535)
         self.command.installEventFilter(self)
-        layout.addLayout(header_row); layout.addWidget(split, 1); layout.addWidget(self.result_panel); layout.addWidget(self.command)
+        layout.addLayout(header_row); layout.addWidget(self.split, 1); layout.addWidget(self.result_panel); layout.addWidget(self.command)
         self.setCentralWidget(central)
         self.command.returnPressed.connect(self.execute_command)
         self.tree.itemActivated.connect(self.open_selected)
         self.tree.itemDoubleClicked.connect(self.open_selected)
         self.tree.currentItemChanged.connect(self.preview_selected)
         self._active_path: str | None = None
+
         self._add_shortcut("Ctrl+K", self.focus_command)
         self._add_shortcut("F12", self.toggle_machine)
         self._add_shortcut("Escape", self.focus_command)
@@ -74,8 +99,7 @@ class MainWindow(QMainWindow):
         self._add_shortcut("F7", lambda: self._run_command(":errors"))
         self._add_shortcut("F8", lambda: self._run_command(":next-error"))
         self._add_shortcut("Shift+F8", lambda: self._run_command(":previous-error"))
-        if self._machine:
-            self._apply_machine_style()
+        self._apply_machine_style()
         self._refresh_header()
         self._run_command(":remote")
 
@@ -135,8 +159,8 @@ class MainWindow(QMainWindow):
             self.editor.clear()
             self.editor.document().setModified(False)
             self.tree.clear()
-            for item in self.service.files.list_files():
-                QTreeWidgetItem(self.tree, [item["path"]])
+            if not self._machine:
+                self._populate_tree()
             self.setWindowTitle(f"EasyChange — {new_workspace.name}")
             self._refresh_header()
             self._run_command(":remote")
@@ -146,17 +170,26 @@ class MainWindow(QMainWindow):
             self._workspace_dialog_open = False
             self.focus_command()
 
+    def _populate_tree(self) -> None:
+        self.tree.clear()
+        for item in self.service.files.list_files():
+            QTreeWidgetItem(self.tree, [item["path"]])
     def toggle_machine(self) -> None:
         self._machine = not self._machine
         self.service.machine = self._machine
         self.service._persist_state()
+        if not self._machine and self.tree.topLevelItemCount() == 0:
+            self._populate_tree()
         self._apply_machine_style()
         self._refresh_header()
         self.focus_command()
 
     def _apply_machine_style(self) -> None:
         self.setStyleSheet("QWidget { background:#101820; color:#f2f5f7; font-family: Consolas, monospace; }" if self._machine else "")
-        self.machine_qr.setVisible(self._machine and bool(self.machine_qr.pixmap()))
+        self.tree.setVisible(not self._machine)
+        self.select_workspace_button.setVisible(not self._machine)
+        for label in self.machine_qrs:
+            label.setVisible(self._machine and bool(label.pixmap()))
         self.editor.highlighter.setDocument(None)
         self.editor.highlighter = BasicHighlighter(self.editor.document(), high_contrast=self._machine)
 
@@ -189,40 +222,64 @@ class MainWindow(QMainWindow):
         self.focus_command()
 
     def _update_machine_qr(self, result) -> None:
-        self.machine_qr.clear()
-        self.machine_qr.setVisible(False)
+        self._optical_timer.stop()
+        self._optical_payloads = []
+        self._optical_page = 0
+        for label in self.machine_qrs:
+            label.clear()
+            label.setVisible(False)
         if not self._machine:
             return
         try:
-            import json
-            import qrcode
-            compact_data = {}
-            if isinstance(result.data, dict):
-                allowed = {"state", "workspace", "workspace_id", "instance_id", "name", "type", "file", "line", "dirty",
-                           "transaction", "git", "count", "matches", "path", "change_id", "duplicate"}
-                compact_data = {key: value for key, value in result.data.items() if key in allowed}
-            packet = {
-                "protocol": "EC1", "sequence": result.sequence,
-                "status": "OK" if result.ok else "ERR", "command": result.command,
-                "command_id": result.command_id, "duration_ms": result.duration_ms,
-                "code": result.code, "error": result.error, "data": compact_data,
-            }
-            payload = json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
-            if len(payload.encode("utf-8")) > 700:
-                return
-            code = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=1, border=3)
-            code.add_data(payload); code.make(fit=True)
-            matrix = code.get_matrix(); height = len(matrix); width = len(matrix[0])
+            self._optical_payloads = encode_result_chunks(result)
+            self._render_optical_page()
+            if len(self._optical_payloads) > len(self.machine_qrs):
+                self._optical_timer.start()
+        except (ImportError, ValueError, RuntimeError):
+            # Compact EC1 text remains a correlation fallback.
+            return
+
+    def _render_optical_page(self) -> None:
+        if not self._machine or not self._optical_payloads:
+            return
+        import qrcode
+
+        slots = len(self.machine_qrs)
+        page_count = max(1, (len(self._optical_payloads) + slots - 1) // slots)
+        page = self._optical_page % page_count
+        start = page * slots
+        payloads = self._optical_payloads[start:start + slots]
+
+        for label in self.machine_qrs:
+            label.clear()
+            label.setVisible(False)
+
+        for label, payload in zip(self.machine_qrs, payloads):
+            code = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=1, border=2)
+            code.add_data(payload)
+            code.make(fit=True)
+            matrix = code.get_matrix()
+            height = len(matrix); width = len(matrix[0])
             image = QImage(width, height, QImage.Format.Format_RGB32)
             for y, row in enumerate(matrix):
                 for x, dark in enumerate(row):
                     image.setPixelColor(x, y, QColor(0, 0, 0) if dark else QColor(255, 255, 255))
-            pixmap = QPixmap.fromImage(image).scaled(self.machine_qr.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                                                     Qt.TransformationMode.FastTransformation)
-            self.machine_qr.setPixmap(pixmap); self.machine_qr.setVisible(True)
-        except (ImportError, ValueError, RuntimeError):
-            # Plain compact text remains the complete fallback protocol.
-            return
+            # Never distort QR modules with fractional scaling. HDMI capture
+            # decoders are much more reliable when every module occupies an
+            # exact integer number of pixels.
+            scale = max(1, min(label.width() // width, label.height() // height))
+            render_width = width * scale
+            render_height = height * scale
+            pixmap = QPixmap.fromImage(image).scaled(
+                render_width,
+                render_height,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+            label.setPixmap(pixmap)
+            label.setVisible(True)
+
+        self._optical_page = (page + 1) % page_count
 
     def _prompt(self, value: str) -> None:
         self.command.setText(value); self.focus_command(); self.command.setCursorPosition(len(value))

@@ -259,3 +259,64 @@ def test_locate_combines_context_and_result_ids_do_not_collide(service, tmp_path
     edit = restarted.execute(':edit-result R2 "NumeroProtocolo = 8"')
     assert edit.ok and "= 8" in (tmp_path / "sample.py").read_text(encoding="utf-8")
     assert restarted.execute(":undo").ok
+
+
+
+def test_search_ranks_source_definition_before_docs(service, tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "src" / "ReceberLoteAcam225UseCase.cs").write_text(
+        "public sealed class ReceberLoteAcam225UseCase {}\n", encoding="utf-8"
+    )
+    (tmp_path / "docs" / "history.md").write_text(
+        "ReceberLoteAcam225UseCase old notes\n", encoding="utf-8"
+    )
+    service.indexer.invalidate()
+    result = service.execute(":search ReceberLoteAcam225UseCase")
+    assert result.ok
+    assert result.data["matches"][0]["file"].startswith("src/")
+
+
+def test_symbol_cache_reuses_unchanged_file(service, tmp_path):
+    (tmp_path / "module.py").write_text("class CachedExample:\n    pass\n", encoding="utf-8")
+    service.indexer.invalidate()
+    first = service.execute(":definition CachedExample")
+    assert first.ok and first.data["symbols"]
+    cache = tmp_path / ".easychange" / "symbols.json"
+    assert cache.exists()
+    before = cache.read_text(encoding="utf-8")
+    second = service.execute(":definition CachedExample")
+    assert second.ok and second.data["symbols"]
+    assert cache.read_text(encoding="utf-8") == before
+
+
+
+def test_study_and_read_many_reduce_round_trips(service, tmp_path):
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "Feature.cs").write_text(
+        "public sealed class Feature {\n    public void Run() {}\n}\n", encoding="utf-8"
+    )
+    (tmp_path / "src" / "Caller.cs").write_text(
+        "public sealed class Caller { Feature value = new Feature(); }\n", encoding="utf-8"
+    )
+    service.indexer.invalidate()
+    study = service.execute(":study Feature --limit 6 --context 2")
+    assert study.ok
+    assert study.data["definitions"]
+    assert study.data["files"][0].startswith("src/")
+    many = service.execute(":read-many src/Feature.cs src/Caller.cs --count 40")
+    assert many.ok and many.data["count"] == 2
+    assert any("Feature" in line for line in many.data["files"][0]["lines"])
+
+
+def test_structured_read_batch_does_not_open_transaction(service):
+    result = service._execute_structured({
+        "op": "batch",
+        "operations": [
+            {"type": "read", "path": "sample.py", "start": 1, "count": 5},
+            {"type": "search", "query": "NumeroProtocolo"},
+        ],
+    })
+    assert result.ok
+    assert result.data["transaction"]["state"] == "NOT_REQUIRED"
+    assert service.transaction is None

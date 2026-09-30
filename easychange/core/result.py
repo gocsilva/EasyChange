@@ -26,9 +26,20 @@ class Result:
             import json
             prefix = f"EC1 {self.sequence} " if self.sequence else ""
             if not self.ok:
-                details = json.dumps({"error": self.error, "data": self.data}, ensure_ascii=False, separators=(",", ":"))
+                essential = {"error": self.error, "code": self.code}
+                if self.data:
+                    essential["keys"] = list(self.data)[:12]
+                details = json.dumps(essential, ensure_ascii=False, separators=(",", ":"))
                 return f"{prefix}ERR {self.command_id or '-'} {self.code or 'ERROR'} {self.command} {details}"
-            details = json.dumps(self.data, ensure_ascii=False, separators=(",", ":"))
+            encoded = json.dumps(self.data, ensure_ascii=False, separators=(",", ":"))
+            if len(encoded.encode("utf-8")) > 900:
+                summary = {"optical": "EC2", "payload_bytes": len(encoded.encode("utf-8")), "keys": list(self.data)[:12]}
+                for key in ("path", "file", "count", "state", "workspace", "line", "transaction"):
+                    if key in self.data:
+                        summary[key] = self.data[key]
+                details = json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
+            else:
+                details = encoded
             return f"{prefix}OK {self.command_id or '-'} {self.command} {self.duration_ms}ms {details}"
         status = "OK" if self.ok else "ERROR"
         lines = [status, f"COMMAND: {self.command.upper()}"]

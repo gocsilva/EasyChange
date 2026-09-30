@@ -164,69 +164,104 @@ class CommandService:
         return result
 
     def _execute_structured(self, payload: dict) -> Result:
-        """Apply a bounded HID-delivered operation packet using local services."""
+        """Execute bounded HID-delivered operations; read-only batches avoid transactions."""
         started = time.monotonic()
         operation = str(payload.get("op") or "").casefold()
-        if operation == "batch":
-            operations = payload.get("operations")
-        else:
-            operations = [payload]
+        operations = payload.get("operations") if operation == "batch" else [payload]
         if not isinstance(operations, list) or not 1 <= len(operations) <= 16:
             return Result(False, "structured", error="OPERATION_COUNT_LIMIT", code="INVALID_STRUCTURED_PAYLOAD")
-        if self.transaction is not None:
+
+        mutation_types = {"write_file", "create_file", "replace_line"}
+        kinds = [str(item.get("type") or "").casefold() if isinstance(item, dict) else "" for item in operations]
+        transactional = any(kind in mutation_types for kind in kinds)
+        if transactional and self.transaction is not None:
             return Result(False, "structured", error="BATCH_CANNOT_NEST_TRANSACTION", code="TRANSACTION_ACTIVE")
-        opened = self.execute_tokens("begin", [], raw=":begin")
-        if not opened.ok:
-            return opened
+
+        if transactional:
+            opened = self.execute_tokens("begin", [], raw=":begin")
+            if not opened.ok:
+                return opened
+
         results = []
         for item in operations:
             if not isinstance(item, dict):
-                results.append(Result(False, "structured", error="OPERATION_OBJECT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD").to_dict())
-                break
-            kind = str(item.get("type") or "").casefold()
-            if kind in {"write_file", "create_file"}:
-                path, content = item.get("path"), item.get("content")
-                if not isinstance(path, str) or not isinstance(content, str):
-                    result = Result(False, kind, error="PATH_AND_CONTENT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
-                else:
-                    try:
-                        if kind == "create_file" and self.workspace.resolve(path).exists():
-                            result = Result(False, kind, error=f"File already exists: {path}", code="FILE_EXISTS")
-                        else:
-                            result = self.execute_tokens("write", [path, content], raw=f"EC1 {kind} {path}")
-                    except Exception as exc:
-                        result = Result(False, kind, error=str(exc), code=getattr(exc, "code", type(exc).__name__))
-            elif kind == "replace_line":
-                path, line, content = item.get("path"), item.get("line"), item.get("content")
-                if not isinstance(path, str) or not isinstance(content, str) or isinstance(line, bool) or not isinstance(line, int):
-                    result = Result(False, kind, error="PATH_LINE_AND_CONTENT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
-                else:
-                    result = self.execute_tokens("replace-line", [path, str(line), content], raw=f"EC1 patch {path}:{line}")
-            elif kind == "read":
-                path = item.get("path")
-                if not isinstance(path, str):
-                    result = Result(False, kind, error="PATH_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
-                else:
-                    args = [path]
-                    if isinstance(item.get("start"), int): args.append(str(item["start"]))
-                    if isinstance(item.get("count"), int): args.append(str(item["count"]))
-                    result = self.execute_tokens("read", args, raw=f"EC1 read {path}")
-            elif kind == "search":
-                query = item.get("query")
-                result = self.execute_tokens("search", [query], raw="EC1 search") if isinstance(query, str) else Result(False, kind, error="QUERY_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
+                result = Result(False, "structured", error="OPERATION_OBJECT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
             else:
-                result = Result(False, "structured", error=f"Unsupported operation: {kind}", code="OPERATION_NOT_ALLOWED")
+                kind = str(item.get("type") or "").casefold()
+                if kind in {"write_file", "create_file"}:
+                    path, content = item.get("path"), item.get("content")
+                    if not isinstance(path, str) or not isinstance(content, str):
+                        result = Result(False, kind, error="PATH_AND_CONTENT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        try:
+                            if kind == "create_file" and self.workspace.resolve(path).exists():
+                                result = Result(False, kind, error=f"File already exists: {path}", code="FILE_EXISTS")
+                            else:
+                                result = self.execute_tokens("write", [path, content], raw=f"EC1 {kind} {path}")
+                        except Exception as exc:
+                            result = Result(False, kind, error=str(exc), code=getattr(exc, "code", type(exc).__name__))
+                elif kind == "replace_line":
+                    path, line, content = item.get("path"), item.get("line"), item.get("content")
+                    if not isinstance(path, str) or not isinstance(content, str) or isinstance(line, bool) or not isinstance(line, int):
+                        result = Result(False, kind, error="PATH_LINE_AND_CONTENT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        result = self.execute_tokens("replace-line", [path, str(line), content], raw=f"EC1 patch {path}:{line}")
+                elif kind == "read":
+                    path = item.get("path")
+                    if not isinstance(path, str):
+                        result = Result(False, kind, error="PATH_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        args = [path]
+                        if isinstance(item.get("start"), int):
+                            args.append(str(item["start"]))
+                        if isinstance(item.get("count"), int):
+                            args.append(str(item["count"]))
+                        result = self.execute_tokens("read", args, raw=f"EC1 read {path}")
+                elif kind in {"search", "locate", "study", "definition", "references"}:
+                    query = item.get("query") or item.get("name")
+                    if not isinstance(query, str) or not query:
+                        result = Result(False, kind, error="QUERY_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        args = [query]
+                        if kind in {"search", "locate", "study"} and isinstance(item.get("limit"), int):
+                            args += ["--limit", str(item["limit"])]
+                        if kind in {"locate", "study"} and isinstance(item.get("context"), int):
+                            args += ["--context", str(item["context"])]
+                        result = self.execute_tokens(kind, args, raw=f"EC1 {kind} {query}")
+                elif kind == "read_many":
+                    paths = item.get("paths")
+                    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+                        result = Result(False, kind, error="PATHS_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        args = list(paths)
+                        if isinstance(item.get("count"), int):
+                            args += ["--count", str(item["count"])]
+                        result = self.execute_tokens("read-many", args, raw="EC1 read-many")
+                elif kind == "validate":
+                    args = ["--test"] if item.get("test") else []
+                    result = self.execute_tokens("validate", args, raw="EC1 validate")
+                else:
+                    result = Result(False, "structured", error=f"Unsupported operation: {kind}", code="OPERATION_NOT_ALLOWED")
             results.append(result.to_dict())
             if not result.ok:
                 break
+
         ok = len(results) == len(operations) and all(item["ok"] for item in results)
-        transaction = self.execute_tokens("commit" if ok else "rollback", [], raw=":commit" if ok else ":rollback")
-        ok = bool(ok and transaction.ok)
-        result = Result(ok, "structured", data={"results": results, "count": len(results),
-                                                  "transaction": transaction.data if transaction.ok else {"state": "UNKNOWN"}},
-                        error=None if ok else "Structured batch failed and was rolled back",
-                        code=None if ok else "STRUCTURED_BATCH_FAILED",
-                        command_id=self.ids.next("C"), duration_ms=int((time.monotonic() - started) * 1000))
+        transaction_data = {"state": "NOT_REQUIRED"}
+        if transactional:
+            transaction = self.execute_tokens("commit" if ok else "rollback", [], raw=":commit" if ok else ":rollback")
+            transaction_data = transaction.data if transaction.ok else {"state": "UNKNOWN", "error": transaction.code}
+            ok = bool(ok and transaction.ok)
+
+        result = Result(
+            ok,
+            "structured",
+            data={"results": results, "count": len(results), "transaction": transaction_data},
+            error=None if ok else ("Structured batch failed and was rolled back" if transactional else "Structured read batch failed"),
+            code=None if ok else "STRUCTURED_BATCH_FAILED",
+            command_id=self.ids.next("C"),
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
         self._persist_state(result)
         return result
 
@@ -323,14 +358,15 @@ class CommandService:
         if name in {"help", "capabilities"}:
             return {"commands": ["state", "workspace", "pwd", "files", "tree", "next", "prev", "read", "head", "tail", "context", "goto",
                     "search", "find", "index", "symbols", "symbol", "definition", "references", "implementations", "outline", "file-summary",
-                    "locate", "edit-result",
+                    "locate", "study", "read-many", "validate", "edit-result",
                     "new", "mkdir", "write", "append", "insert", "replace", "replace-line", "replace-range", "delete", "rename", "move", "stat", "hash", "exists",
                     "rename-symbol", "create-class", "create-interface", "create-test", "format", "fix-imports", "organize-imports",
                     "journal", "undo", "redo", "begin", "commit", "rollback", "snapshot", "lock", "unlock", "locks", "watch", "batch", "macro", "alias", "complete", "history", "repeat", "clear",
                     "status", "diff", "branch", "log", "build", "test", "run", "processes", "stop", "errors", "next-error", "previous-error", "remote", "remote-guide", "remote-profile", "prepare-hid", "set", "machine", "human", "quit"],
                     "capabilities": {"workspace": True, "git": "GIT" in self.workspace.adapters,
                     "build_test": self.workspace.adapters, "index": True, "symbols": True,
-                    "local_api": True, "local_mcp": True,
+                    "ai_machine": {"optical_protocol": "EC2", "qr_slots": 4, "chunked_results": True,
+                                   "composite_study": True, "read_many": True, "validate": True},
                     "remote_control": {"input": "ESP32_HID", "output": "HDMI",
                                        "mcp_on_remote_pc": False, "api_on_remote_pc": False}}}
         if name == "state":
@@ -412,6 +448,50 @@ class CommandService:
                     match["context"] = self.files.read(match["file"], start, radius * 2 + 1)["lines"]
                 return {"query": query, "count": len(matches), "matches": matches}
             return {"page": offset // limit + 1, "matches": matches}
+
+        if name == "study":
+            _require(args, 1, "symbol or search term")
+            term = args[0]
+            limit = _option_int(args, "--limit", 8, minimum=1, maximum=20)
+            radius = _option_int(args, "--context", 3, minimum=0, maximum=20)
+            matches = self._register_matches(self.indexer.search(term, limit=limit))
+            for match in matches:
+                start = max(1, int(match["line"]) - radius)
+                match["context"] = self.files.read(match["file"], start, radius * 2 + 1)["lines"]
+            definitions = self.symbol_service.definition(term)
+            references = self._register_matches(self.symbol_service.references(term, min(24, limit * 3)))
+            files = []
+            seen = set()
+            for item in [*definitions, *matches, *references]:
+                path = item.get("file")
+                if path and path not in seen:
+                    seen.add(path); files.append(path)
+            return {
+                "term": term,
+                "definitions": definitions[:8],
+                "matches": matches,
+                "references": references,
+                "files": files[:16],
+                "index": "incremental",
+            }
+
+        if name == "read-many":
+            _require(args, 1, "one or more paths")
+            count = _option_int(args, "--count", 120, minimum=1, maximum=600)
+            paths = []
+            skip = False
+            for index, item in enumerate(args):
+                if skip:
+                    skip = False
+                    continue
+                if item == "--count":
+                    skip = True
+                    continue
+                paths.append(self._resolve_ref(item))
+            if not paths or len(paths) > 8:
+                raise ValueError("read-many requires 1 to 8 paths")
+            return {"files": [self.files.read(path, 1, count) for path in paths], "count": len(paths)}
+
         if name == "edit-result":
             _require(args, 2, "search result ID and replacement line")
             match = self.results.get(args[0])
@@ -661,6 +741,23 @@ class CommandService:
             entry = redone[0]; change = Change(entry.path, entry.before, entry.after, entry.change_id, entry.command)
             self._apply_after(change); self.journal.append(change)
             return {"redone": change.path, "change_id": change.change_id}
+        if name == "validate":
+            include_test = "--test" in args or "test" in args
+            diff = self.git.diff() if "GIT" in self.workspace.adapters else ""
+            build = self.execute_tokens("build", [], raw=":build")
+            if not build.ok:
+                raise ProcessFailure(Result(False, "validate", data={"diff": diff, "build": build.to_dict(), "test": None},
+                                            error=build.error, code=build.code or "BUILD_FAILED"))
+            test_result = None
+            if include_test:
+                test_result = self.execute_tokens("test", [], raw=":test")
+                if not test_result.ok:
+                    raise ProcessFailure(Result(False, "validate", data={"diff": diff, "build": build.to_dict(),
+                                                                          "test": test_result.to_dict()},
+                                                error=test_result.error, code=test_result.code or "TEST_FAILED"))
+            return {"passed": True, "diff": diff, "build": build.to_dict(),
+                    "test": test_result.to_dict() if test_result else None}
+
         if name in {"build", "test", "run"}:
             if name == "run" and args and args[0] == "--background":
                 process_id = self.ids.next("P")
@@ -730,6 +827,7 @@ class CommandService:
         before = resolved.read_text(encoding="utf-8") if resolved.exists() else None
         outcome = self.files.write(path, content)
         self._record(relative, before, content)
+        self.indexer.update_path(relative)
         return outcome
 
     def _force_write(self, path: str, content: str) -> dict:
@@ -740,6 +838,7 @@ class CommandService:
         if resolved.exists(): self.files.remember(relative)
         outcome = self.files.write(path, content, force=True)
         self._record(relative, before, content)
+        self.indexer.update_path(relative)
         return outcome
 
     def _edit(self, path: str, operation) -> dict:
@@ -751,6 +850,7 @@ class CommandService:
         outcome = operation()
         after = resolved.read_text(encoding="utf-8")
         self._record(relative, before, after)
+        self.indexer.update_path(relative)
         return outcome
 
     def _record(self, path: str, before: str | None, after: str | None) -> None:

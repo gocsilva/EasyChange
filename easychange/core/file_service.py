@@ -32,7 +32,8 @@ class FileService:
 
     def list_files(self, limit: int = 500) -> list[dict[str, str]]:
         items = []
-        ignored = {".git", ".venv", "venv", "node_modules", "__pycache__", ".easychange"}
+        ignored = {".git", ".easychange", ".venv", "venv", "node_modules", "bin", "obj", "dist", "build",
+                   "__pycache__", ".gradle", ".idea", ".vs", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
         for path in sorted(self.workspace.root_path.rglob("*")):
             if any(part in ignored for part in path.parts):
                 continue
