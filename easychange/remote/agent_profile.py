@@ -26,13 +26,13 @@ REMOTE_PROFILE = {
     },
     "workflow": [
         ":state",
-        ":search <term>",
-        ":context <R-id>",
-        ":replace-line <path> <line> <text>",
+        ":locate <term> --context 2",
+        ":edit-result <R-id> <replacement line>",
         ":diff && :test",
         ":undo  (only when requested or validation indicates the change should be reverted)",
     ],
     "mcp_tools": ["state", "capabilities", "command", "remote_quickstart", "prepare_hid_session", "launch_hid_gui",
+                  "workspace_brief", "search_context", "apply_edit_plan", "verify_change",
                   "search", "read_file", "edit_file", "git_diff", "test", "undo"],
     "android_modes": {
         "remote_desktop": "Open the remote EasyChange GUI session, keep the command input focused, and use the HID workflow.",
@@ -85,7 +85,7 @@ This guide is served by MCP so connected agents can discover the correct workflo
 
 ## Safe, low-interaction workflow
 
-The GUI displays a `:remote` boot card; run `:remote-guide` for this guide or `:prepare-hid` to switch a human-mode GUI into high-contrast compact mode. Then run `:state`, `:search <term>`, `:context <R-id>`, edit with `:replace-line` or `:write`, and finish with `:diff && :test`. Keep IDs and paths from the returned data. Use `:undo` only when requested or when validation calls for reverting. All paths must remain within the workspace. For conflicts, inspect `:diff` or use `:reload`; use `:force-write` only when overwriting the external change is intended.
+The GUI displays a `:remote` boot card; run `:remote-guide` for this guide or `:prepare-hid` to switch a human-mode GUI into high-contrast compact mode. Then use `:locate <term> --context 2` to get result IDs and surrounding lines in one call, and `:edit-result <R-id> <replacement line>` for a single-line change. Finish with `:diff && :test`. Keep IDs and paths from the returned data. Use `:undo` only when requested or when validation calls for reverting. All paths must remain within the workspace. For conflicts, inspect `:diff` or use `:reload`; use `:force-write` only when overwriting the external change is intended.
 
 ## Useful GUI controls
 

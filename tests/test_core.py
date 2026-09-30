@@ -160,3 +160,18 @@ def test_remote_boot_card_and_prepare_hid(service):
     prepared = service.execute(":prepare-hid")
     assert prepared.ok and prepared.data["transport"] == "hid"
     assert service.machine and service.output == "compact"
+
+
+def test_locate_combines_context_and_result_ids_do_not_collide(service, tmp_path):
+    (tmp_path / "sample.py").write_text("first\nNumeroProtocolo = 7\nlast\n", encoding="utf-8")
+    located = service.execute(":locate NumeroProtocolo --context 1")
+    hit = located.data["matches"][0]
+    assert hit["id"] == "R1" and hit["context"] == ["1|first", "2|NumeroProtocolo = 7", "3|last"]
+    restarted = CommandService(Workspace.open(tmp_path))
+    later = restarted.execute(":search NumeroProtocolo")
+    assert later.data["matches"][0]["id"] == "R2"
+    original = restarted.execute(":read R1")
+    assert original.data["start"] == 2
+    edit = restarted.execute(':edit-result R2 "NumeroProtocolo = 8"')
+    assert edit.ok and "= 8" in (tmp_path / "sample.py").read_text(encoding="utf-8")
+    assert restarted.execute(":undo").ok

@@ -20,11 +20,25 @@ def test_stdio_mcp_tools(tmp_path):
                 assert "remote_guide" in (initialized.instructions or "")
                 tools = await session.list_tools()
                 names = {tool.name for tool in tools.tools}
-                assert {"state", "search", "edit_file", "undo", "command", "remote_quickstart", "prepare_hid_session", "launch_hid_gui"} <= names
+                assert {"state", "search", "edit_file", "undo", "command", "remote_quickstart", "prepare_hid_session", "launch_hid_gui",
+                        "workspace_brief", "search_context", "apply_edit_plan", "verify_change"} <= names
                 state = await session.call_tool("state", {})
                 assert not state.is_error
                 search = await session.call_tool("search", {"query": "find-me"})
                 assert not search.is_error
+                with_context = await session.call_tool("search_context", {"query": "find-me", "context_lines": 0})
+                assert not with_context.is_error
+                brief = await session.call_tool("workspace_brief", {"file_limit": 5})
+                assert not brief.is_error
+                edited = await session.call_tool("apply_edit_plan", {"steps": [
+                    {"operation": "replace_line", "path": "sample.txt", "line": 1, "text": "changed"}
+                ]})
+                assert not edited.is_error and (tmp_path / "sample.txt").read_text(encoding="utf-8") == "changed"
+                rolled_back = await session.call_tool("apply_edit_plan", {"steps": [
+                    {"operation": "replace_line", "path": "sample.txt", "line": 1, "text": "temporary"},
+                    {"operation": "replace_line", "path": "sample.txt", "line": 99, "text": "bad"},
+                ]})
+                assert not rolled_back.is_error and (tmp_path / "sample.txt").read_text(encoding="utf-8") == "changed"
                 capabilities = await session.call_tool("command", {"text": ":capabilities"})
                 assert not capabilities.is_error
                 quickstart = await session.call_tool("remote_quickstart", {})

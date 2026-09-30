@@ -1,4 +1,4 @@
-"""Simulate the concise keyboard-only search/edit/test/undo workflow."""
+"""Simulate the reduced-round-trip HDMI/ESP keyboard workflow."""
 from __future__ import annotations
 
 import subprocess
@@ -21,19 +21,28 @@ def main() -> int:
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         subprocess.run(["git", "add", "src/sample.py"], cwd=root, check=True)
         service = CommandService(Workspace.open(root))
+        commands = [":locate NumeroProtocolo --context 2"]
         actions = []
-        search = service.execute(":search NumeroProtocolo"); actions.append(search)
-        result_id = search.data["matches"][0]["id"]
-        actions.append(service.execute(f":context {result_id}"))
-        actions.append(service.execute(':replace-line src/sample.py 2 "    return \'new\'"'))
-        actions.append(service.execute(":diff"))
-        actions.append(service.execute(":test"))
-        actions.append(service.execute(":undo"))
-        failures = [result for result in actions if not result.ok or (result.command == "test" and result.data.get("returncode") != 0)]
-        print(f"REMOTE_WORKFLOW_COMMANDS={len(actions)}")
-        print(f"REMOTE_WORKFLOW_PASSED={len(actions) - len(failures)}/{len(actions)}")
-        print(f"REMOTE_WORKFLOW_DURATION_MS={sum(result.duration_ms for result in actions)}")
-        return 1 if failures else 0
+        try:
+            located = service.execute(commands[-1]); actions.append(located)
+            result_id = located.data["matches"][0]["id"]
+            commands.append(f':edit-result {result_id} "NumeroProtocolo = 8"')
+            actions.append(service.execute(commands[-1]))
+            commands.append(":diff && :test")
+            actions.append(service.execute(commands[-1]))
+            commands.append(":undo")
+            actions.append(service.execute(commands[-1]))
+            failures = [result for result in actions if not result.ok]
+            compact = [result.render("compact") for result in actions]
+            keypresses = sum(len(command) + 1 for command in commands)
+            print(f"REMOTE_WORKFLOW_COMMANDS={len(actions)}")
+            print(f"REMOTE_WORKFLOW_PASSED={len(actions) - len(failures)}/{len(actions)}")
+            print(f"REMOTE_WORKFLOW_APPROX_KEYPRESSES={keypresses}")
+            print(f"REMOTE_WORKFLOW_COMPACT_RESULTS_WITH_DATA={sum('ms {' in value for value in compact)}/{len(compact)}")
+            print(f"REMOTE_WORKFLOW_DURATION_MS={sum(result.duration_ms for result in actions)}")
+            return 1 if failures else 0
+        finally:
+            service.close()
 
 
 if __name__ == "__main__":

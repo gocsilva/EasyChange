@@ -179,6 +179,7 @@ class CommandService:
         if name in {"help", "capabilities"}:
             return {"commands": ["state", "workspace", "pwd", "files", "tree", "next", "prev", "read", "head", "tail", "context", "goto",
                     "search", "find", "index", "symbols", "symbol", "definition", "references", "implementations", "outline", "file-summary",
+                    "locate", "edit-result",
                     "new", "mkdir", "write", "append", "insert", "replace", "replace-line", "replace-range", "delete", "rename", "move", "stat", "hash", "exists",
                     "rename-symbol", "create-class", "create-interface", "create-test", "format", "fix-imports", "organize-imports",
                     "journal", "undo", "redo", "begin", "commit", "rollback", "snapshot", "lock", "unlock", "locks", "watch", "batch", "macro", "alias", "complete", "history", "repeat", "clear",
@@ -199,7 +200,7 @@ class CommandService:
         if name in {"files", "tree", "projects"}:
             offset, limit = _page_args(args, default_limit=self.page_size)
             items = self.indexer.files(offset=offset, limit=limit)
-            items = [{"path": item["path"], "id": f"F{offset+i+1}", "kind": item["language"],
+            items = [{"path": item["path"], "id": self.ids.next("F"), "kind": item["language"],
                       "size": item["size"], "hash": item["hash"][:12]} for i, item in enumerate(items)]
             self.page_items = items; self.page_offset = offset; self.page_size = limit
             self.file_refs.update({item["id"]: item["path"] for item in items})
@@ -211,8 +212,7 @@ class CommandService:
                 query, extension, path_prefix, regex = self.page_query
                 matches = self.indexer.search(query, extension=extension, path_prefix=path_prefix, regex=regex,
                                               offset=offset, limit=self.page_size)
-                self.results.update({item["id"]: item for item in matches})
-                self.file_refs.update({item["id"]: item["file"] for item in matches})
+                matches = self._register_matches(matches)
                 self.page_offset = offset; self.page_items = matches
                 return {"page": offset // self.page_size + 1, "matches": matches}
             return self._dispatch("files", ["--offset", str(offset), "--limit", str(self.page_size)])
@@ -248,22 +248,38 @@ class CommandService:
             info = self.files.read(args[0], start, count)
             self._set_current(args[0], start)
             return info
-        if name in {"search", "find"}:
+        if name in {"search", "find", "locate"}:
             _require(args, 1, "query")
             query, extension, path_prefix, regex = _search_args(args)
-            offset, limit = _page_args(args, default_limit=self.page_size)
+            offset, limit = _page_args(args, default_limit=10 if name == "locate" else self.page_size)
             matches = self.indexer.search(query, extension=extension, path_prefix=path_prefix, regex=regex,
                                           offset=offset, limit=limit)
-            self.results.update({item["id"]: item for item in matches})
-            self.file_refs.update({item["id"]: item["file"] for item in matches})
+            matches = self._register_matches(matches)
             self.page_items = matches; self.page_offset = offset; self.page_size = limit
             self.page_kind = "search"; self.page_query = (query, extension, path_prefix, regex)
+            if name == "locate":
+                radius = _option_int(args, "--context", 2, minimum=0, maximum=20)
+                for match in matches:
+                    start = max(1, int(match["line"]) - radius)
+                    match["context"] = self.files.read(match["file"], start, radius * 2 + 1)["lines"]
+                return {"query": query, "count": len(matches), "matches": matches}
             return {"page": offset // limit + 1, "matches": matches}
+        if name == "edit-result":
+            _require(args, 2, "search result ID and replacement line")
+            match = self.results.get(args[0])
+            if match is None: raise LookupError(f"Search result not found: {args[0]}")
+            path = match["file"]
+            line = int(match["line"])
+            replacement = " ".join(args[1:])
+            outcome = self._edit(path, lambda: self.files.replace_line(path, line, replacement))
+            return {"result_id": args[0], "file": path, "line": line, "edit": outcome}
         if name == "index": return self.indexer.refresh()
         if name in {"symbols", "symbol", "definition", "references", "implementations", "outline"}:
             if name != "symbols": _require(args, 1, "symbol name or file path")
             target = self._resolve_ref(args[0]) if args else None
-            if name == "references": return {"references": self.symbol_service.references(target, _int_arg(args, 1, 100))}
+            if name == "references":
+                matches = self.symbol_service.references(target, _int_arg(args, 1, 100))
+                return {"references": self._register_matches(matches)}
             if name == "implementations":
                 return {"implementations": [item for item in self.symbol_service.definition(target)
                         if item["kind"] in {"class", "interface", "method", "function"}]}
@@ -724,6 +740,17 @@ class CommandService:
     def _resolve_ref(self, value: str) -> str:
         return self.file_refs.get(value, value)
 
+    def _register_matches(self, matches: list[dict]) -> list[dict]:
+        registered = []
+        for value in matches:
+            item = dict(value)
+            item["id"] = self.ids.next("R")
+            self.results[item["id"]] = item
+            if item.get("file"):
+                self.file_refs[item["id"]] = item["file"]
+            registered.append(item)
+        return registered
+
 
 def _profile_command(workspace: Workspace, mode: str) -> list[str] | None:
     from easychange.adapters.dotnet import DotnetAdapter
@@ -753,17 +780,33 @@ def _page_args(args: list[str], default_limit: int = 50) -> tuple[int, int]:
     return offset, limit
 
 
+def _option_int(args: list[str], name: str, default: int, *, minimum: int, maximum: int) -> int:
+    for index, value in enumerate(args[:-1]):
+        if value == name:
+            parsed = int(args[index + 1])
+            return max(minimum, min(maximum, parsed))
+    return default
+
+
 def _search_args(args: list[str]) -> tuple[str, str | None, str | None, bool]:
     query_parts = []
     extension = path_prefix = None
     regex = False
-    for value in args:
-        if value.startswith("--"): continue
+    index = 0
+    while index < len(args):
+        value = args[index]
+        if value in {"--offset", "--limit", "--context"}:
+            index += 2
+            continue
+        if value.startswith("--"):
+            index += 1
+            continue
         if value.startswith("ext:"): extension = value[4:] if value[4:].startswith(".") else "." + value[4:]
         elif value.startswith("path:"): path_prefix = value[5:]
         elif value.startswith("regex:"):
             regex = True; query_parts.append(value[6:])
         else: query_parts.append(value)
+        index += 1
     query = " ".join(query_parts)
     if not query: raise ValueError("Search query is empty")
     return query, extension, path_prefix, regex

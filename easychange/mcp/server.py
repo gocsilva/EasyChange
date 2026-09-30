@@ -97,6 +97,73 @@ def create_server(workspace_path: str | Path = "."):
         return service.execute_tokens("search", [query, str(limit)]).to_dict()
 
     @server.tool()
+    def search_context(query: str, limit: int = 5, context_lines: int = 2,
+                       extension: str = "", path_prefix: str = "") -> dict:
+        """Find matches and attach nearby line-numbered context in one round trip."""
+        args = [query, "--limit", str(max(1, min(10, limit))),
+                "--context", str(max(0, min(20, context_lines)))]
+        if extension: args.append("ext:" + extension)
+        if path_prefix: args.append("path:" + path_prefix)
+        return service.execute_tokens("locate", args).to_dict()
+
+    @server.tool()
+    def workspace_brief(file_limit: int = 20) -> dict:
+        """Return state, capabilities, and a short file page as one compact workspace snapshot."""
+        state_result = service.execute_tokens("state", [])
+        capability_result = service.execute_tokens("capabilities", [])
+        files_result = service.execute_tokens("files", [str(max(1, min(100, file_limit)))])
+        return {"state": state_result.data, "capabilities": capability_result.data,
+                "files": files_result.data}
+
+    @server.tool()
+    def apply_edit_plan(steps: list[dict]) -> dict:
+        """Apply a bounded edit plan as one undoable transaction; roll back the whole plan on the first error."""
+        if not steps or len(steps) > 50:
+            return {"ok": False, "code": "INVALID_PLAN", "message": "Provide between 1 and 50 edit steps."}
+        if service.transaction is not None:
+            return {"ok": False, "code": "TRANSACTION_ACTIVE", "message": "Finish the active transaction first."}
+        started = service.execute_tokens("begin", [])
+        if not started.ok: return {"ok": False, "code": started.code, "message": started.error}
+        operation_map = {"write": ("write", ("path", "content")),
+                         "replace": ("replace", ("path", "old", "new")),
+                         "replace_line": ("replace-line", ("path", "line", "text")),
+                         "replace_range": ("replace-range", ("path", "start", "end", "text")),
+                         "insert": ("insert", ("path", "line", "text")),
+                         "delete": ("delete", ("path",))}
+        results = []
+        for index, step in enumerate(steps, 1):
+            operation = operation_map.get(str(step.get("operation", "")))
+            if operation is None:
+                failure = {"ok": False, "code": "INVALID_PLAN", "error": f"Unsupported operation at step {index}."}
+                results.append(failure)
+                break
+            command_name, fields = operation
+            try:
+                values = [str(step[field]) for field in fields]
+            except KeyError as exc:
+                failure = {"ok": False, "code": "INVALID_PLAN", "error": f"Missing field at step {index}: {exc.args[0]}"}
+                results.append(failure)
+                break
+            result = service.execute_tokens(command_name, values)
+            results.append(result.to_dict())
+            if not result.ok: break
+        failed = next((index for index, result in enumerate(results) if not result["ok"]), None)
+        if failed is not None:
+            rollback = service.execute_tokens("rollback", [])
+            return {"ok": False, "failed_step": failed + 1, "steps": results, "rollback": rollback.to_dict()}
+        commit = service.execute_tokens("commit", [])
+        return {"ok": commit.ok, "transaction": started.data.get("transaction"),
+                "steps": results, "commit": commit.to_dict()}
+
+    @server.tool()
+    def verify_change() -> dict:
+        """Run Git diff followed by the detected test profile as one MCP round trip."""
+        diff_result = service.execute_tokens("diff", [])
+        test_result = service.execute_tokens("test", [])
+        return {"ok": diff_result.ok and test_result.ok,
+                "diff": diff_result.to_dict(), "test": test_result.to_dict()}
+
+    @server.tool()
     def create_file(path: str, content: str = "") -> dict:
         """Create a text file inside the workspace."""
         result = service.execute_tokens("new", [path])

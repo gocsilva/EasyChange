@@ -6,7 +6,7 @@ This guide is the Android handoff profile for EasyChange. It describes how an An
 
 1. Connect to the Windows desktop using the remote-control app already configured for that PC.
 2. Open EasyChange on the PC with `scripts/Start-EasyChangeRemote.ps1 -Workspace 'C:\path\to\project'`.
-3. Use the remote keyboard's **Ctrl+K** to focus the command field. The GUI shows a `:remote` boot card; use `:remote-guide` for instructions or `:prepare-hid` to switch modes. Then run `:state`, `:search <term>`, `:context <R-id>`, and an edit command. Press Enter after each command.
+3. Use the remote keyboard's **Ctrl+K** to focus the command field. The GUI shows a `:remote` boot card; use `:remote-guide` for instructions or `:prepare-hid` to switch modes. Then run `:locate <term> --context 2` and edit with `:edit-result <R-id> <replacement line>`. Press Enter after each command.
 4. Read the compact JSON result payload on screen; copy the returned path, line, result ID, and error code exactly. Validate with `:diff && :test`.
 
 ## If Android has an MCP client
