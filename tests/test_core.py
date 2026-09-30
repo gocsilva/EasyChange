@@ -382,3 +382,19 @@ def test_dotnet_adapter_uses_no_restore_when_assets_exist(tmp_path):
     assets.write_text("{}", encoding="utf-8")
     assert adapter.build(workspace) == ["dotnet", "build", "--no-restore"]
     assert adapter.test(workspace) == ["dotnet", "test", "--no-restore"]
+
+
+def test_large_journal_snapshots_are_content_addressed_and_restart_safe(tmp_path):
+    original = "\n".join(f"line {i} {'x' * 80}" for i in range(400)) + "\n"
+    target = tmp_path / "large.txt"
+    target.write_text(original, encoding="utf-8")
+    service = CommandService(Workspace.open(tmp_path))
+    replacement = original.replace("line 200", "LINE 200")
+    assert service.files.write("large.txt", replacement, force=True)
+    service._record("write", "large.txt", original, replacement)
+    journal_path = tmp_path / ".easychange" / "journal.jsonl"
+    assert journal_path.stat().st_size < len(original.encode("utf-8"))
+    assert list((tmp_path / ".easychange" / "blobs").glob("*.zlib"))
+    restarted = CommandService(Workspace.open(tmp_path))
+    assert restarted.execute(":undo").ok
+    assert target.read_text(encoding="utf-8") == original
