@@ -17,10 +17,12 @@ from easychange.ui.editor import BasicHighlighter, CodeEditor
 
 class MainWindow(QMainWindow):
     # Small results keep the editor visible. Large results temporarily turn
-    # the HDMI surface into an 8x4 optical modem for maximum AI throughput.
+    # the HDMI surface into a reliable 4x4 optical modem. Physical HDMI testing
+    # showed 16 larger cells outperforms 32 dense cells because decode success
+    # matters more than theoretical QR count.
     _OPTICAL_NORMAL_SLOTS = 4
-    _OPTICAL_BURST_SLOTS = 32
-    _OPTICAL_BURST_COLUMNS = 8
+    _OPTICAL_BURST_SLOTS = 16
+    _OPTICAL_BURST_COLUMNS = 4
     _OPTICAL_BURST_THRESHOLD = 8
 
     def __init__(self, workspace: Workspace, *, machine_mode: bool | None = None, hid_mode: bool = False) -> None:
@@ -251,7 +253,9 @@ class MainWindow(QMainWindow):
             self.output.setVisible(False)
             self.result_panel.setMinimumHeight(660)
             self.result_panel.setMaximumHeight(16777215)
-            self._optical_timer.setInterval(180)
+            # Capture p95 is ~200ms on the physical HDMI path; keep a
+            # page visible long enough to guarantee at least one fresh frame.
+            self._optical_timer.setInterval(320)
         else:
             self.split.setVisible(True)
             self.output.setVisible(True)

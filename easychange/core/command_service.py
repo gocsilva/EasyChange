@@ -628,7 +628,7 @@ class CommandService:
                     "status", "diff", "branch", "log", "build", "test", "run", "processes", "stop", "errors", "next-error", "previous-error", "remote", "remote-guide", "remote-profile", "prepare-hid", "set", "machine", "human", "quit"],
                     "capabilities": {"workspace": True, "git": "GIT" in self.workspace.adapters,
                     "build_test": self.workspace.adapters, "index": True, "symbols": True,
-                    "ai_machine": {"optical_protocol": "EC2", "qr_slots": 32, "chunked_results": True,
+                    "ai_machine": {"optical_protocol": "EC2", "qr_slots": 16, "chunked_results": True,
                                    "optical_burst": True, "composite_study": True, "read_many": True,
                                    "read_many_max_files": 64, "read_many_byte_budget": True,
                                    "structured_max_operations": 64, "expected_hash_guards": True,

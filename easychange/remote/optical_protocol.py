@@ -8,7 +8,9 @@ import zlib
 from typing import Any
 
 PROTOCOL = "EC2"
-DEFAULT_CHUNK_CHARS = 260
+# Keep QR module density low enough for physical HDMI capture. More, smaller
+# chunks in a reliable 4x4 page are faster in practice than dense 32-QR pages.
+DEFAULT_CHUNK_CHARS = 180
 
 
 def encode_result_chunks(result: Any, *, chunk_chars: int = DEFAULT_CHUNK_CHARS) -> list[str]:

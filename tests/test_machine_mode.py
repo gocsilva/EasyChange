@@ -28,7 +28,7 @@ def test_machine_mode_keeps_command_focus_and_renders_sequence_qr(tmp_path):
 
 
 
-def test_machine_mode_uses_32_slot_optical_burst_for_large_results(tmp_path):
+def test_machine_mode_uses_16_slot_optical_burst_for_large_results(tmp_path):
     app = QApplication.instance() or QApplication([])
     source = tmp_path / "large.py"
     source.write_text(
@@ -40,12 +40,12 @@ def test_machine_mode_uses_32_slot_optical_burst_for_large_results(tmp_path):
     window._run_command(":ec QGUI5678 :read large.py 1 900")
     app.processEvents()
     assert not window.tree.isVisible()
-    assert len(window.machine_qrs) == 32
+    assert len(window.machine_qrs) == 16
     assert len(window._optical_payloads) > 8
     assert window._optical_burst is True
     assert not window.split.isVisible()
     assert not window.output.isVisible()
-    visible = min(32, len(window._optical_payloads))
+    visible = min(16, len(window._optical_payloads))
     assert all(label.pixmap() is not None for label in window.machine_qrs[:visible])
     assert all(label.width() == 160 and label.height() == 160 for label in window.machine_qrs)
     window.close(); app.processEvents()
@@ -73,7 +73,7 @@ def test_machine_mode_reuses_cached_qr_pixmaps(tmp_path):
 
 
 
-def test_optical_burst_pads_final_page_to_all_32_visible_slots(tmp_path):
+def test_optical_burst_pads_final_page_to_all_16_visible_slots(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
     window.show(); app.processEvents()
