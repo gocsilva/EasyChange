@@ -277,17 +277,14 @@ def test_search_ranks_source_definition_before_docs(service, tmp_path):
     assert result.data["matches"][0]["file"].startswith("src/")
 
 
-def test_symbol_cache_reuses_unchanged_file(service, tmp_path):
+def test_symbol_index_reuses_persistent_sqlite_rows(service, tmp_path):
     (tmp_path / "module.py").write_text("class CachedExample:\n    pass\n", encoding="utf-8")
     service.indexer.invalidate()
     first = service.execute(":definition CachedExample")
     assert first.ok and first.data["symbols"]
-    cache = tmp_path / ".easychange" / "symbols.json"
-    assert cache.exists()
-    before = cache.read_text(encoding="utf-8")
+    assert service.indexer.ready
     second = service.execute(":definition CachedExample")
-    assert second.ok and second.data["symbols"]
-    assert cache.read_text(encoding="utf-8") == before
+    assert second.ok and second.data["symbols"] == first.data["symbols"]
 
 
 
@@ -320,3 +317,68 @@ def test_structured_read_batch_does_not_open_transaction(service):
     assert result.ok
     assert result.data["transaction"]["state"] == "NOT_REQUIRED"
     assert service.transaction is None
+
+
+def test_ec1_session_state_stays_bounded_for_large_read_many(tmp_path):
+    import json
+
+    paths = []
+    for index in range(8):
+        path = tmp_path / f"Big{index}.cs"
+        paths.append(path.name)
+        path.write_text(
+            "\n".join(f"public string P{line} => \"{index}-{line}-{'x' * 60}\";" for line in range(300)),
+            encoding="utf-8",
+        )
+    service = CommandService(Workspace.open(tmp_path))
+    packet = json.dumps({"op": "operation", "type": "read_many", "paths": paths, "count": 300},
+                        separators=(",", ":"))
+    for index in range(12):
+        result = service.execute(f":ec QBLOAT{index:04d} :j1 " + packet)
+        assert result.ok
+    session_path = tmp_path / ".easychange" / "session.json"
+    assert session_path.stat().st_size < 200_000
+    persisted = json.loads(session_path.read_text(encoding="utf-8"))
+    assert all("result" not in item for item in persisted["ec_results"].values())
+
+
+def test_structured_patch_set_supports_range_text_insert_and_append(service, tmp_path):
+    (tmp_path / "patch.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    result = service._execute_structured({
+        "op": "batch",
+        "operations": [
+            {"type": "replace_range", "path": "patch.py", "start": 2, "end": 2, "content": "TWO"},
+            {"type": "insert", "path": "patch.py", "line": 1, "content": "zero"},
+            {"type": "append", "path": "patch.py", "content": "four"},
+            {"type": "replace_text", "path": "patch.py", "old": "three", "new": "THREE"},
+        ],
+    })
+    assert result.ok
+    text = (tmp_path / "patch.py").read_text(encoding="utf-8")
+    assert "zero" in text and "TWO" in text and "THREE" in text and "four" in text
+
+
+def test_watcher_force_refresh_detects_external_change(service, tmp_path):
+    from easychange.core.watcher import WorkspaceWatcher
+
+    service.execute(":search NumeroProtocolo")
+    (tmp_path / "sample.py").write_text("external watcher value\n", encoding="utf-8")
+    watcher = WorkspaceWatcher(service.indexer)
+    changed = watcher.poll_once()
+    assert changed["indexed"] >= 1
+    result = service.execute(":search external")
+    assert result.ok and result.data["matches"]
+
+
+def test_dotnet_adapter_uses_no_restore_when_assets_exist(tmp_path):
+    from easychange.adapters.dotnet import DotnetAdapter
+
+    (tmp_path / "Example.csproj").write_text("<Project />", encoding="utf-8")
+    workspace = Workspace.open(tmp_path)
+    adapter = DotnetAdapter()
+    assert adapter.build(workspace) == ["dotnet", "build"]
+    assets = tmp_path / "obj" / "project.assets.json"
+    assets.parent.mkdir()
+    assets.write_text("{}", encoding="utf-8")
+    assert adapter.build(workspace) == ["dotnet", "build", "--no-restore"]
+    assert adapter.test(workspace) == ["dotnet", "test", "--no-restore"]
