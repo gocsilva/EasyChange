@@ -39,6 +39,10 @@ def test_path_escape_is_rejected(service, tmp_path):
 def test_detection_for_python_and_dotnet(tmp_path):
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     assert Workspace.open(tmp_path).kind == "PYTHON"
+    dotnet = tmp_path / "dotnet"
+    dotnet.mkdir()
+    (dotnet / "Example.csproj").write_text("<Project />", encoding="utf-8")
+    assert Workspace.open(dotnet).kind == "DOTNET"
 
 
 def test_search_result_id_opens_near_match(service, tmp_path):
