@@ -24,5 +24,5 @@ class MachineSession:
 
     def save(self) -> None:
         temp = self.path.with_suffix(".tmp")
-        temp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.write_text(json.dumps(self.data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         os.replace(temp, self.path)
