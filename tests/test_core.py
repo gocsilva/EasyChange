@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 
 import pytest
 
@@ -106,6 +107,87 @@ def test_batch_alias_paging_macro_symbols_and_file_metadata(service, tmp_path):
     assert service.execute(":macro run readit").ok
 
 
+def test_sequenced_command_is_correlated_and_duplicate_is_suppressed(service, tmp_path):
+    first = service.execute(":ec QABC123 :write sample.py 'safe = True'")
+    assert first.ok and first.sequence == "QABC123"
+    rendered = first.render("compact")
+    assert rendered.startswith("EC1 QABC123 OK")
+    duplicate = service.execute(":ec QABC123 :write sample.py 'safe = True'")
+    assert duplicate.ok and duplicate.data["duplicate"] is True
+    assert (tmp_path / "sample.py").read_text(encoding="utf-8") == "safe = True"
+
+
+def test_sequenced_command_conflict_and_unknown_are_never_replayed(service, tmp_path):
+    first = service.execute(":ec QABC124 :write sample.py 'once = True'")
+    assert first.ok
+    conflict = service.execute(":ec QABC124 :write sample.py 'twice = True'")
+    assert conflict.code == "SEQUENCE_CONFLICT"
+    pending_command = ":write sample.py 'must_not_run = True'"
+    service.state_store.data["ec_results"]["QABC125"] = {
+        "sha256": hashlib.sha256(pending_command.encode("utf-8")).hexdigest(), "state": "RUNNING"
+    }
+    service._persist_state()
+    unknown = service.execute(":ec QABC125 :write sample.py 'must_not_run = True'")
+    assert unknown.code == "UNKNOWN"
+    assert "must_not_run" not in (tmp_path / "sample.py").read_text(encoding="utf-8")
+
+
+def test_batch_is_atomic_and_rolls_back_on_first_failed_command(service, tmp_path):
+    original = (tmp_path / "sample.py").read_text(encoding="utf-8")
+    result = service.execute(":batch write sample.py 'temporary = True' ; write ../outside.txt 'bad' :end")
+    assert not result.ok
+    assert result.data["transaction"]["rolled_back"] == 1
+    assert (tmp_path / "sample.py").read_text(encoding="utf-8") == original
+    assert service.transaction is None
+
+
+def test_ec1_compressed_command_round_trip_and_crc_guard(service, tmp_path):
+    import json
+    from easychange.core.transport_codec import encode_command
+
+    command = ":write sample.py \"" + ("linha çã\n" * 120) + "\""
+    packet, metadata = encode_command(command)
+    assert metadata["encoding"] == "zlib+base64url"
+    result = service.execute(f":ec QABC126 {packet}")
+    assert result.sequence == "QABC126"
+    assert result.ok
+    assert (tmp_path / "sample.py").read_text(encoding="utf-8") == ("linha çã\n" * 120)
+    header = packet.split(" ", 3)
+    crc = ("0" if header[2][0] != "0" else "1") + header[2][1:]
+    bad_packet = " ".join((header[0], header[1], crc, header[3]))
+    invalid = service.execute(f":ec QABC127 {bad_packet}")
+    assert invalid.code == "INVALID_COMPRESSED_PAYLOAD"
+
+
+def test_ec1_structured_multiline_patch_is_journaled_and_transactional(service, tmp_path):
+    import json
+    from easychange.core.transport_codec import encode_command
+
+    command = ":j1 " + json.dumps({"op": "operation", "type": "write_file", "path": "new.py",
+                                   "content": "first = 'ç'\nsecond = 2\n"}, ensure_ascii=False)
+    packet, _ = encode_command(command)
+    result = service.execute(f":ec QABC128 {packet}")
+    assert result.ok and result.sequence == "QABC128"
+    assert (tmp_path / "new.py").read_text(encoding="utf-8") == "first = 'ç'\nsecond = 2\n"
+    assert service.execute(f":ec QABC128 {packet}").data["duplicate"] is True
+
+
+def test_ec1_structured_batch_rolls_back_prior_mutations(service, tmp_path):
+    import json
+    from easychange.core.transport_codec import encode_command
+
+    original = (tmp_path / "sample.py").read_text(encoding="utf-8")
+    command = ":j1 " + json.dumps({"op": "batch", "operations": [
+        {"type": "write_file", "path": "sample.py", "content": "changed = True"},
+        {"type": "unsupported", "path": "blocked"},
+    ]})
+    packet, _ = encode_command(command)
+    result = service.execute(f":ec QABC129 {packet}")
+    assert not result.ok and result.code == "STRUCTURED_BATCH_FAILED"
+    assert (tmp_path / "sample.py").read_text(encoding="utf-8") == original
+    assert service.transaction is None
+
+
 def test_locks_are_shared_and_search_index_incremental(service, tmp_path):
     assert service.execute(":lock sample.py 60").ok
     other = CommandService(Workspace.open(tmp_path))
@@ -144,14 +226,16 @@ def test_compact_hid_results_keep_machine_readable_data():
     assert "EXTERNAL_CHANGE" in failed and "conflict" in failed
 
 
-def test_remote_quickstart_contains_local_gui_and_stdio_mcp_config(tmp_path):
+def test_remote_quickstart_contains_local_gui_without_remote_mcp_config(tmp_path):
     import sys
-    from easychange.remote.agent_profile import remote_quickstart
+    from easychange.remote.agent_profile import remote_guide_markdown, remote_quickstart
 
     setup = remote_quickstart(tmp_path, sys.executable)
     assert "--machine --hid" in setup["gui_command"]
-    assert setup["mcp_config"]["transport"] == "stdio"
-    assert setup["mcp_config"]["args"][-1] == str(tmp_path.resolve())
+    assert "mcp_config" not in setup
+    assert "mcp_server_command" not in setup
+    guide = remote_guide_markdown()
+    assert "Do not start/connect EasyChange MCP/API on that computer" in guide
 
 
 def test_remote_boot_card_and_prepare_hid(service):

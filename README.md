@@ -29,7 +29,7 @@ Commands accept a leading colon (optional in the CLI). Quoted arguments may cont
 :undo
 ```
 
-The GUI uses **F12** for high-contrast Machine Mode, **Ctrl+K** to focus the command line, and **Esc** to return focus there. It includes line numbers, syntax highlighting, a persistent command field, and keyboard shortcuts. CLI and GUI use the same `CommandService`.
+The GUI uses **F12** for high-contrast Machine Mode, **Ctrl+K** to focus the command line, and **Esc** to return focus there. It includes line numbers, syntax highlighting, a persistent command field, and keyboard shortcuts. Use **Selecionar projeto…** in the header to open another folder in the same window. On Windows, double-click `Abrir EasyChange.bat` to start the GUI; it initially opens the EasyChange repository.
 
 Use `:capabilities` to discover commands. Features include indexed search, line-numbered reads, file editing and metadata, symbol definitions/references, batches and command chains, aliases/macros, snapshots, locks, transactions, persistent journal/undo/redo, Git status/diff/branch/log, process/build/test, and diagnostics. High-level commands include `:rename-symbol`, `:create-class`, `:create-interface`, and `:create-test`. Format/import commands report `ADAPTER_UNAVAILABLE` until a language adapter implements them.
 
@@ -39,8 +39,8 @@ Output can be changed with `:set output text|json|compact`; `:set transport hid`
 
 - **CLI:** included, interactive and JSON-capable.
 - **GUI:** optional PySide6 (`pip install -e ".[gui]"`).
-- **HTTP API:** optional FastAPI/Uvicorn (`pip install -e ".[api]"`); loopback only by default: `python -m easychange.api.server <workspace>`. Routes provide state, capabilities, commands, search, bounded file read/write, build, and test.
-- **MCP:** optional stdio server (`pip install -e ".[mcp]"`, then `python -m easychange.mcp.server <workspace>`). MCP tools call the shared command service.
+- **HTTP API:** optional FastAPI/Uvicorn for MCP_HOST-local workspaces (`pip install -e ".[api]"`); loopback only by default. This API is not a REMOTE_PC control path.
+- **MCP:** optional stdio server for MCP_HOST-local workspaces (`pip install -e ".[mcp]"`). Do not install or launch it on REMOTE_PC for B.M.O. control; remote input is ESP32 HID and output is HDMI.
 
 ## Adapters and persistence
 
@@ -50,7 +50,7 @@ Edits are recorded in a persistent `.easychange/` journal. Undo/redo checks file
 
 ## B.M.O. and remote operation
 
-Compact JSON results, persistent non-colliding IDs, `:locate` with inline context, `:edit-result`, batch commands, and the keyboard-focused GUI reduce HDMI/HID interactions. Start the remote UI with `scripts/Start-EasyChangeRemote.ps1 -Workspace '<project path>'`. MCP publishes its guide/profile and offers combined workspace summary, search/context, transactional edit plan, and diff/test calls. Repository `AGENTS.md` and the Codex `easychange-remote-control` skill preserve these instructions for future agent tasks. See [REMOTE_CONTROL.md](docs/REMOTE_CONTROL.md), [ANDROID_REMOTE.md](docs/ANDROID_REMOTE.md), [ESP32_HID_CONTRACT.md](docs/ESP32_HID_CONTRACT.md), [PROTOCOL.md](docs/PROTOCOL.md), and [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Compact results, persistent IDs, `:locate`, `:edit-result`, atomic batches, EC1 sequences, CRC-checked compression, and the keyboard-focused GUI reduce HDMI/HID interactions. Start the remote UI with `scripts/Start-EasyChangeRemote.ps1 -Workspace '<project path>'`. MCP-local tools are for MCP_HOST workspaces only. See [REMOTE_BOUNDARY.md](docs/REMOTE_BOUNDARY.md), [REMOTE_CONTROL.md](docs/REMOTE_CONTROL.md), [ANDROID_REMOTE.md](docs/ANDROID_REMOTE.md), [ESP32_HID_CONTRACT.md](docs/ESP32_HID_CONTRACT.md), [PROTOCOL.md](docs/PROTOCOL.md), and [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 The current repository does not include Tree-sitter/LSP servers, authenticated network access, or physical HDMI/ESP32 firmware. The HTTP API binds to loopback by default.
 

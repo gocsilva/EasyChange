@@ -13,6 +13,7 @@ class Result:
     code: str | None = None
     command_id: str | None = None
     duration_ms: int = 0
+    sequence: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -23,11 +24,12 @@ class Result:
             return json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"))
         if output == "compact":
             import json
+            prefix = f"EC1 {self.sequence} " if self.sequence else ""
             if not self.ok:
                 details = json.dumps({"error": self.error, "data": self.data}, ensure_ascii=False, separators=(",", ":"))
-                return f"ERR {self.command_id or '-'} {self.code or 'ERROR'} {self.command} {details}"
+                return f"{prefix}ERR {self.command_id or '-'} {self.code or 'ERROR'} {self.command} {details}"
             details = json.dumps(self.data, ensure_ascii=False, separators=(",", ":"))
-            return f"OK {self.command_id or '-'} {self.command} {self.duration_ms}ms {details}"
+            return f"{prefix}OK {self.command_id or '-'} {self.command} {self.duration_ms}ms {details}"
         status = "OK" if self.ok else "ERROR"
         lines = [status, f"COMMAND: {self.command.upper()}"]
         if self.command_id:

@@ -9,7 +9,7 @@ This is the EasyChange-side operator contract for an ESP32 acting as a keyboard 
 3. The agent waits until the output panel finishes updating, then captures the HDMI frame and reads the one-line result, including its JSON payload.
 4. It copies result IDs and paths exactly into the next command. It does not repeat Enter or replay a command because OCR is slow; first inspect the latest command ID/result.
 
-The usual successful exchange is three command submissions: `:locate <term> --context 2`, `:edit-result <R-id> <replacement line>`, and `:diff && :test`; `:undo` is a separate recovery action when requested. `:locate` combines search and source context, reducing one request/capture. MCP-connected agents should use `search_context`, `apply_edit_plan`, and `verify_change` directly and reserve HID for visual access or explicit testing. B.M.O. Smart HID v3 can batch short related key/mouse sequences in one bounded job; wait for its terminal event and still verify the semantic result on HDMI.
+The usual successful exchange is three command submissions: `:locate <term> --context 2`, `:edit-result <R-id> <replacement line>`, and `:diff && :test`; `:undo` is a separate recovery action when requested. `:locate` combines search and source context, reducing one request/capture. On REMOTE_PC, all command input uses ESP32 HID and all results use HDMI; optional MCP tools are only for MCP_HOST-local workspaces. Machine Mode includes compact text and a QR sequence packet. B.M.O. Smart HID v3 can batch short related keyboard actions in one bounded job; wait for its terminal event and verify the semantic result over HDMI.
 
 ## Character and key rules
 

@@ -23,8 +23,9 @@ def create_server(workspace_path: str | Path = "."):
         "EasyChange",
         instructions=(
             f"EasyChange is bound to workspace {root}. Start each task with state and capabilities. "
-            "Use remote_guide for HDMI+ESP32 HID or Android relay operation. When MCP tools are connected, "
-            "operate through them directly instead of OCR/HID. Keep paths in the bound workspace, inspect "
+            "This optional MCP adapter is for a workspace local to MCP_HOST only. Never run or connect it on "
+            "REMOTE_PC for B.M.O. control. For REMOTE_PC, use the EasyChange GUI through ESP32 HID input and "
+            "HDMI output exclusively. Use remote_guide for the physical workflow. Keep paths in the bound workspace, inspect "
             "diffs, preserve returned IDs, and use undo/transactions for reversible edits. The stdio server "
             "is not network reachable."
         ),

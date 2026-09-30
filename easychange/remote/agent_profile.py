@@ -3,18 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 
 
-PROFILE_VERSION = "1.0"
+PROFILE_VERSION = "1.1"
 
 REMOTE_PROFILE = {
     "profile_version": PROFILE_VERSION,
     "product": "EasyChange",
-    "purpose": "Operate the selected software workspace through MCP, CLI, or HDMI plus ESP32 keyboard HID.",
+    "purpose": "Operate EasyChange on REMOTE_PC through ESP32 HID input and HDMI output; MCP/API transports are MCP_HOST-local only.",
     "principles": [
-        "Use MCP tools directly when connected; do not route MCP-capable work through OCR or simulated keystrokes.",
-        "When only HDMI and ESP32 HID are available, use the EasyChange GUI command field and short commands.",
+        "On REMOTE_PC, use only the EasyChange GUI through physical ESP32 HID input and HDMI observation.",
+        "Never run or connect an MCP server/client, HTTP/API, shared filesystem, clipboard, SSH, or other B.M.O. channel on REMOTE_PC.",
+        "Optional MCP and HTTP adapters are for workspaces local to MCP_HOST; never use them to control REMOTE_PC.",
+        "Use one TYPE_TEXT block ending in newline for a short command; use SmartHidHost block transfer for long content.",
         "The active workspace is the root bound to the current EasyChange service; keep paths inside it.",
         "Inspect structured command results and hashes before or after consequential edits; edits are journaled and undoable.",
-        "Do not assume Android has MCP or HID access: use its configured remote desktop/keyboard bridge, or its MCP client if one is explicitly connected.",
+        "Android video relay is output only; do not infer keyboard input or an MCP route from a phone chat.",
     ],
     "hid_startup": {
         "gui_command": "python -m easychange.gui <workspace> --machine --hid",
@@ -31,17 +33,18 @@ REMOTE_PROFILE = {
         ":diff && :test",
         ":undo  (only when requested or validation indicates the change should be reverted)",
     ],
-    "mcp_tools": ["state", "capabilities", "command", "remote_quickstart", "prepare_hid_session", "launch_hid_gui",
+    "local_mcp_tools": ["state", "capabilities", "command", "remote_quickstart", "prepare_hid_session", "launch_hid_gui",
                   "workspace_brief", "search_context", "apply_edit_plan", "verify_change",
                   "search", "read_file", "edit_file", "git_diff", "test", "undo"],
     "android_modes": {
         "remote_desktop": "Open the remote EasyChange GUI session, keep the command input focused, and use the HID workflow.",
-        "mcp_client": "Connect to the EasyChange MCP server running on the same host as the selected workspace and use its remote guide first.",
-        "phone_only_chat": "A phone chat alone cannot control the remote PC; an authorized desktop or MCP bridge must be connected.",
+        "mcp_client": "MCP is not an allowed REMOTE_PC control path; MCP adapters may be used only for MCP_HOST-local workspaces.",
+        "phone_only_chat": "A phone chat alone cannot control the remote PC; the authorized physical input is ESP32 HID.",
     },
     "known_limits": [
         "The stdio MCP server is not a network server and cannot be reached directly across devices.",
         "The loopback HTTP API is local-only by default and has no authentication for network exposure.",
+        "Do not install or launch the optional MCP/API adapter on REMOTE_PC for B.M.O. control.",
         "EasyChange does not install ESP firmware, capture HDMI, or pair Android remote-control applications.",
     ],
 }
@@ -59,9 +62,6 @@ def remote_quickstart(workspace: Path, python: str) -> dict:
         "workspace": root,
         "gui_command": f"& {powershell_quote(executable)} -m easychange.gui {powershell_quote(root)} --machine --hid",
         "gui_setup_command": f"& {powershell_quote(executable)} -m pip install PySide6",
-        "mcp_server_command": f"& {powershell_quote(executable)} -m easychange.mcp.server {powershell_quote(root)}",
-        "mcp_config": {"transport": "stdio", "command": executable,
-                       "args": ["-m", "easychange.mcp.server", root]},
         "first_commands": PROFILE_FIRST_COMMANDS,
         "shortcuts": REMOTE_PROFILE["hid_startup"],
         "android_modes": REMOTE_PROFILE["android_modes"],
@@ -75,13 +75,13 @@ PROFILE_FIRST_COMMANDS = [":remote", ":state", ":capabilities"]
 def remote_guide_markdown() -> str:
     return """# EasyChange remote operator guide
 
-This guide is served by MCP so connected agents can discover the correct workflow without a user re-explaining it.
+This guide is served as product help. For REMOTE_PC, EasyChange is a local GUI controlled only by physical ESP32 HID input and HDMI output. Optional MCP/API adapters are MCP_HOST-local tools and must not run on REMOTE_PC.
 
 ## Choose the available path
 
-1. **MCP connected:** call `state`, then `capabilities`; use structured EasyChange tools directly. Do not use OCR/HID when MCP can perform the operation.
-2. **Only HDMI + ESP32 keyboard HID:** launch `python -m easychange.gui <workspace> --machine --hid`; focus the command field with Ctrl+K; submit short EasyChange commands with Enter. Compact output includes JSON data so result IDs and errors remain visible to OCR.
-3. **Android:** use an already-configured remote desktop/keyboard bridge to reach the remote GUI, or connect an MCP client to a server on the same host as the workspace. A phone chat by itself cannot control the PC.
+1. **REMOTE_PC:** launch `python -m easychange.gui <workspace> --machine --hid`; B.M.O. sends commands through ESP32 HID and reads only HDMI. Do not start/connect EasyChange MCP/API on that computer.
+2. **MCP_HOST-local workspace:** optional local MCP or HTTP adapters may be used when the workspace itself is on MCP_HOST. They are not a remote control path.
+3. **Android:** video relay is output-only unless a separate authorized ESP32 HID connection exists. A phone chat alone cannot control the PC.
 
 ## Safe, low-interaction workflow
 
@@ -96,5 +96,5 @@ The GUI displays a `:remote` boot card; run `:remote-guide` for this guide or `:
 - Ctrl+D: Git diff
 - F5 / F6: build / test
 
-The MCP server is stdio-only; it is not reachable over the network. The HTTP API is loopback-only by default. EasyChange does not install or control ESP firmware, HDMI capture, or Android remote-control apps.
+The MCP server is stdio-only and HTTP is loopback-only by default; neither is a B.M.O.↔REMOTE_PC channel. EasyChange does not install or control ESP firmware, HDMI capture, or Android remote-control apps.
 """

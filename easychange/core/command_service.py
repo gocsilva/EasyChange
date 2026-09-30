@@ -6,6 +6,7 @@ import re
 import threading
 import json
 import secrets
+import hashlib
 from dataclasses import dataclass
 
 from .command_parser import CommandParser
@@ -17,6 +18,7 @@ from .journal import Journal
 from .locks import LockManager
 from .process_service import ProcessService
 from .result import Result
+from .transport_codec import decode_command
 from .state import MachineSession
 from .symbol_service import SymbolService
 from .workspace import Workspace
@@ -87,6 +89,11 @@ class CommandService:
     def execute(self, command: str) -> Result:
         raw = command.strip()
         if not raw: return Result(False, "", error="Empty command", code="INVALID_COMMAND")
+        # EC1 is the physical HID request/response envelope. Journal RUNNING
+        # before dispatch so a lost ACK can never cause a blind mutation replay.
+        match = re.match(r"^:ec\s+(Q[A-Z0-9_-]{4,40})\s+([\s\S]+)$", raw, re.IGNORECASE)
+        if match:
+            return self._execute_sequenced(match.group(1).upper(), match.group(2).strip())
         if raw.lower().startswith(":batch"):
             body = raw[len(":batch"):].strip()
             if body.endswith(":end"): body = body[:-4].strip()
@@ -106,11 +113,134 @@ class CommandService:
         except Exception as exc:
             return self._error_result(raw, exc)
 
+    def _execute_sequenced(self, sequence: str, command: str) -> Result:
+        if not command:
+            return Result(False, "ec", error="Empty sequenced command", code="INVALID_COMMAND", sequence=sequence)
+        codec = None
+        structured = None
+        if command.casefold().startswith(":z1 "):
+            try:
+                command, codec = decode_command(command)
+            except ValueError as exc:
+                return Result(False, "ec", error=str(exc), code="INVALID_COMPRESSED_PAYLOAD", sequence=sequence)
+        if command.casefold().startswith(":j1 "):
+            try:
+                structured = json.loads(command[4:])
+                if not isinstance(structured, dict):
+                    raise ValueError("EC1_J1_OBJECT_REQUIRED")
+                command = json.dumps(structured, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            except (json.JSONDecodeError, ValueError) as exc:
+                return Result(False, "ec", error=str(exc), code="INVALID_STRUCTURED_PAYLOAD", sequence=sequence)
+        digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
+        with self._guard:
+            journal = dict(self.state_store.data.get("ec_results", {}))
+            previous = journal.get(sequence)
+            if previous:
+                if previous.get("sha256") != digest:
+                    return Result(False, "ec", error="Sequence reused with different command", code="SEQUENCE_CONFLICT", sequence=sequence)
+                if previous.get("state") != "DONE":
+                    return Result(False, "ec", error="Execution outcome is not yet known; inspect state before continuing", code="UNKNOWN", data={"state": previous.get("state", "RUNNING")}, sequence=sequence)
+                cached = Result(**previous["result"])
+                cached.sequence = sequence
+                cached.data = {**cached.data, "duplicate": True}
+                return cached
+            journal[sequence] = {"sha256": digest, "state": "RUNNING", "command": command[:256]}
+            self.state_store.data["ec_results"] = journal
+            self._persist_state()
+
+        try:
+            result = self._execute_structured(structured) if structured is not None else self.execute(command)
+        except Exception as exc:
+            result = Result(False, "ec", error="Structured operation outcome is unknown", code="UNKNOWN",
+                            data={"exception": type(exc).__name__}, sequence=sequence)
+        result.sequence = sequence
+        if codec:
+            result.data = {**result.data, "transport_codec": codec}
+        with self._guard:
+            journal = dict(self.state_store.data.get("ec_results", {}))
+            journal[sequence] = {"sha256": digest, "state": "DONE", "command": command[:256], "result": result.to_dict()}
+            self.state_store.data["ec_results"] = dict(list(journal.items())[-128:])
+            self._persist_state(result)
+        return result
+
+    def _execute_structured(self, payload: dict) -> Result:
+        """Apply a bounded HID-delivered operation packet using local services."""
+        started = time.monotonic()
+        operation = str(payload.get("op") or "").casefold()
+        if operation == "batch":
+            operations = payload.get("operations")
+        else:
+            operations = [payload]
+        if not isinstance(operations, list) or not 1 <= len(operations) <= 16:
+            return Result(False, "structured", error="OPERATION_COUNT_LIMIT", code="INVALID_STRUCTURED_PAYLOAD")
+        if self.transaction is not None:
+            return Result(False, "structured", error="BATCH_CANNOT_NEST_TRANSACTION", code="TRANSACTION_ACTIVE")
+        opened = self.execute_tokens("begin", [], raw=":begin")
+        if not opened.ok:
+            return opened
+        results = []
+        for item in operations:
+            if not isinstance(item, dict):
+                results.append(Result(False, "structured", error="OPERATION_OBJECT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD").to_dict())
+                break
+            kind = str(item.get("type") or "").casefold()
+            if kind in {"write_file", "create_file"}:
+                path, content = item.get("path"), item.get("content")
+                if not isinstance(path, str) or not isinstance(content, str):
+                    result = Result(False, kind, error="PATH_AND_CONTENT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
+                else:
+                    try:
+                        if kind == "create_file" and self.workspace.resolve(path).exists():
+                            result = Result(False, kind, error=f"File already exists: {path}", code="FILE_EXISTS")
+                        else:
+                            result = self.execute_tokens("write", [path, content], raw=f"EC1 {kind} {path}")
+                    except Exception as exc:
+                        result = Result(False, kind, error=str(exc), code=getattr(exc, "code", type(exc).__name__))
+            elif kind == "replace_line":
+                path, line, content = item.get("path"), item.get("line"), item.get("content")
+                if not isinstance(path, str) or not isinstance(content, str) or isinstance(line, bool) or not isinstance(line, int):
+                    result = Result(False, kind, error="PATH_LINE_AND_CONTENT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
+                else:
+                    result = self.execute_tokens("replace-line", [path, str(line), content], raw=f"EC1 patch {path}:{line}")
+            elif kind == "read":
+                path = item.get("path")
+                if not isinstance(path, str):
+                    result = Result(False, kind, error="PATH_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
+                else:
+                    args = [path]
+                    if isinstance(item.get("start"), int): args.append(str(item["start"]))
+                    if isinstance(item.get("count"), int): args.append(str(item["count"]))
+                    result = self.execute_tokens("read", args, raw=f"EC1 read {path}")
+            elif kind == "search":
+                query = item.get("query")
+                result = self.execute_tokens("search", [query], raw="EC1 search") if isinstance(query, str) else Result(False, kind, error="QUERY_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
+            else:
+                result = Result(False, "structured", error=f"Unsupported operation: {kind}", code="OPERATION_NOT_ALLOWED")
+            results.append(result.to_dict())
+            if not result.ok:
+                break
+        ok = len(results) == len(operations) and all(item["ok"] for item in results)
+        transaction = self.execute_tokens("commit" if ok else "rollback", [], raw=":commit" if ok else ":rollback")
+        ok = bool(ok and transaction.ok)
+        result = Result(ok, "structured", data={"results": results, "count": len(results),
+                                                  "transaction": transaction.data if transaction.ok else {"state": "UNKNOWN"}},
+                        error=None if ok else "Structured batch failed and was rolled back",
+                        code=None if ok else "STRUCTURED_BATCH_FAILED",
+                        command_id=self.ids.next("C"), duration_ms=int((time.monotonic() - started) * 1000))
+        self._persist_state(result)
+        return result
+
     def _execute_chain(self, text: str, batch: bool = False) -> Result:
         started = time.monotonic()
         body = text
         if batch and body.lower().startswith(":batch"): body = body[len(":batch"):].strip()
         if ":end" in body: body = body.rsplit(":end", 1)[0]
+        if batch and self.transaction is not None:
+            return self._error_result(":batch", RuntimeError("BATCH_CANNOT_NEST_TRANSACTION"))
+        if batch:
+            opened = self.execute_tokens("begin", [], raw=":begin")
+            if not opened.ok:
+                return opened
         try:
             commands = self.parser.split_chain(body.replace("\r", "\n").replace("\n", ";"))
             results = []
@@ -122,12 +252,26 @@ class CommandService:
                 result = self.execute_tokens(tokens[0], tokens[1:], raw=item)
                 results.append(result.to_dict())
                 previous_stop = stop_on_error
+                if batch and not result.ok:
+                    break
             ok = all(item["ok"] for item in results)
+            transaction_result = None
+            if batch:
+                transaction_result = self.execute_tokens("commit" if ok else "rollback", [], raw=":commit" if ok else ":rollback")
+                ok = bool(ok and (transaction_result is None or transaction_result.ok))
             result = Result(ok, "batch" if batch else "chain", data={"results": results, "count": len(results)},
                             command_id=self.ids.next("C"), duration_ms=int((time.monotonic()-started)*1000))
+            if batch:
+                result.data["transaction"] = transaction_result.data if transaction_result and transaction_result.ok else {
+                    "state": "UNKNOWN", "error": transaction_result.code if transaction_result else "TRANSACTION_FINALIZE_FAILED"}
             self._persist_state(result)
             return result
         except Exception as exc:
+            if batch and self.transaction is not None:
+                try:
+                    self.execute_tokens("rollback", [], raw=":rollback")
+                except Exception:
+                    pass
             return self._error_result(":batch" if batch else text, exc)
 
     def _error_result(self, raw: str, exc: Exception) -> Result:
@@ -185,10 +329,14 @@ class CommandService:
                     "journal", "undo", "redo", "begin", "commit", "rollback", "snapshot", "lock", "unlock", "locks", "watch", "batch", "macro", "alias", "complete", "history", "repeat", "clear",
                     "status", "diff", "branch", "log", "build", "test", "run", "processes", "stop", "errors", "next-error", "previous-error", "remote", "remote-guide", "remote-profile", "prepare-hid", "set", "machine", "human", "quit"],
                     "capabilities": {"workspace": True, "git": "GIT" in self.workspace.adapters,
-                    "build_test": self.workspace.adapters, "index": True, "symbols": True, "api": True, "mcp": True}}
+                    "build_test": self.workspace.adapters, "index": True, "symbols": True,
+                    "local_api": True, "local_mcp": True,
+                    "remote_control": {"input": "ESP32_HID", "output": "HDMI",
+                                       "mcp_on_remote_pc": False, "api_on_remote_pc": False}}}
         if name == "state":
             git = self.git.status() if "GIT" in self.workspace.adapters else None
             return {"state": "READY", "workspace": str(self.workspace.root_path), "workspace_id": "W1",
+                    "instance_id": self.instance_id,
                     "name": self.workspace.name, "type": self.workspace.kind, "adapters": self.workspace.adapters,
                     "file": self.state_store.data.get("current_file"), "line": self.state_store.data.get("line", 1),
                     "dirty": self.state_store.data.get("dirty", False), "git": git,
