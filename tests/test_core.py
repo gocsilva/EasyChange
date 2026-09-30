@@ -398,3 +398,16 @@ def test_large_journal_snapshots_are_content_addressed_and_restart_safe(tmp_path
     restarted = CommandService(Workspace.open(tmp_path))
     assert restarted.execute(":undo").ok
     assert target.read_text(encoding="utf-8") == original
+
+
+def test_process_output_compaction_preserves_diagnostics(service):
+    import sys
+
+    result = service.processes.run([
+        sys.executable,
+        "-c",
+        "print('noise' * 5000); print('ERROR CS1234: important failure')",
+    ])
+    assert result["output_truncated"] is True
+    assert len(result["stdout"]) <= 12000
+    assert "CS1234" in result["diagnostics"]
