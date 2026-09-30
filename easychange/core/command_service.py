@@ -59,6 +59,9 @@ class CommandService:
         self.parser = CommandParser(self.aliases)
         self.indexer = Indexer(workspace.root_path)
         self.symbol_service = SymbolService(workspace, self.indexer)
+        # Build the persistent index in the background. Cold searches use git
+        # immediately instead of blocking the AI on a full repository scan.
+        self.indexer.start_background_refresh()
         self.journal_store = Journal(workspace.root_path / ".easychange" / "journal.jsonl", self.session_id)
         self.journal: list[Change] = [Change(e.path, e.before, e.after, e.change_id, e.command) for e in self.journal_store.entries]
         self.locks = LockManager(workspace.root_path / ".easychange" / "locks.json")
@@ -79,6 +82,10 @@ class CommandService:
         self.watcher: WorkspaceWatcher | None = None
         self.last_command = ""
         self.last_result: Result | None = None
+        # Full EC1 payloads live only in a short in-memory replay cache.
+        # Persisted session state keeps hashes/summaries so read-many/study
+        # cannot make session.json grow by megabytes per command.
+        self._ec_result_cache: dict[str, Result] = {}
 
     def close(self) -> None:
         if self.watcher: self.watcher.stop()
@@ -131,21 +138,60 @@ class CommandService:
                 command = json.dumps(structured, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             except (json.JSONDecodeError, ValueError) as exc:
                 return Result(False, "ec", error=str(exc), code="INVALID_STRUCTURED_PAYLOAD", sequence=sequence)
+
         digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
         with self._guard:
             journal = dict(self.state_store.data.get("ec_results", {}))
             previous = journal.get(sequence)
             if previous:
                 if previous.get("sha256") != digest:
-                    return Result(False, "ec", error="Sequence reused with different command", code="SEQUENCE_CONFLICT", sequence=sequence)
+                    return Result(False, "ec", error="Sequence reused with different command",
+                                  code="SEQUENCE_CONFLICT", sequence=sequence)
                 if previous.get("state") != "DONE":
-                    return Result(False, "ec", error="Execution outcome is not yet known; inspect state before continuing", code="UNKNOWN", data={"state": previous.get("state", "RUNNING")}, sequence=sequence)
-                cached = Result(**previous["result"])
-                cached.sequence = sequence
-                cached.data = {**cached.data, "duplicate": True}
-                return cached
+                    return Result(False, "ec",
+                                  error="Execution outcome is not yet known; inspect state before continuing",
+                                  code="UNKNOWN",
+                                  data={"state": previous.get("state", "RUNNING")},
+                                  sequence=sequence)
+
+                cached = self._ec_result_cache.get(sequence)
+                if cached is not None:
+                    replay = Result(**cached.to_dict())
+                    replay.sequence = sequence
+                    replay.data = {**replay.data, "duplicate": True}
+                    return replay
+
+                # Backward compatibility with old session files that persisted
+                # the complete Result payload.
+                legacy = previous.get("result")
+                if isinstance(legacy, dict):
+                    replay = Result(**legacy)
+                    replay.sequence = sequence
+                    replay.data = {**replay.data, "duplicate": True}
+                    return replay
+
+                # After a process restart the large payload is intentionally not
+                # persisted. Return a small proof that the sequence completed;
+                # never replay a mutation blindly.
+                return Result(
+                    bool(previous.get("ok", True)),
+                    str(previous.get("command_name") or "ec"),
+                    data={
+                        "duplicate": True,
+                        "replay": {
+                            "state": "DONE",
+                            "result_hash": previous.get("result_hash"),
+                            "original_duration_ms": previous.get("duration_ms"),
+                        },
+                    },
+                    error=previous.get("error"),
+                    code=previous.get("code"),
+                    duration_ms=0,
+                    sequence=sequence,
+                )
+
             journal[sequence] = {"sha256": digest, "state": "RUNNING", "command": command[:256]}
-            self.state_store.data["ec_results"] = journal
+            self.state_store.data["ec_results"] = dict(list(journal.items())[-128:])
             self._persist_state()
 
         try:
@@ -156,10 +202,25 @@ class CommandService:
         result.sequence = sequence
         if codec:
             result.data = {**result.data, "transport_codec": codec}
+
+        serialized = json.dumps(result.to_dict(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         with self._guard:
             journal = dict(self.state_store.data.get("ec_results", {}))
-            journal[sequence] = {"sha256": digest, "state": "DONE", "command": command[:256], "result": result.to_dict()}
+            journal[sequence] = {
+                "sha256": digest,
+                "state": "DONE",
+                "command": command[:256],
+                "ok": result.ok,
+                "command_name": result.command,
+                "code": result.code,
+                "error": (result.error or "")[:512] or None,
+                "duration_ms": result.duration_ms,
+                "result_hash": hashlib.sha256(serialized).hexdigest(),
+            }
             self.state_store.data["ec_results"] = dict(list(journal.items())[-128:])
+            self._ec_result_cache[sequence] = result
+            if len(self._ec_result_cache) > 32:
+                self._ec_result_cache = dict(list(self._ec_result_cache.items())[-32:])
             self._persist_state(result)
         return result
 
@@ -171,7 +232,7 @@ class CommandService:
         if not isinstance(operations, list) or not 1 <= len(operations) <= 16:
             return Result(False, "structured", error="OPERATION_COUNT_LIMIT", code="INVALID_STRUCTURED_PAYLOAD")
 
-        mutation_types = {"write_file", "create_file", "replace_line"}
+        mutation_types = {"write_file", "create_file", "replace_line", "replace_range", "replace_text", "insert", "append"}
         kinds = [str(item.get("type") or "").casefold() if isinstance(item, dict) else "" for item in operations]
         transactional = any(kind in mutation_types for kind in kinds)
         if transactional and self.transaction is not None:
@@ -206,6 +267,38 @@ class CommandService:
                         result = Result(False, kind, error="PATH_LINE_AND_CONTENT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
                     else:
                         result = self.execute_tokens("replace-line", [path, str(line), content], raw=f"EC1 patch {path}:{line}")
+                elif kind == "replace_range":
+                    path, start, end, content = item.get("path"), item.get("start"), item.get("end"), item.get("content")
+                    if (not isinstance(path, str) or not isinstance(content, str)
+                            or isinstance(start, bool) or not isinstance(start, int)
+                            or isinstance(end, bool) or not isinstance(end, int)):
+                        result = Result(False, kind, error="PATH_START_END_AND_CONTENT_REQUIRED",
+                                        code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        result = self.execute_tokens("replace-range",
+                            [path, str(start), str(end), content], raw=f"EC1 replace-range {path}:{start}-{end}")
+                elif kind == "replace_text":
+                    path, old, new = item.get("path"), item.get("old"), item.get("new")
+                    if not isinstance(path, str) or not isinstance(old, str) or not isinstance(new, str):
+                        result = Result(False, kind, error="PATH_OLD_AND_NEW_REQUIRED",
+                                        code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        result = self.execute_tokens("replace", [path, old, new], raw=f"EC1 replace {path}")
+                elif kind == "insert":
+                    path, line, content = item.get("path"), item.get("line"), item.get("content")
+                    if (not isinstance(path, str) or not isinstance(content, str)
+                            or isinstance(line, bool) or not isinstance(line, int)):
+                        result = Result(False, kind, error="PATH_LINE_AND_CONTENT_REQUIRED",
+                                        code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        result = self.execute_tokens("insert", [path, str(line), content], raw=f"EC1 insert {path}:{line}")
+                elif kind == "append":
+                    path, content = item.get("path"), item.get("content")
+                    if not isinstance(path, str) or not isinstance(content, str):
+                        result = Result(False, kind, error="PATH_AND_CONTENT_REQUIRED",
+                                        code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        result = self.execute_tokens("append", [path, content], raw=f"EC1 append {path}")
                 elif kind == "read":
                     path = item.get("path")
                     if not isinstance(path, str):
@@ -343,15 +436,59 @@ class CommandService:
         self._persist_state(result)
         return result
 
+    @staticmethod
+    def _result_summary(result: Result | None) -> dict | None:
+        if result is None:
+            return None
+        data = result.data or {}
+        compact_data = {}
+        for key in ("path", "file", "count", "state", "workspace", "line", "transaction", "passed"):
+            value = data.get(key)
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                if key in data:
+                    compact_data[key] = value
+        return {
+            "ok": result.ok,
+            "command": result.command,
+            "code": result.code,
+            "error": (result.error or "")[:512] or None,
+            "command_id": result.command_id,
+            "duration_ms": result.duration_ms,
+            "sequence": result.sequence,
+            "data": compact_data,
+        }
+
     def _persist_state(self, result: Result | None = None) -> None:
         self.state_store.data.update({"session_id": self.session_id, "workspace": str(self.workspace.root_path),
             "current_file": self.state_store.data.get("current_file"), "output_mode": self.output,
             "transport": self.state_store.data.get("transport", "local"), "mode": "machine" if self.machine else "human",
             "history": self.history[-50:], "id_counts": self.ids.counts(), "aliases": self.aliases,
             "macros": self.macros, "snapshots": self.snapshots,
-            "last_command": self.last_command, "last_result": result.to_dict() if result else None,
+            "last_command": self.last_command, "last_result": self._result_summary(result),
             "file_refs": self.file_refs, "results": self.results})
         self.state_store.data["file_hashes"] = self.files.baselines
+        # Defensive migration: old builds may have left full result payloads
+        # inside ec_results. Compact them before every save.
+        compact_journal = {}
+        for sequence, item in dict(self.state_store.data.get("ec_results", {})).items():
+            if not isinstance(item, dict):
+                continue
+            if item.get("state") == "DONE" and isinstance(item.get("result"), dict):
+                legacy = item["result"]
+                encoded = json.dumps(legacy, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                item = {
+                    "sha256": item.get("sha256"),
+                    "state": "DONE",
+                    "command": item.get("command"),
+                    "ok": bool(legacy.get("ok")),
+                    "command_name": legacy.get("command"),
+                    "code": legacy.get("code"),
+                    "error": str(legacy.get("error") or "")[:512] or None,
+                    "duration_ms": legacy.get("duration_ms", 0),
+                    "result_hash": hashlib.sha256(encoded).hexdigest(),
+                }
+            compact_journal[sequence] = item
+        self.state_store.data["ec_results"] = dict(list(compact_journal.items())[-128:])
         self.state_store.save()
 
     def _dispatch(self, name: str, args: list[str]) -> dict:
