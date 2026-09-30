@@ -1,6 +1,6 @@
 # EasyChange
 
-EasyChange is a machine-first development workspace: a predictable command layer between an AI agent and a software workspace. Its core works with any directory; project formats add optional build and test profiles.
+EasyChange is a machine-first development workspace: a predictable command layer between an AI agent and a software workspace. The core works with any directory; project formats add optional build and test profiles.
 
 ## Install and run
 
@@ -13,7 +13,7 @@ python -m pip install -e ".[dev,gui,api]"
 python -m easychange C:\path\to\workspace
 ```
 
-Run `easychange <workspace>` or `python -m easychange <workspace>` to use the interactive CLI. Add `--json` for JSON command results. Run the optional GUI with `python -m easychange.gui <workspace>`.
+Run `easychange <workspace>` or `python -m easychange <workspace>` for the interactive CLI. Add `--json` for JSON output. Run the optional GUI with `python -m easychange.gui <workspace>`.
 
 ## Machine-first workflow
 
@@ -23,36 +23,36 @@ Commands accept a leading colon (optional in the CLI). Quoted arguments may cont
 :state
 :files
 :search NumeroProtocolo
-:read src/example.py 1 40
+:context R1
 :replace-line src/example.py 12 "value = 2"
-:diff
+:diff && :test
 :undo
 ```
 
-The GUI uses **F12** for Machine Mode, **Ctrl+K** to focus the command line, and **Esc** to return focus there. It has no modal dialogs in Machine Mode. CLI and GUI both call the same `CommandService`.
+The GUI uses **F12** for high-contrast Machine Mode, **Ctrl+K** to focus the command line, and **Esc** to return focus there. It includes line numbers, syntax highlighting, a persistent command field, and keyboard shortcuts. CLI and GUI use the same `CommandService`.
 
-Supported core commands: `help`, `capabilities`, `state`, `workspace`, `pwd`, `files`, `tree`, `projects`, `open`, `read`, `head`, `tail`, `context`, `search`, `find`, `new`, `mkdir`, `write`, `append`, `insert`, `save`, `replace`, `replace-line`, `replace-range`, `delete`, `rename`, `begin`, `commit`, `rollback`, `undo`, `status`, `diff`, `build`, `test`, `run`, `set`, `machine`, `human`, `quit`.
+Use `:capabilities` to discover commands. Features include indexed search, line-numbered reads, file editing and metadata, symbol definitions/references, batches and command chains, aliases/macros, snapshots, locks, transactions, persistent journal/undo/redo, Git status/diff/branch/log, process/build/test, and diagnostics. High-level commands include `:rename-symbol`, `:create-class`, `:create-interface`, and `:create-test`. Format/import commands report `ADAPTER_UNAVAILABLE` until a language adapter implements them.
 
-Output can be changed with `:set output text|json|compact`; `:set transport hid` selects compact output. File paths are confined to the opened workspace. External processes are launched as argument arrays, without a shell.
+Output can be changed with `:set output text|json|compact`; `:set transport hid` selects compact output. File paths are confined to the opened workspace. External processes run as argument arrays, without shell expansion.
 
 ## Interfaces
 
 - **CLI:** included, interactive and JSON-capable.
-- **GUI:** optional PySide6 (`pip install -e ".[gui]"`). Machine Mode is toggled with F12.
-- **HTTP API:** optional FastAPI/Uvicorn (`pip install -e ".[api]"`); loopback only by default: `python -m easychange.api.server <workspace>`. It exposes `/api/state`, `/api/capabilities`, `/api/command`, and `/api/search`.
-- **MCP:** optional stdio server (`pip install -e ".[mcp]"`, then `python -m easychange.mcp.server <workspace>`). Tools call the shared command service.
+- **GUI:** optional PySide6 (`pip install -e ".[gui]"`).
+- **HTTP API:** optional FastAPI/Uvicorn (`pip install -e ".[api]"`); loopback only by default: `python -m easychange.api.server <workspace>`. Routes provide state, capabilities, commands, search, bounded file read/write, build, and test.
+- **MCP:** optional stdio server (`pip install -e ".[mcp]"`, then `python -m easychange.mcp.server <workspace>`). MCP tools call the shared command service.
 
-## Adapters
+## Adapters and persistence
 
-The generic adapter supports ordinary folders. Detection recognizes Git, .NET, Python, Node, Rust, Go, Java, CMake, Unreal, and Godot markers without requiring them. Python, Node, and .NET adapter modules currently provide basic build/test profiles; unsupported build tools do not prevent browsing or editing. Adapter capabilities are additive and core services remain language-neutral.
+Workspace detection recognizes Git, .NET, Python, Node, Rust, Go, Java, CMake, Unreal, and Godot markers without requiring them. Python, Node, and .NET adapters provide basic build/test profiles; unsupported build tools do not prevent generic browsing or editing.
 
-## State safety and Git
-
-Edits enter an in-memory journal. `:undo` reverts the most recent file edit. `:begin`, `:commit`, and `:rollback` group edits; a rollback restores those edits in reverse order. Git status/diff are read-only. A workspace-specific `.easychange/` persistence format, external-change watcher, locks, LSP/Tree-sitter indexing, and persistent sessions are planned extensions.
+Edits are recorded in a persistent `.easychange/` journal. Undo/redo checks file hashes; transactions can be recovered after restart. SQLite stores the incremental file index and cross-process locks. A generic regex provider supplies basic symbols and the provider interface can accept Tree-sitter or LSP integrations.
 
 ## B.M.O. and remote operation
 
-The compact output profile, stable short result IDs, line-numbered reads, and one-command-per-line protocol are intended to reduce HDMI/HID interaction cost. The remote protocol is local and transport-neutral; it does not itself control an ESP device. See [REMOTE_CONTROL.md](docs/REMOTE_CONTROL.md) and [PROTOCOL.md](docs/PROTOCOL.md).
+Compact output, persisted short IDs, line-numbered reads, batch commands, and the keyboard-focused GUI reduce HDMI/HID interaction cost. The transport is neutral and does not itself control ESP hardware. See [REMOTE_CONTROL.md](docs/REMOTE_CONTROL.md), [PROTOCOL.md](docs/PROTOCOL.md), and [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+The current repository does not include Tree-sitter/LSP servers, authenticated network access, or physical HDMI/ESP32 firmware. The HTTP API binds to loopback by default.
 
 ## Tests
 
@@ -60,5 +60,3 @@ The compact output profile, stable short result IDs, line-numbered reads, and on
 python -m pip install -e ".[dev]"
 python -m pytest
 ```
-
-Architecture decisions and current scope: [ARCHITECTURE.md](docs/ARCHITECTURE.md). This repository is an MVP; consult that file for features not yet implemented.

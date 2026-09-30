@@ -19,7 +19,7 @@ def detect_workspace(root: Path) -> tuple[str, list[str], list[str]]:
                 projects.append(item.name)
                 if kind not in adapters:
                     adapters.append(kind)
-    if (root / ".git").exists():
+    if any((parent / ".git").exists() for parent in (root, *root.parents)):
         adapters.insert(0, "GIT")
     kind = adapters[-1] if len(adapters) == 1 else ("GIT" if "GIT" in adapters else (adapters[0] if adapters else "GENERIC"))
     if not adapters:

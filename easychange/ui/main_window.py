@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QMa
 
 from easychange.core.command_service import CommandService
 from easychange.core.workspace import Workspace
+from easychange.ui.editor import BasicHighlighter, CodeEditor
 
 
 class MainWindow(QMainWindow):
@@ -19,12 +20,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("EasyChange")
         self.resize(1100, 720)
         central = QWidget(); layout = QVBoxLayout(central)
-        self.header = QLabel(f"EasyChange | {workspace.name} | {workspace.kind}")
+        self.header = QLabel(f"EasyChange | {workspace.name} | {workspace.kind} | FOCUS: COMMAND")
         self.tree = QTreeWidget(); self.tree.setHeaderLabel("FILES")
         for item in self.service.files.list_files():
             QTreeWidgetItem(self.tree, [item["path"]])
-        self.editor = QPlainTextEdit(); self.editor.setPlaceholderText("Open a file with :open <path> or select it in FILES")
-        self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.editor = CodeEditor(); self.editor.setPlaceholderText("Open a file with :open <path> or select it in FILES")
         self.output = QPlainTextEdit(); self.output.setReadOnly(True); self.output.setMaximumHeight(180)
         split = QSplitter(Qt.Orientation.Horizontal); split.addWidget(self.tree); split.addWidget(self.editor)
         split.setStretchFactor(1, 1)
@@ -41,6 +41,19 @@ class MainWindow(QMainWindow):
         self._add_shortcut("F12", self.toggle_machine)
         self._add_shortcut("Escape", self.focus_command)
         self._add_shortcut("Ctrl+S", self.save_editor)
+        self._add_shortcut("Ctrl+P", lambda: self._prompt(":open "))
+        self._add_shortcut("Ctrl+Shift+F", lambda: self._prompt(":search "))
+        self._add_shortcut("Ctrl+G", lambda: self._prompt(":goto "))
+        self._add_shortcut("Ctrl+N", lambda: self._prompt(":new "))
+        self._add_shortcut("Ctrl+Shift+S", self.save_all)
+        self._add_shortcut("Ctrl+D", lambda: self._run_command(":diff"))
+        self._add_shortcut("Ctrl+Z", lambda: self._run_command(":undo"))
+        self._add_shortcut("Ctrl+Y", lambda: self._run_command(":redo"))
+        self._add_shortcut("F5", lambda: self._run_command(":build"))
+        self._add_shortcut("F6", lambda: self._run_command(":test"))
+        self._add_shortcut("F7", lambda: self._run_command(":errors"))
+        self._add_shortcut("F8", lambda: self._run_command(":next-error"))
+        self._add_shortcut("Shift+F8", lambda: self._run_command(":previous-error"))
         self.focus_command()
 
     def _add_shortcut(self, sequence: str, callback) -> None:
@@ -53,16 +66,32 @@ class MainWindow(QMainWindow):
         self._machine = not self._machine
         self.service.machine = self._machine
         self.setStyleSheet("QWidget { background:#101820; color:#f2f5f7; font-family: Consolas, monospace; }" if self._machine else "")
-        self.header.setText(f"EasyChange {'MACHINE MODE' if self._machine else 'HUMAN MODE'} | {self.service.workspace.root_path}")
+        self.header.setText(f"EasyChange {'MACHINE MODE' if self._machine else 'HUMAN MODE'} | {self.service.workspace.root_path} | FOCUS: COMMAND")
+        self.editor.highlighter.setDocument(None)
+        self.editor.highlighter = BasicHighlighter(self.editor.document(), high_contrast=self._machine)
         self.focus_command()
 
     def execute_command(self) -> None:
         text = self.command.text(); self.command.clear()
+        self._run_command(text)
+
+    def _run_command(self, text: str) -> None:
         result = self.service.execute(text)
         self.output.setPlainText(result.render(self.service.output))
-        if result.data.get("path") and text.lstrip(":").startswith(("open", "read")):
-            self._load_editor(result.data)
+        if result.ok and (result.data.get("path") or result.data.get("file")) and text.lstrip(":").split(maxsplit=1)[0] in {"open", "read", "context", "goto", "reload"}:
+            try:
+                data = result.data
+                if data.get("file") and not data.get("path"):
+                    data = self.service.files.read(data["file"], data.get("line", 1), 1)
+                self._load_editor(data)
+                if result.data.get("start"):
+                    self.editor.goto_line(result.data["start"])
+            except (OSError, ValueError, PermissionError) as exc:
+                self.output.setPlainText(f"ERROR: {exc}")
         self.focus_command()
+
+    def _prompt(self, value: str) -> None:
+        self.command.setText(value); self.focus_command(); self.command.setCursorPosition(len(value))
 
     def preview_selected(self, current, previous=None) -> None:
         if current:
@@ -83,14 +112,23 @@ class MainWindow(QMainWindow):
             self.editor.clear()
             self.output.setPlainText("FILE_TOO_LARGE: editor limit is 2 MiB; use :read with a line range")
             return
+        self.service.files.remember(path, replace=True)
         self._active_path = path
         self.editor.setPlainText(target.read_text(encoding="utf-8-sig"))
 
     def save_editor(self) -> None:
         if self._active_path:
-            result = self.service.execute(":write " + self._quote(self._active_path) + " " + self._quote(self.editor.toPlainText()))
+            result = self.service.execute_tokens("write", [self._active_path, self.editor.toPlainText()], raw=f"GUI save {self._active_path}")
             self.output.setPlainText(result.render(self.service.output))
         self.focus_command()
+
+    def save_all(self) -> None:
+        self.save_editor()
+        self.output.appendPlainText("SAVEALL: 1 active file")
+
+    def closeEvent(self, event) -> None:
+        self.service.close()
+        super().closeEvent(event)
 
     @staticmethod
     def _quote(value: str) -> str:

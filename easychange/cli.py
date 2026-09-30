@@ -16,7 +16,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Emit JSON results")
     options = parser.parse_args(argv)
     try:
-        command_names = set(CommandService(Workspace.open(Path(options.workspace_option or "."))).execute(":capabilities").data["commands"])
+        probe = CommandService(Workspace.open(Path(options.workspace_option or ".")))
+        try: command_names = set(probe.execute(":capabilities").data["commands"])
+        finally: probe.close()
         one_shot = bool(options.args and options.args[0].lstrip(":") in command_names)
         if options.workspace_option:
             workspace_path = options.workspace_option
@@ -31,10 +33,13 @@ def main(argv: list[str] | None = None) -> int:
     if options.json:
         service.output = "json"
     if one_shot:
-        command = options.args[0] + (" " + shlex.join(options.args[1:]) if len(options.args) > 1 else "")
-        result = service.execute(command)
-        print(result.render(service.output))
-        return 0 if result.ok else 1
+        try:
+            command = options.args[0] + (" " + shlex.join(options.args[1:]) if len(options.args) > 1 else "")
+            result = service.execute(command)
+            print(result.render(service.output))
+            return 0 if result.ok else 1
+        finally:
+            service.close()
     print(service.execute(":state").render(service.output))
     try:
         while True:
@@ -48,6 +53,8 @@ def main(argv: list[str] | None = None) -> int:
                 break
     except KeyboardInterrupt:
         print("\nOK: closed")
+    finally:
+        service.close()
     return 0
 
 

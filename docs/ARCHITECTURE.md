@@ -1,39 +1,37 @@
 # Architecture
 
-EasyChange separates machine-facing intent from workspace mechanics so CLI, GUI, HTTP, and a future MCP transport share the same behavior.
+EasyChange separates machine-facing intent from workspace mechanics. CLI, GUI, HTTP, and MCP share one `CommandService` and structured `Result` model.
 
 ```text
-CLI / GUI / HTTP / future MCP
-             |
-       CommandService       (control plane)
-             |
-  Workspace, File, Search   (workspace plane)
-             |
-   Git, Process, Adapters   (execution plane)
-             |
-      Journal / TX          (state and safety)
+CLI / GUI / HTTP / MCP
+          |
+    CommandService ---- MachineSession / IDs / command history
+          |
+ Workspace / FileService / SQLite Indexer / SymbolService / Watcher
+          |
+ GitService / ProcessService / language adapters
+          |
+ Journal / transactions / cross-process locks
 ```
 
-## Core
+## Generic workspace
 
-`Workspace` is a root directory plus detected metadata. It does not require a solution or language marker. `Workspace.resolve` confines file operations to that root. `FileService` handles listing, bounded reads, writes, replacements, and line edits. `SearchService` provides a portable text search. `CommandService` is the shared command router and returns a structured `Result`.
+`Workspace.open` accepts any directory. Workspace detection adds metadata and optional adapters; browsing, indexing, search, edits, and Git do not require a `.sln` or another project marker. `Workspace.resolve` confines paths to the workspace, including symlink resolution.
 
-## Adapters
+`FileService` handles bounded text reads and writes, metadata, hashes, line edits, and external-change checks. Binary files are not treated as text. The SQLite index records file path, extension, size, mtime, hash, language, and bounded UTF-8 content. It refreshes changed files and removes deleted entries. `SymbolService` accepts pluggable providers; a generic regex provider supplies basic class/function symbols while Tree-sitter and LSP providers remain extension points.
 
-The base `ProjectAdapter` protocol describes detection, capabilities, build, and test hooks. Generic browsing/editing always works. Detection currently recognizes Git and common .NET, Python, Node, Rust, Go, Java, CMake, Unreal, and Godot markers. Python, Node, and .NET have initial profile modules. Adapters do not own workspace semantics.
+## Adapters and execution
 
-## Execution
-
-`ProcessService` passes argv directly to subprocesses with a workspace working directory and timeout. `GitService` offers read-only status and diff operations. Build and test select detected adapter defaults or accept an explicit argv in the command.
+Project adapters add detection and build/test profiles without owning generic workspace behavior. Python, Node, and .NET profiles are currently supplied. `ProcessService` launches argument arrays with `shell=False`, captures bounded output, and supports background processes. Git status, branch, log, and diff are exposed separately.
 
 ## State and safety
 
-The edit journal stores prior file contents in memory. Transactions buffer these changes until commit, or restore them in reverse order on rollback. Undo is available for committed journal entries. Path resolution blocks `..` and symlink escapes. Persistent journals, file locks, watcher-based external-change detection, and disk guards are not in this MVP.
+Machine session state, short-ID counters, aliases, macros, file references, and recent results persist under `.easychange/`. A JSONL journal stores reversible file changes; transactions survive process restart until committed or rolled back. Undo and redo check current hashes before changing a file. File locks are stored in SQLite and shared across service instances with expiry. Writes detect changes since the file was read or indexed; `:reload`, `:diff`, and `:force-write` let the caller handle conflicts.
 
-## Presentation and transports
+The watcher polls the workspace and refreshes index deltas. Large and binary text reads are bounded. External commands run without shell interpolation. The HTTP server rejects non-loopback bind addresses by default.
 
-The CLI, optional PySide6 GUI, optional FastAPI application, and optional MCP stdio server call the same command service. HTTP binds to loopback by default. `remote.machine_protocol` provides a compact newline-friendly JSON envelope for HID/serial bridge integrations.
+## GUI and transports
 
-## Extension points
+The optional PySide6 GUI is keyboard-driven, has a persistent command input, line-numbered editor, syntax highlighting, high-contrast Machine Mode, and shortcuts for search, open, save, diff, build, test, diagnostics, undo, and redo. CLI, HTTP, and MCP are adapters around the same command service. The API offers state, capabilities, command, search, bounded file read/write, build, and test routes. MCP runs over stdio.
 
-Add adapters under `easychange/adapters`, keeping format-specific rules outside the core. Add transports that translate input into `CommandService.execute` and serialize `Result`; they should not duplicate file-edit logic.
+The compact protocol and `:set transport hid` reduce output volume for a future HDMI/HID bridge. This repository does not include ESP firmware, HDMI capture, HID hardware control, authentication, or a network-facing remote agent service.

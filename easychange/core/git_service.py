@@ -21,5 +21,14 @@ class GitService:
         lines = self._run("status", "--short").splitlines()
         return {"branch": branch, "changes": lines, "clean": not lines}
 
-    def diff(self) -> str:
-        return self._run("diff", "--no-ext-diff", "--")
+    def diff(self, path: str | None = None) -> str:
+        return self._run("diff", "--no-ext-diff", "--", *( [path] if path else [] ))
+
+    def branch(self) -> dict:
+        return {"current": self._run("branch", "--show-current"),
+                "branches": self._run("branch", "--list").splitlines()}
+
+    def log(self, limit: int = 10) -> list[dict]:
+        output = self._run("log", f"-{max(1, min(limit, 100))}", "--date=iso-strict",
+                           "--pretty=format:%h%x1f%ad%x1f%s")
+        return [dict(zip(("hash", "date", "subject"), line.split("\x1f", 2))) for line in output.splitlines()]

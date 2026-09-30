@@ -16,6 +16,7 @@ def create_server(workspace_path: str | Path = "."):
         raise RuntimeError('MCP support is optional. Install with: pip install -e ".[mcp]"') from exc
     service = CommandService(Workspace.open(workspace_path))
     server = MCPServer("EasyChange")
+    server._easychange_service = service
 
     @server.tool()
     def state() -> dict:
@@ -26,6 +27,11 @@ def create_server(workspace_path: str | Path = "."):
     def capabilities() -> dict:
         """List supported EasyChange commands."""
         return service.execute_tokens("capabilities", []).data
+
+    @server.tool()
+    def command(text: str) -> dict:
+        """Execute one EasyChange command or a bounded command chain and return a structured result."""
+        return service.execute(text).to_dict()
 
     @server.tool()
     def list_files(limit: int = 500) -> dict:
@@ -117,7 +123,10 @@ def main() -> int:
     except (RuntimeError, OSError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    asyncio.run(server.run_stdio_async())
+    try:
+        asyncio.run(server.run_stdio_async())
+    finally:
+        server._easychange_service.close()
     return 0
 
 

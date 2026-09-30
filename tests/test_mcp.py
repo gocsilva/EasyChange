@@ -19,10 +19,12 @@ def test_stdio_mcp_tools(tmp_path):
                 await session.initialize()
                 tools = await session.list_tools()
                 names = {tool.name for tool in tools.tools}
-                assert {"state", "search", "edit_file", "undo"} <= names
+                assert {"state", "search", "edit_file", "undo", "command"} <= names
                 state = await session.call_tool("state", {})
                 assert not state.is_error
                 search = await session.call_tool("search", {"query": "find-me"})
                 assert not search.is_error
+                capabilities = await session.call_tool("command", {"text": ":capabilities"})
+                assert not capabilities.is_error
 
     asyncio.run(exercise())

@@ -65,3 +65,65 @@ def test_append_insert_and_binary_write_guard(service, tmp_path):
     (tmp_path / "image.bin").write_bytes(b"\x00\x01")
     blocked = service.execute(':write image.bin "no"')
     assert not blocked.ok
+
+
+def test_external_change_persistence_redo_and_transaction_recovery(service, tmp_path):
+    original = (tmp_path / "sample.py").read_text(encoding="utf-8")
+    assert service.execute(":read sample.py").ok
+    (tmp_path / "sample.py").write_text("external = True\n", encoding="utf-8")
+    conflict = service.execute(':write sample.py "ours"')
+    assert conflict.code == "EXTERNAL_CHANGE"
+    assert service.execute(':force-write sample.py "ours"').ok
+    replacement = CommandService(Workspace.open(tmp_path))
+    assert replacement.execute(":undo").ok
+    assert (tmp_path / "sample.py").read_text(encoding="utf-8") == "external = True\n"
+    assert replacement.execute(":redo").ok
+    assert (tmp_path / "sample.py").read_text(encoding="utf-8") == "ours"
+    replacement.execute(":begin")
+    replacement.execute(':write sample.py "transaction"')
+    resumed = CommandService(Workspace.open(tmp_path))
+    assert resumed.transaction_id is not None
+    assert resumed.execute(":rollback").ok
+    assert (tmp_path / "sample.py").read_text(encoding="utf-8") == "ours"
+    assert original
+
+
+def test_batch_alias_paging_macro_symbols_and_file_metadata(service, tmp_path):
+    (tmp_path / "module.py").write_text("class Example:\n    def run(self):\n        return 1\n", encoding="utf-8")
+    result = service.execute(':batch s ext:py Example ; outline module.py')
+    assert result.ok and result.data["count"] == 2
+    symbols = service.execute(":definition Example")
+    assert symbols.data["symbols"][0]["kind"] == "class"
+    metadata = service.execute(":stat module.py")
+    assert metadata.data["kind"] == "text"
+    service.execute(":alias x state")
+    assert service.execute(":x").ok
+    service.execute(':macro define readit "read sample.py 1 1"')
+    assert service.execute(":macro run readit").ok
+
+
+def test_locks_are_shared_and_search_index_incremental(service, tmp_path):
+    assert service.execute(":lock sample.py 60").ok
+    other = CommandService(Workspace.open(tmp_path))
+    blocked = other.execute(':write sample.py "blocked"')
+    assert blocked.code == "LOCKED"
+    assert service.execute(":unlock sample.py").ok
+    before = service.indexer.refresh()
+    (tmp_path / "sample.py").write_text("changed phrase", encoding="utf-8")
+    matches = service.execute(":search regex:changed ext:py")
+    assert matches.ok and matches.data["matches"]
+    assert before["files"] >= 1
+
+
+def test_high_level_rename_scaffold_git_router_and_clear(service, tmp_path):
+    (tmp_path / "module.py").write_text("class OldName:\n    value = OldName\n", encoding="utf-8")
+    renamed = service.execute(":rename-symbol OldName NewName")
+    assert renamed.ok and renamed.data["replacements"] == 2
+    assert "NewName" in (tmp_path / "module.py").read_text(encoding="utf-8")
+    assert service.execute(":undo").ok
+    assert "OldName" in (tmp_path / "module.py").read_text(encoding="utf-8")
+    assert service.execute(":create-interface IExample").ok
+    assert "Protocol" in (tmp_path / "IExample.py").read_text(encoding="utf-8")
+    assert service.execute(":git status").code == "ADAPTER_UNAVAILABLE"
+    service.execute(":search OldName")
+    assert service.execute(":clear").data["cleared"]
