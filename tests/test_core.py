@@ -858,3 +858,337 @@ def test_database_cli_query_uses_bounded_tempfile_capture(monkeypatch):
     assert result["truncated"] is True
     assert result["capture_backend"] == "tempfile-bounded"
     assert result["rows"][0] == "row-0"
+
+
+
+def test_read_only_structured_batch_persists_once(service, monkeypatch):
+    saves = {"count": 0}
+    original = service.state_store.save
+
+    def counted_save():
+        saves["count"] += 1
+        return original()
+
+    monkeypatch.setattr(service.state_store, "save", counted_save)
+    result = service._execute_structured({
+        "op": "batch",
+        "operations": [
+            {"type": "read", "path": "sample.py", "start": 1, "count": 5},
+            {"type": "search", "query": "NumeroProtocolo"},
+            {"type": "read", "path": "sample.py", "start": 1, "count": 5},
+        ],
+    })
+    assert result.ok
+    assert saves["count"] == 1
+
+
+def test_sequenced_read_only_structured_batch_persists_running_and_done_only(service, monkeypatch):
+    import json
+
+    saves = {"count": 0}
+    original = service.state_store.save
+
+    def counted_save():
+        saves["count"] += 1
+        return original()
+
+    monkeypatch.setattr(service.state_store, "save", counted_save)
+    packet = json.dumps({
+        "op": "batch",
+        "operations": [
+            {"type": "read", "path": "sample.py", "start": 1, "count": 5},
+            {"type": "search", "query": "NumeroProtocolo"},
+            {"type": "read", "path": "sample.py", "start": 1, "count": 5},
+        ],
+    }, separators=(",", ":"))
+    result = service.execute(":ec QPERSIST01 :j1 " + packet)
+    assert result.ok
+    # One durable RUNNING journal write + one durable DONE write. No per-read saves.
+    assert saves["count"] == 2
+
+
+def test_execute_tokens_error_persists_once(service, monkeypatch):
+    saves = {"count": 0}
+    original = service.state_store.save
+
+    def counted_save():
+        saves["count"] += 1
+        return original()
+
+    monkeypatch.setattr(service.state_store, "save", counted_save)
+    result = service.execute_tokens("read", ["missing-file.py"])
+    assert not result.ok
+    assert saves["count"] == 1
+
+
+
+def test_study_context_is_not_persisted_in_result_navigation_cache(service):
+    result = service.execute(":study NumeroProtocolo --limit 4 --context 3")
+    assert result.ok
+    assert result.data["matches"]
+    match = result.data["matches"][0]
+    assert "context" in match
+    cached = service.results[match["id"]]
+    assert cached["file"] == match["file"]
+    assert cached["line"] == match["line"]
+    assert "context" not in cached
+
+
+def test_result_reference_resolves_without_file_ref_duplicate(service):
+    result = service.execute(":search NumeroProtocolo --limit 2")
+    match = result.data["matches"][0]
+    service.file_refs.pop(match["id"], None)
+    assert service._resolve_ref(match["id"]) == match["file"]
+
+
+def test_file_refs_are_bounded_to_1024(service):
+    service.file_refs = {f"F{i}": f"file-{i}.txt" for i in range(1400)}
+    service._persist_state()
+    assert len(service.state_store.data["file_refs"]) == 1024
+
+
+
+def test_process_history_prunes_old_finished_entries_and_logs(tmp_path):
+    from types import SimpleNamespace
+    from easychange.core.process_service import ProcessService, RunningProcess
+
+    service = ProcessService(tmp_path)
+    for index in range(40):
+        stdout_path = service.root / f"P{index}.out"
+        stderr_path = service.root / f"P{index}.err"
+        stdout_path.write_text("out", encoding="utf-8")
+        stderr_path.write_text("err", encoding="utf-8")
+        process = SimpleNamespace(poll=lambda: 0, pid=index)
+        service._processes[f"P{index}"] = RunningProcess(
+            f"P{index}", ["fake"], process, stdout_path, stderr_path
+        )
+
+    service._prune_finished(keep=32)
+    assert len(service._processes) == 32
+    assert "P0" not in service._processes
+    assert not (service.root / "P0.out").exists()
+    assert "P39" in service._processes
+    assert (service.root / "P39.out").exists()
+
+
+def test_stop_all_removes_ephemeral_process_logs(tmp_path):
+    import sys
+    from easychange.core.process_service import ProcessService
+
+    service = ProcessService(tmp_path)
+    service.start([sys.executable, "-c", "print('done')"], "P1")
+    service._processes["P1"].process.wait(timeout=10)
+    assert (service.root / "P1.out").exists()
+    service.stop_all()
+    assert service._processes == {}
+    assert not (service.root / "P1.out").exists()
+    assert not (service.root / "P1.err").exists()
+
+
+
+def test_file_write_reads_existing_file_only_once(tmp_path, monkeypatch):
+    from easychange.core.file_service import FileService
+
+    target = tmp_path / "one.txt"
+    target.write_text("before\n", encoding="utf-8")
+    service = FileService(Workspace.open(tmp_path))
+    service.remember("one.txt", replace=True)
+
+    original = Path.read_bytes
+    calls = {"target": 0}
+
+    def counted_read_bytes(path):
+        if path == target:
+            calls["target"] += 1
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    result = service.write("one.txt", "after\n")
+    assert result["created"] is False
+    assert calls["target"] == 1
+    assert target.read_text(encoding="utf-8") == "after\n"
+
+
+def test_file_read_hashes_once_and_sets_full_baseline(tmp_path, monkeypatch):
+    import hashlib
+    from easychange.core.file_service import FileService
+
+    target = tmp_path / "read.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    service = FileService(Workspace.open(tmp_path))
+    raw = target.read_bytes()
+    result = service.read("read.txt")
+    full = hashlib.sha256(raw).hexdigest()
+    assert result["hash"] == full[:12]
+    assert service.baselines["read.txt"] == full
+
+
+
+def test_transaction_storage_is_append_only_and_restart_safe(tmp_path):
+    import json
+    source = tmp_path / "sample.txt"
+    source.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    service = CommandService(Workspace.open(tmp_path))
+
+    assert service.execute(":begin").ok
+    assert service.execute(":replace-line sample.txt 1 ONE").ok
+    first_size = service.transaction_log_path.stat().st_size
+    assert service.execute(":replace-line sample.txt 2 TWO").ok
+    second_size = service.transaction_log_path.stat().st_size
+
+    header = json.loads(service.transaction_path.read_text(encoding="utf-8"))
+    assert header["format"] == "append-v2"
+    assert second_size > first_size > 0
+    assert len(service.transaction_log_path.read_text(encoding="utf-8").splitlines()) == 2
+
+    restarted = CommandService(Workspace.open(tmp_path))
+    assert restarted.transaction is not None
+    assert len(restarted.transaction) == 2
+    rollback = restarted.execute(":rollback")
+    assert rollback.ok
+    assert source.read_text(encoding="utf-8").replace("\r\n", "\n") == "one\ntwo\nthree\n"
+    restarted.close()
+    service.close()
+
+
+def test_legacy_transaction_file_is_loaded_and_migrated(tmp_path):
+    import json
+    source = tmp_path / "legacy.txt"
+    source.write_text("after\n", encoding="utf-8")
+    easy = tmp_path / ".easychange"
+    easy.mkdir()
+    old = {
+        "transaction_id": "TXLEGACY",
+        "changes": [{
+            "path": "legacy.txt",
+            "before": "before\n",
+            "after": "after\n",
+            "change_id": None,
+            "command": "replace-line",
+        }],
+    }
+    (easy / "active_transaction.json").write_text(json.dumps(old), encoding="utf-8")
+
+    service = CommandService(Workspace.open(tmp_path))
+    assert service.transaction_id == "TXLEGACY"
+    assert len(service.transaction or []) == 1
+    # Append one more change to force migration.
+    service.last_command = "replace-line"
+    service._record("legacy.txt", "after\n", "after2\n")
+    header = json.loads(service.transaction_path.read_text(encoding="utf-8"))
+    assert header["format"] == "append-v2"
+    assert len(service.transaction_log_path.read_text(encoding="utf-8").splitlines()) == 2
+    service.close()
+
+
+def test_structured_mutation_batch_avoids_per_edit_session_saves(tmp_path, monkeypatch):
+    source = tmp_path / "sample.txt"
+    source.write_text("\n".join(f"line {i}" for i in range(1, 101)) + "\n", encoding="utf-8")
+    service = CommandService(Workspace.open(tmp_path))
+    saves = {"count": 0}
+    original = service.state_store.save
+
+    def counted_save():
+        saves["count"] += 1
+        return original()
+
+    monkeypatch.setattr(service.state_store, "save", counted_save)
+    operations = [
+        {"type": "replace_line", "path": "sample.txt", "line": i,
+         "content": f"changed {i}"}
+        for i in range(1, 21)
+    ]
+    result = service._execute_structured({"op": "batch", "operations": operations})
+    assert result.ok
+    # begin + commit + final structured result; independent of edit count.
+    assert saves["count"] == 3
+
+
+
+def test_replace_line_reuses_edit_snapshots_without_post_read(tmp_path, monkeypatch):
+    source = tmp_path / "sample.txt"
+    source.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    service = CommandService(Workspace.open(tmp_path))
+    service.indexer.close()
+
+    original_read_bytes = Path.read_bytes
+    reads = {"source": 0}
+
+    def counted_read_bytes(path):
+        if path == source:
+            reads["source"] += 1
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    result = service.execute(":replace-line sample.txt 2 TWO")
+    assert result.ok
+    # snapshot + pre-write baseline verification + synchronous index refresh.
+    assert reads["source"] <= 3
+    assert source.read_text(encoding="utf-8").replace("\r\n", "\n") == "one\nTWO\nthree\n"
+
+
+def test_file_edit_rejects_stale_existing_baseline(tmp_path):
+    from easychange.core.file_service import ExternalChangeError, FileService
+
+    source = tmp_path / "stale.txt"
+    source.write_text("old\n", encoding="utf-8")
+    files = FileService(Workspace.open(tmp_path))
+    files.read("stale.txt")
+    source.write_text("external\n", encoding="utf-8")
+    with pytest.raises(ExternalChangeError):
+        files.replace_line("stale.txt", 1, "mine")
+
+
+
+def test_transaction_defers_reindex_until_commit(tmp_path, monkeypatch):
+    source = tmp_path / "sample.txt"
+    source.write_text("\n".join(f"line {i}" for i in range(1, 51)) + "\n", encoding="utf-8")
+    service = CommandService(Workspace.open(tmp_path))
+    service.indexer.close()
+
+    calls = []
+    original = service.indexer.update_path
+
+    def counted(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(service.indexer, "update_path", counted)
+    assert service.execute(":begin").ok
+    for line in range(1, 11):
+        assert service.execute(f":replace-line sample.txt {line} changed-{line}").ok
+    assert calls == []
+
+    committed = service.execute(":commit")
+    assert committed.ok
+    assert committed.data["indexed_paths"] == 1
+    assert calls == ["sample.txt"]
+
+
+def test_transaction_search_flushes_pending_index_for_read_after_write(tmp_path, monkeypatch):
+    source = tmp_path / "sample.txt"
+    source.write_text("before\n", encoding="utf-8")
+    service = CommandService(Workspace.open(tmp_path))
+    service.indexer.close()
+    service.indexer.refresh(force=True)
+
+    calls = []
+    original = service.indexer.update_path
+
+    def counted(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(service.indexer, "update_path", counted)
+    assert service.execute(":begin").ok
+    assert service.execute(":replace-line sample.txt 1 UNIQUE_AFTER_WRITE").ok
+    assert calls == []
+
+    found = service.execute(":search UNIQUE_AFTER_WRITE")
+    assert found.ok
+    assert found.data["matches"]
+    assert calls == ["sample.txt"]
+
+    committed = service.execute(":commit")
+    assert committed.ok
+    assert committed.data["indexed_paths"] == 0

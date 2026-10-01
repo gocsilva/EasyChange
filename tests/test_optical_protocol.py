@@ -37,7 +37,10 @@ def test_ec2_duplicate_chunks_are_idempotent():
     assert decoded["data"]["value"] == "x" * 2000
     first = json.loads(packets[0])
     assert first["v"] == 2
-    assert first["rt"] == "result"
+    assert first["p"] == "EC2"
+    assert "rt" not in first
+    assert "st" not in first
+    assert "e" not in first
 
 
 def test_ec2_conflicting_duplicate_chunk_is_rejected():
@@ -50,3 +53,15 @@ def test_ec2_conflicting_duplicate_chunk_is_rejected():
     bad["d"] = bad["d"] + "A"
     with pytest.raises(ValueError, match="conflicting duplicate"):
         decode_result_chunks(packets + [json.dumps(bad, separators=(",", ":"))])
+
+
+
+def test_ec2_v2_compact_envelope_reduces_qr_packet_overhead():
+    import json
+
+    result = Result(True, "read", {"value": "x" * 3000}, sequence="QPACKET1")
+    packets = encode_result_chunks(result, chunk_chars=180)
+    packet = json.loads(packets[0])
+    assert set(packet) == {"p", "v", "s", "i", "n", "h", "c", "d"}
+    assert len(packets[0]) < 290
+    assert decode_result_chunks(packets)["sequence"] == "QPACKET1"

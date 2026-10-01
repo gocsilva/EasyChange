@@ -25,14 +25,13 @@ def encode_result_chunks(result: Any, *, chunk_chars: int = DEFAULT_CHUNK_CHARS)
     digest = hashlib.sha256(raw).hexdigest()[:16]
     crc = f"{binascii.crc32(raw) & 0xffffffff:08x}"
     sequence = str(value.get("sequence") or "-")
-    status = "OK" if value.get("ok") else "ERR"
     total = len(pieces)
     return [
         json.dumps({
-            "p": PROTOCOL, "v": 2, "rt": "result",
-            "s": sequence, "st": status,
-            "i": index, "n": total, "h": digest, "c": crc,
-            "e": "zlib+b64u", "d": piece,
+            # v=2 defines result + zlib/base64url, so invariant rt/st/e fields
+            # do not need to be repeated in every physical QR packet.
+            "p": PROTOCOL, "v": 2, "s": sequence,
+            "i": index, "n": total, "h": digest, "c": crc, "d": piece,
         }, ensure_ascii=False, separators=(",", ":"))
         for index, piece in enumerate(pieces)
     ]

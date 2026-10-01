@@ -55,21 +55,46 @@ class FileService:
             raise ValueError(f"File exceeds text read limit ({MAX_TEXT_FILE_BYTES} bytes)")
         lines = data.decode("utf-8-sig").splitlines()
         relative = target.relative_to(self.workspace.root_path).as_posix()
+        digest = hashlib.sha256(data).hexdigest()
         with self._guard:
-            self._baselines[relative] = hashlib.sha256(data).hexdigest()
+            self._baselines[relative] = digest
         start = max(1, start)
         chunk = lines[start - 1:start - 1 + max(1, count)]
         return {"path": relative, "start": start,
-                "total_lines": len(lines), "hash": hashlib.sha256(data).hexdigest()[:12],
+                "total_lines": len(lines), "hash": digest[:12],
                 "lines": [f"{i}|{line}" for i, line in enumerate(chunk, start)]}
 
+    def _read_for_edit(self, path: str) -> tuple[Path, str, str]:
+        """Read one editable text snapshot and establish/verify its baseline."""
+        target = self.workspace.resolve(path, must_exist=True)
+        if not target.is_file():
+            raise IsADirectoryError(str(target))
+        data = target.read_bytes()
+        if b"\0" in data:
+            raise ValueError("Binary files cannot be edited as text")
+        if len(data) > MAX_TEXT_FILE_BYTES:
+            raise ValueError(f"File exceeds text write limit ({MAX_TEXT_FILE_BYTES} bytes)")
+        relative = target.relative_to(self.workspace.root_path).as_posix()
+        actual_hash = hashlib.sha256(data).hexdigest()
+        with self._guard:
+            expected_hash = self._baselines.get(relative)
+            if expected_hash and actual_hash != expected_hash:
+                raise ExternalChangeError(relative, expected_hash, actual_hash)
+            # write() will re-read immediately before replacing the file and
+            # compare against this exact snapshot, preserving external-change
+            # detection while avoiding CommandService pre/post reads.
+            self._baselines[relative] = actual_hash
+        return target, relative, data.decode("utf-8")
     def write(self, path: str, content: str, *, force: bool = False) -> dict:
         target = self.workspace.resolve(path)
         relative = target.relative_to(self.workspace.root_path).as_posix()
         if target.exists() and not target.is_file():
             raise IsADirectoryError(str(target))
+
         created = not target.exists()
-        if target.exists():
+        previous_bytes = b""
+        before = ""
+        if not created:
             previous_bytes = target.read_bytes()
             if b"\0" in previous_bytes:
                 raise ValueError("Binary files cannot be overwritten as text")
@@ -80,35 +105,50 @@ class FileService:
                 expected_hash = self._baselines.get(relative)
             if expected_hash and actual_hash != expected_hash and not force:
                 raise ExternalChangeError(relative, expected_hash, actual_hash)
+            before = previous_bytes.decode("utf-8")
+
+        new_bytes = content.encode("utf-8")
+        if len(new_bytes) > MAX_TEXT_FILE_BYTES:
+            raise ValueError(f"File exceeds text write limit ({MAX_TEXT_FILE_BYTES} bytes)")
+
         target.parent.mkdir(parents=True, exist_ok=True)
-        before = target.read_text(encoding="utf-8") if target.exists() else ""
-        target.write_text(content, encoding="utf-8", newline="")
+        # Binary write preserves the exact UTF-8 byte sequence and lets us use
+        # new_bytes directly for the new baseline instead of reopening the file.
+        target.write_bytes(new_bytes)
         self._opened[path] = target
         with self._guard:
-            self._baselines[relative] = hashlib.sha256(target.read_bytes()).hexdigest()
+            self._baselines[relative] = hashlib.sha256(new_bytes).hexdigest()
+
         return {"path": relative, "created": created,
-                "diff": "".join(difflib.unified_diff(before.splitlines(True), content.splitlines(True),
-                        fromfile="before", tofile="after"))}
+                "diff": "".join(difflib.unified_diff(
+                    before.splitlines(True), content.splitlines(True),
+                    fromfile="before", tofile="after"
+                ))}
 
     def replace(self, path: str, old: str, new: str, count: int = 0) -> dict:
-        target = self.workspace.resolve(path, must_exist=True)
-        original = target.read_text(encoding="utf-8")
+        _, relative, original = self._read_for_edit(path)
         occurrences = original.count(old)
         if not occurrences:
             raise LookupError("Search text was not found")
         updated = original.replace(old, new, count) if count else original.replace(old, new)
         self.write(path, updated)
-        return {"path": path, "replacements": min(occurrences, count) if count else occurrences}
+        return {
+            "path": relative,
+            "replacements": min(occurrences, count) if count else occurrences,
+            "_before": original,
+            "_after": updated,
+        }
 
     def replace_line(self, path: str, line: int, value: str) -> dict:
-        target = self.workspace.resolve(path, must_exist=True)
-        lines = target.read_text(encoding="utf-8").splitlines(keepends=True)
+        _, relative, original = self._read_for_edit(path)
+        lines = original.splitlines(keepends=True)
         if line < 1 or line > len(lines):
             raise IndexError(f"Line out of range: {line}")
         ending = "\n" if lines[line - 1].endswith("\n") else ""
         lines[line - 1] = value + ending
-        self.write(path, "".join(lines))
-        return {"path": path, "line": line}
+        updated = "".join(lines)
+        self.write(path, updated)
+        return {"path": relative, "line": line, "_before": original, "_after": updated}
 
     def append(self, path: str, value: str) -> dict:
         target = self.workspace.resolve(path)
@@ -118,26 +158,29 @@ class FileService:
         return {"path": path, "appended_chars": len(value)}
 
     def insert_line(self, path: str, line: int, value: str) -> dict:
-        target = self.workspace.resolve(path, must_exist=True)
-        original = target.read_text(encoding="utf-8")
+        _, relative, original = self._read_for_edit(path)
         lines = original.splitlines()
         if line < 1 or line > len(lines) + 1:
             raise IndexError(f"Line out of range: {line}")
         lines.insert(line - 1, value)
         ending = "\n" if original.endswith(("\n", "\r")) else ""
-        self.write(path, "\n".join(lines) + ending)
-        return {"path": path, "line": line}
+        updated = "\n".join(lines) + ending
+        self.write(path, updated)
+        return {"path": relative, "line": line, "_before": original, "_after": updated}
 
     def replace_range(self, path: str, start: int, end: int, value: str) -> dict:
-        target = self.workspace.resolve(path, must_exist=True)
-        original = target.read_text(encoding="utf-8")
+        _, relative, original = self._read_for_edit(path)
         lines = original.splitlines()
         if start < 1 or end < start or end > len(lines):
             raise IndexError("Invalid line range")
         lines[start - 1:end] = value.splitlines()
         ending = "\n" if original.endswith(("\n", "\r")) else ""
-        self.write(path, "\n".join(lines) + ending)
-        return {"path": path, "start": start, "end": end}
+        updated = "\n".join(lines) + ending
+        self.write(path, updated)
+        return {
+            "path": relative, "start": start, "end": end,
+            "_before": original, "_after": updated,
+        }
 
     def info(self, path: str) -> dict:
         target = self.workspace.resolve(path, must_exist=True)

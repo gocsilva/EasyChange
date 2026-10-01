@@ -44,6 +44,24 @@ class ProcessService:
         self._processes: dict[str, RunningProcess] = {}
         self.last_execution: dict | None = None
 
+    def _prune_finished(self, keep: int = 32) -> None:
+        """Bound exited-process metadata and ephemeral log files."""
+        keep = max(0, int(keep))
+        finished = [
+            process_id
+            for process_id, item in self._processes.items()
+            if item.process.poll() is not None
+        ]
+        excess = finished[:-keep] if keep else finished
+        for process_id in excess:
+            item = self._processes.pop(process_id, None)
+            if item is None:
+                continue
+            for path in (item.stdout_path, item.stderr_path):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
     def run(self, argv: list[str], timeout: int = 300) -> dict:
         """Run a command without buffering unbounded stdout/stderr in RAM."""
         if not argv:
@@ -120,6 +138,7 @@ class ProcessService:
     def start(self, argv: list[str], process_id: str) -> dict:
         if not argv:
             raise ValueError("Command is empty")
+        self._prune_finished()
         existing = self._processes.get(process_id)
         if existing is not None and existing.process.poll() is None:
             raise RuntimeError(f"Process already running: {process_id}")
@@ -137,6 +156,7 @@ class ProcessService:
         return {"process_id": process_id, "pid": proc.pid, "state": "RUNNING", "argv": argv}
 
     def list(self) -> list[dict]:
+        self._prune_finished()
         output = []
         for key, item in list(self._processes.items()):
             code = item.process.poll()
@@ -160,7 +180,9 @@ class ProcessService:
             except subprocess.TimeoutExpired:
                 item.process.kill()
                 item.process.wait(timeout=3)
-        return {"process_id": process_id, "state": "STOPPED", "returncode": item.process.returncode}
+        result = {"process_id": process_id, "state": "STOPPED", "returncode": item.process.returncode}
+        self._prune_finished()
+        return result
 
     def logs(self, process_id: str, limit: int = 12000) -> dict:
         item = self._processes.get(process_id)
@@ -187,3 +209,5 @@ class ProcessService:
         for process_id, item in list(self._processes.items()):
             if item.process.poll() is None:
                 self.stop(process_id)
+        # CommandService is closing; background process logs are ephemeral.
+        self._prune_finished(keep=0)

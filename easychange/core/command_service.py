@@ -71,11 +71,19 @@ class CommandService:
         self.journal: list[Change] = [Change(e.path, e.before, e.after, e.change_id, e.command) for e in self.journal_store.entries]
         self.locks = LockManager(workspace.root_path / ".easychange" / "locks.json")
         self.transaction_path = workspace.root_path / ".easychange" / "active_transaction.json"
+        self.transaction_log_path = workspace.root_path / ".easychange" / "active_transaction.jsonl"
         self.transaction: list[Change] | None = None
         self.transaction_id: str | None = None
+        self._transaction_persisted_count = 0
+        self._transaction_storage_v2 = False
+        self._transaction_dirty_paths: set[str] = set()
         self._load_transaction()
+        if self.transaction:
+            self._transaction_dirty_paths.update(change.path for change in self.transaction)
         self.results: dict[str, dict] = dict(self.state_store.data.get("results", {}))
         self.file_refs: dict[str, str] = dict(self.state_store.data.get("file_refs", {}))
+        if len(self.file_refs) > 1024:
+            self.file_refs = dict(list(self.file_refs.items())[-1024:])
         self.page_items: list[dict] = []
         self.page_offset = 0
         self.page_size = 50
@@ -202,7 +210,7 @@ class CommandService:
             self._persist_state()
 
         try:
-            result = self._execute_structured(structured) if structured is not None else self.execute(command)
+            result = self._execute_structured(structured, persist=False) if structured is not None else self.execute(command)
         except Exception as exc:
             result = Result(False, "ec", error="Structured operation outcome is unknown", code="UNKNOWN",
                             data={"exception": type(exc).__name__}, sequence=sequence)
@@ -231,7 +239,7 @@ class CommandService:
             self._persist_state(result)
         return result
 
-    def _execute_structured(self, payload: dict) -> Result:
+    def _execute_structured(self, payload: dict, *, persist: bool = True) -> Result:
         """Execute bounded HID-delivered operations; read-only batches avoid transactions."""
         started = time.monotonic()
         operation = str(payload.get("op") or "").casefold()
@@ -246,11 +254,17 @@ class CommandService:
             return Result(False, "structured", error="BATCH_CANNOT_NEST_TRANSACTION", code="TRANSACTION_ACTIVE")
 
         if transactional:
-            opened = self.execute_tokens("begin", [], raw=":begin")
+            # begin persists the active transaction itself; avoid the second
+            # generic execute_tokens session save.
+            opened = self.execute_tokens("begin", [], raw=":begin", persist=False)
             if not opened.ok:
                 return opened
 
         results = []
+        # The transaction log is the durable per-edit record. session.json is
+        # UI/navigation state and does not need an extra write after every
+        # sub-operation.
+        sub_persist = False
         for item in operations:
             if not isinstance(item, dict):
                 result = Result(False, "structured", error="OPERATION_OBJECT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
@@ -288,7 +302,7 @@ class CommandService:
                             if kind == "create_file" and self.workspace.resolve(path).exists():
                                 result = Result(False, kind, error=f"File already exists: {path}", code="FILE_EXISTS")
                             else:
-                                result = self.execute_tokens("write", [path, content], raw=f"EC1 {kind} {path}")
+                                result = self.execute_tokens("write", [path, content], raw=f"EC1 {kind} {path}", persist=sub_persist)
                         except Exception as exc:
                             result = Result(False, kind, error=str(exc), code=getattr(exc, "code", type(exc).__name__))
                 elif kind == "replace_line":
@@ -296,7 +310,7 @@ class CommandService:
                     if not isinstance(path, str) or not isinstance(content, str) or isinstance(line, bool) or not isinstance(line, int):
                         result = Result(False, kind, error="PATH_LINE_AND_CONTENT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
                     else:
-                        result = self.execute_tokens("replace-line", [path, str(line), content], raw=f"EC1 patch {path}:{line}")
+                        result = self.execute_tokens("replace-line", [path, str(line), content], raw=f"EC1 patch {path}:{line}", persist=sub_persist)
                 elif kind == "replace_range":
                     path, start, end, content = item.get("path"), item.get("start"), item.get("end"), item.get("content")
                     if (not isinstance(path, str) or not isinstance(content, str)
@@ -306,14 +320,14 @@ class CommandService:
                                         code="INVALID_STRUCTURED_PAYLOAD")
                     else:
                         result = self.execute_tokens("replace-range",
-                            [path, str(start), str(end), content], raw=f"EC1 replace-range {path}:{start}-{end}")
+                            [path, str(start), str(end), content], raw=f"EC1 replace-range {path}:{start}-{end}", persist=sub_persist)
                 elif kind == "replace_text":
                     path, old, new = item.get("path"), item.get("old"), item.get("new")
                     if not isinstance(path, str) or not isinstance(old, str) or not isinstance(new, str):
                         result = Result(False, kind, error="PATH_OLD_AND_NEW_REQUIRED",
                                         code="INVALID_STRUCTURED_PAYLOAD")
                     else:
-                        result = self.execute_tokens("replace", [path, old, new], raw=f"EC1 replace {path}")
+                        result = self.execute_tokens("replace", [path, old, new], raw=f"EC1 replace {path}", persist=sub_persist)
                 elif kind == "insert":
                     path, line, content = item.get("path"), item.get("line"), item.get("content")
                     if (not isinstance(path, str) or not isinstance(content, str)
@@ -321,14 +335,14 @@ class CommandService:
                         result = Result(False, kind, error="PATH_LINE_AND_CONTENT_REQUIRED",
                                         code="INVALID_STRUCTURED_PAYLOAD")
                     else:
-                        result = self.execute_tokens("insert", [path, str(line), content], raw=f"EC1 insert {path}:{line}")
+                        result = self.execute_tokens("insert", [path, str(line), content], raw=f"EC1 insert {path}:{line}", persist=sub_persist)
                 elif kind == "append":
                     path, content = item.get("path"), item.get("content")
                     if not isinstance(path, str) or not isinstance(content, str):
                         result = Result(False, kind, error="PATH_AND_CONTENT_REQUIRED",
                                         code="INVALID_STRUCTURED_PAYLOAD")
                     else:
-                        result = self.execute_tokens("append", [path, content], raw=f"EC1 append {path}")
+                        result = self.execute_tokens("append", [path, content], raw=f"EC1 append {path}", persist=sub_persist)
                 elif kind == "read":
                     path = item.get("path")
                     if not isinstance(path, str):
@@ -339,7 +353,7 @@ class CommandService:
                             args.append(str(item["start"]))
                         if isinstance(item.get("count"), int):
                             args.append(str(item["count"]))
-                        result = self.execute_tokens("read", args, raw=f"EC1 read {path}")
+                        result = self.execute_tokens("read", args, raw=f"EC1 read {path}", persist=sub_persist)
                 elif kind in {"search", "locate", "study", "definition", "references"}:
                     query = item.get("query") or item.get("name")
                     if not isinstance(query, str) or not query:
@@ -350,7 +364,7 @@ class CommandService:
                             args += ["--limit", str(item["limit"])]
                         if kind in {"locate", "study"} and isinstance(item.get("context"), int):
                             args += ["--context", str(item["context"])]
-                        result = self.execute_tokens(kind, args, raw=f"EC1 {kind} {query}")
+                        result = self.execute_tokens(kind, args, raw=f"EC1 {kind} {query}", persist=sub_persist)
                 elif kind == "read_many":
                     paths = item.get("paths")
                     if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
@@ -361,7 +375,7 @@ class CommandService:
                             args += ["--count", str(item["count"])]
                         if isinstance(item.get("max_bytes"), int):
                             args += ["--max-bytes", str(item["max_bytes"])]
-                        result = self.execute_tokens("read-many", args, raw="EC1 read-many")
+                        result = self.execute_tokens("read-many", args, raw="EC1 read-many", persist=sub_persist)
                 elif kind == "runtime_profiles":
                     result = Result(True, kind, data={"profiles": self.runtime.profiles()})
                 elif kind == "runtime_configure":
@@ -448,7 +462,7 @@ class CommandService:
                         result = Result(True, kind, data=data)
                 elif kind == "validate":
                     args = ["--test"] if item.get("test") else []
-                    result = self.execute_tokens("validate", args, raw="EC1 validate")
+                    result = self.execute_tokens("validate", args, raw="EC1 validate", persist=sub_persist)
                 else:
                     result = Result(False, "structured", error=f"Unsupported operation: {kind}", code="OPERATION_NOT_ALLOWED")
             results.append(result.to_dict())
@@ -458,7 +472,10 @@ class CommandService:
         ok = len(results) == len(operations) and all(item["ok"] for item in results)
         transaction_data = {"state": "NOT_REQUIRED"}
         if transactional:
-            transaction = self.execute_tokens("commit" if ok else "rollback", [], raw=":commit" if ok else ":rollback")
+            transaction = self.execute_tokens(
+                "commit" if ok else "rollback", [],
+                raw=":commit" if ok else ":rollback", persist=False
+            )
             transaction_data = transaction.data if transaction.ok else {"state": "UNKNOWN", "error": transaction.code}
             ok = bool(ok and transaction.ok)
 
@@ -478,7 +495,8 @@ class CommandService:
             command_id=self.ids.next("C"),
             duration_ms=int((time.monotonic() - started) * 1000),
         )
-        self._persist_state(result)
+        if persist:
+            self._persist_state(result)
         return result
 
     def _execute_chain(self, text: str, batch: bool = False) -> Result:
@@ -525,11 +543,12 @@ class CommandService:
                     pass
             return self._error_result(":batch" if batch else text, exc)
 
-    def _error_result(self, raw: str, exc: Exception) -> Result:
+    def _error_result(self, raw: str, exc: Exception, *, persist: bool = True) -> Result:
         if isinstance(exc, ProcessFailure):
             result = exc.result
             result.command_id = self.ids.next("C")
-            self._persist_state(result)
+            if persist:
+                self._persist_state(result)
             return result
         data = {}
         if isinstance(exc, ExternalChangeError):
@@ -537,14 +556,17 @@ class CommandService:
                     "options": ["reload", "diff", "force-write"]}
         result = Result(False, raw.split(maxsplit=1)[0].lstrip(":").lower(), error=str(exc),
                         code=_error_code(exc), command_id=self.ids.next("C"), data=data)
-        self._persist_state(result)
+        if persist:
+            self._persist_state(result)
         return result
 
-    def execute_tokens(self, name: str, args: list[str], *, raw: str | None = None) -> Result:
-        """Execute already-tokenized input for transports such as MCP."""
+    def execute_tokens(self, name: str, args: list[str], *, raw: str | None = None,
+                       persist: bool = True) -> Result:
+        """Execute already-tokenized input for deterministic transports."""
         started = time.monotonic()
         name = name.lower()
-        if name in self.aliases: name = self.aliases[name]
+        if name in self.aliases:
+            name = self.aliases[name]
         self.history.append(raw if raw is not None else ":" + " ".join([name, *args]))
         self.last_command = name
         try:
@@ -552,11 +574,15 @@ class CommandService:
                 data = self._dispatch(name, list(args))
             result = Result(True, name, data=data, command_id=self.ids.next("C"))
         except Exception as exc:
-            result = self._error_result(name, exc)
+            # _error_result can persist when called directly. Here the caller
+            # owns the one final persistence decision, avoiding a double save
+            # for every failed execute_tokens call.
+            result = self._error_result(name, exc, persist=False)
         result.duration_ms = int((time.monotonic() - started) * 1000)
         self.last_command = name
         self.last_result = result
-        self._persist_state(result)
+        if persist:
+            self._persist_state(result)
         return result
 
     @staticmethod
@@ -588,7 +614,8 @@ class CommandService:
             "history": self.history[-50:], "id_counts": self.ids.counts(), "aliases": self.aliases,
             "macros": self.macros, "snapshots": self.snapshots,
             "last_command": self.last_command, "last_result": self._result_summary(result),
-            "file_refs": self.file_refs, "results": self.results})
+            "file_refs": dict(list(self.file_refs.items())[-1024:]),
+            "results": dict(list(self.results.items())[-512:])})
         self.state_store.data["file_hashes"] = self.files.baselines
         # Defensive migration: old builds may have left full result payloads
         # inside ec_results. Compact them before every save.
@@ -615,6 +642,14 @@ class CommandService:
         self.state_store.save()
 
     def _dispatch(self, name: str, args: list[str]) -> dict:
+        if name in {
+            "files", "tree", "projects", "next", "prev",
+            "search", "locate", "study",
+            "symbols", "symbol", "definition", "references", "implementations", "outline",
+        } and self._transaction_dirty_paths:
+            # Preserve read-after-write semantics while allowing mutation-only
+            # batches to index each changed file once at commit.
+            self._flush_transaction_index()
         if name in {"help", "capabilities"}:
             return {"commands": ["state", "workspace", "pwd", "files", "tree", "next", "prev", "read", "head", "tail", "context", "goto",
                     "search", "find", "index", "symbols", "symbol", "definition", "references", "implementations", "outline", "file-summary",
@@ -675,6 +710,8 @@ class CommandService:
                       "size": item["size"], "hash": item["hash"][:12]} for i, item in enumerate(items)]
             self.page_items = items; self.page_offset = offset; self.page_size = limit
             self.file_refs.update({item["id"]: item["path"] for item in items})
+            if len(self.file_refs) > 1024:
+                self.file_refs = dict(list(self.file_refs.items())[-1024:])
             total = self.indexer.count()
             return {"page": offset // limit + 1, "pages": max(1, (total + limit - 1) // limit), "total": total, "files": items}
         if name in {"next", "prev"}:
@@ -953,7 +990,11 @@ class CommandService:
                     except (OSError, UnicodeDecodeError): continue
                     if not pattern.search(content): continue
                     count = len(pattern.findall(content))
-                    self._edit(path, lambda p=path, c=content: self.files.write(p, pattern.sub(new, c)))
+                    updated = pattern.sub(new, content)
+                    self.files.remember(path)
+                    self._edit(path, lambda p=path, c=content, u=updated: {
+                        **self.files.write(p, u), "_before": c, "_after": u
+                    })
                     changes.append({"file": path, "replacements": count})
                 if not changes:
                     if own_transaction: self._dispatch("rollback", [])
@@ -1075,6 +1116,7 @@ class CommandService:
         if name == "begin":
             if self.transaction is not None: raise RuntimeError("A transaction is already active")
             self.transaction = []
+            self._transaction_dirty_paths.clear()
             self.transaction_id = self.ids.next("TX")
             self._save_transaction()
             self._persist_state()
@@ -1088,16 +1130,18 @@ class CommandService:
                 self.journal.append(change)
             self.transaction = None; self.transaction_id = None
             self._clear_transaction()
+            indexed = self._flush_transaction_index()
             self._persist_state()
-            return {"committed_changes": count}
+            return {"committed_changes": count, "indexed_paths": indexed}
         if name == "rollback":
             if self.transaction is None: raise RuntimeError("No active transaction")
             changes = list(reversed(self.transaction))
             for change in changes: self._restore(change)
             self.transaction = None; self.transaction_id = None
             self._clear_transaction()
+            indexed = self._flush_transaction_index()
             self._persist_state()
-            return {"rolled_back": len(changes)}
+            return {"rolled_back": len(changes), "indexed_paths": indexed}
         if name == "undo":
             entry_id = args[0] if args else None
             entries = self.journal_store.entries
@@ -1269,7 +1313,7 @@ class CommandService:
         before = resolved.read_text(encoding="utf-8") if resolved.exists() else None
         outcome = self.files.write(path, content)
         self._record(relative, before, content)
-        self.indexer.update_path(relative)
+        self._index_changed_path(relative)
         return outcome
 
     def _force_write(self, path: str, content: str) -> dict:
@@ -1280,21 +1324,36 @@ class CommandService:
         if resolved.exists(): self.files.remember(relative)
         outcome = self.files.write(path, content, force=True)
         self._record(relative, before, content)
-        self.indexer.update_path(relative)
+        self._index_changed_path(relative)
         return outcome
 
     def _edit(self, path: str, operation) -> dict:
         resolved = self.workspace.resolve(path, must_exist=True)
         relative = resolved.relative_to(self.workspace.root_path).as_posix()
         self.locks.check_write(relative, self.instance_id, self.session_id)
-        self.files.remember(relative)
-        before = resolved.read_text(encoding="utf-8")
         outcome = operation()
-        after = resolved.read_text(encoding="utf-8")
+        if not isinstance(outcome, dict) or "_before" not in outcome or "_after" not in outcome:
+            raise RuntimeError("EDIT_OPERATION_SNAPSHOT_REQUIRED")
+        before = outcome.pop("_before")
+        after = outcome.pop("_after")
         self._record(relative, before, after)
-        self.indexer.update_path(relative)
+        self._index_changed_path(relative)
         return outcome
 
+    def _index_changed_path(self, path: str) -> None:
+        if self.transaction is not None:
+            self._transaction_dirty_paths.add(path)
+        else:
+            self.indexer.update_path(path)
+
+    def _flush_transaction_index(self) -> int:
+        if not self._transaction_dirty_paths:
+            return 0
+        paths = sorted(self._transaction_dirty_paths)
+        self._transaction_dirty_paths.clear()
+        for path in paths:
+            self.indexer.update_path(path)
+        return len(paths)
     def _record(self, path: str, before: str | None, after: str | None) -> None:
         change = Change(path, before, after, command=self.last_command or "edit")
         if self.transaction is not None:
@@ -1336,27 +1395,78 @@ class CommandService:
             self.files.write(change.path, change.after)
 
     def _load_transaction(self) -> None:
-        if not self.transaction_path.exists(): return
+        if not self.transaction_path.exists():
+            return
         try:
             value = json.loads(self.transaction_path.read_text(encoding="utf-8"))
             self.transaction_id = value["transaction_id"]
-            self.transaction = [Change(**item) for item in value.get("changes", [])]
+            if value.get("format") == "append-v2":
+                changes: list[Change] = []
+                if self.transaction_log_path.exists():
+                    for line in self.transaction_log_path.read_text(encoding="utf-8").splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            item = json.loads(line)
+                            changes.append(Change(**item))
+                        except (json.JSONDecodeError, TypeError):
+                            # A crash can leave only the final append incomplete.
+                            # Never invent a change from a partial record.
+                            break
+                self.transaction = changes
+                self._transaction_persisted_count = len(changes)
+                self._transaction_storage_v2 = True
+            else:
+                # Backward compatibility with the original monolithic JSON
+                # transaction file. The next save migrates it to append-v2.
+                self.transaction = [Change(**item) for item in value.get("changes", [])]
+                self._transaction_persisted_count = 0
+                self._transaction_storage_v2 = False
         except (OSError, ValueError, KeyError, TypeError):
             self.transaction_id = None
             self.transaction = None
+            self._transaction_persisted_count = 0
+            self._transaction_storage_v2 = False
 
     def _save_transaction(self) -> None:
-        if self.transaction is None: return
+        """Persist active transaction in O(new changes), not O(total changes)."""
+        if self.transaction is None:
+            return
         self.transaction_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.transaction_path.with_suffix(".tmp")
-        value = {"transaction_id": self.transaction_id,
-                 "changes": [{"path": change.path, "before": change.before, "after": change.after,
-                              "change_id": change.change_id, "command": change.command} for change in self.transaction]}
-        temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(self.transaction_path)
+
+        if not self._transaction_storage_v2:
+            temporary = self.transaction_path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(
+                    {"format": "append-v2", "transaction_id": self.transaction_id},
+                    ensure_ascii=False, separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            temporary.replace(self.transaction_path)
+            self.transaction_log_path.unlink(missing_ok=True)
+            self._transaction_persisted_count = 0
+            self._transaction_storage_v2 = True
+
+        if self._transaction_persisted_count >= len(self.transaction):
+            return
+
+        with self.transaction_log_path.open("a", encoding="utf-8", newline="\n") as stream:
+            for change in self.transaction[self._transaction_persisted_count:]:
+                stream.write(json.dumps({
+                    "path": change.path,
+                    "before": change.before,
+                    "after": change.after,
+                    "change_id": change.change_id,
+                    "command": change.command,
+                }, ensure_ascii=False, separators=(",", ":")) + "\n")
+        self._transaction_persisted_count = len(self.transaction)
 
     def _clear_transaction(self) -> None:
         self.transaction_path.unlink(missing_ok=True)
+        self.transaction_log_path.unlink(missing_ok=True)
+        self._transaction_persisted_count = 0
+        self._transaction_storage_v2 = False
 
     @staticmethod
     def _hash_content(content: str | None) -> str | None:
@@ -1428,6 +1538,9 @@ class CommandService:
         return self._dispatch("capabilities", []).get("commands", [])
 
     def _resolve_ref(self, value: str) -> str:
+        result = self.results.get(value)
+        if isinstance(result, dict) and result.get("file"):
+            return str(result["file"])
         return self.file_refs.get(value, value)
 
     def _register_matches(self, matches: list[dict]) -> list[dict]:
@@ -1435,17 +1548,21 @@ class CommandService:
         for value in matches:
             item = dict(value)
             item["id"] = self.ids.next("R")
-            self.results[item["id"]] = item
-            if item.get("file"):
-                self.file_refs[item["id"]] = item["file"]
+            # Persist only navigation metadata. The returned object may later
+            # receive large context arrays for study/locate, but those are
+            # transport payloads, not session history.
+            stored = {
+                key: item[key]
+                for key in ("id", "file", "line", "text", "score")
+                if key in item
+            }
+            self.results[item["id"]] = stored
             registered.append(item)
-        # Result IDs are navigation aids, not an unbounded history database.
-        # Keep enough recent IDs for remote workflows without growing
-        # session.json forever during long AI sessions.
+
         if len(self.results) > 512:
-            keep = set(list(self.results)[-512:])
-            self.results = {key: value for key, value in self.results.items() if key in keep}
-            self.file_refs = {key: value for key, value in self.file_refs.items() if key in keep}
+            self.results = dict(list(self.results.items())[-512:])
+        if len(self.file_refs) > 1024:
+            self.file_refs = dict(list(self.file_refs.items())[-1024:])
         return registered
 
 
