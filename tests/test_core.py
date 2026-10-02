@@ -1459,6 +1459,7 @@ def test_cold_git_discovery_uses_one_multi_pattern_process(tmp_path, monkeypatch
         assert result["single_pass"] is True
         assert len(calls) == 1
         assert calls[0].count("-e") == 2
+        assert "--untracked" in calls[0]
         assert "Alpha" in calls[0] and "Beta" in calls[0]
         assert result["by_term"]["Alpha"]["definitions"]
         assert result["by_term"]["Beta"]["definitions"]
@@ -1561,3 +1562,51 @@ def test_verified_write_refreshes_read_cache(service):
     read = service.files.read("sample.py", 1, 20)
     assert read["cache_hit"] is True
     assert read["lines"] == ["1|updated = True"]
+
+
+def test_discover_many_filters_extension_and_path(service, tmp_path):
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "docs").mkdir(exist_ok=True)
+    (tmp_path / "src" / "Feature.cs").write_text(
+        "public sealed class Feature { Feature child; }\n", encoding="utf-8"
+    )
+    (tmp_path / "docs" / "Feature.md").write_text(
+        "Feature documentation and usage\n", encoding="utf-8"
+    )
+    service.indexer.refresh(force=True)
+
+    result = service._execute_structured({
+        "op": "operation",
+        "type": "discover_many",
+        "terms": ["Feature"],
+        "extension": ".cs",
+        "path_prefix": "src",
+        "references": 10,
+    })
+
+    assert result.ok
+    data = result.data["primary"]["data"]
+    assert data["filters"] == {"extension": ".cs", "path_prefix": "src"}
+    files = data["by_term"]["Feature"]["files"]
+    assert files
+    assert all(path.startswith("src/") and path.endswith(".cs") for path in files)
+
+
+def test_discover_many_cli_supports_scope_filters(service, tmp_path):
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "Only.cs").write_text(
+        "public sealed class ScopedSymbol {}\n", encoding="utf-8"
+    )
+    (tmp_path / "ScopedSymbol.md").write_text("ScopedSymbol docs\n", encoding="utf-8")
+    service.indexer.refresh(force=True)
+
+    result = service.execute(
+        ":discover-many ScopedSymbol --ext .cs --path src --references 5"
+    )
+
+    assert result.ok
+    assert result.data["filters"] == {"extension": ".cs", "path_prefix": "src"}
+    assert all(
+        path.startswith("src/") and path.endswith(".cs")
+        for path in result.data["by_term"]["ScopedSymbol"]["files"]
+    )

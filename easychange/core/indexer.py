@@ -510,7 +510,8 @@ class Indexer:
 
 
     def discover_many(self, terms: list[str], *, limit_per_term: int = 12,
-                      definitions_per_term: int = 6, references_per_term: int = 24) -> dict:
+                      definitions_per_term: int = 6, references_per_term: int = 24,
+                      extension: str | None = None, path_prefix: str | None = None) -> dict:
         """Resolve many definitions/usages with one cold Git scan or parallel warm-index queries."""
         started = time.perf_counter()
         clean: list[str] = []
@@ -533,6 +534,10 @@ class Indexer:
         limit_per_term = max(1, min(50, int(limit_per_term)))
         definitions_per_term = max(1, min(20, int(definitions_per_term)))
         references_per_term = max(1, min(100, int(references_per_term)))
+        ext = str(extension or "").strip()
+        if ext and not ext.startswith("."):
+            ext = "." + ext
+        prefix = str(path_prefix or "").replace("\\", "/").strip().strip("/")
         by_term: dict[str, dict] = {
             term: {"definitions": [], "references": [], "files": [], "occurrences": 0}
             for term in clean
@@ -566,16 +571,30 @@ class Indexer:
                 aggregate["terms"].append(term)
 
         if cold_git:
-            argv = ["git", "grep", "-n", "-I", "-i", "-F"]
+            argv = ["git", "grep", "-n", "-I", "--untracked", "-i", "-F"]
             for term in clean:
                 argv += ["-e", term]
             argv += ["--"]
+            if prefix and ext:
+                argv.append(f":(glob){prefix}/**/*{ext}")
+            elif prefix:
+                argv.append(f":(glob){prefix}/**")
+            elif ext:
+                argv.append(f":(glob)**/*{ext}")
             rows: list[tuple[str, int, str]] = []
             try:
                 completed = subprocess.run(
                     argv, cwd=self.root, text=True, capture_output=True,
                     timeout=10, check=False, shell=False,
                 )
+                # Older Git builds may not support --untracked on grep. Retry
+                # once without it rather than sacrificing the cold fast path.
+                if completed.returncode not in {0, 1} and "--untracked" in argv:
+                    legacy_argv = [value for value in argv if value != "--untracked"]
+                    completed = subprocess.run(
+                        legacy_argv, cwd=self.root, text=True, capture_output=True,
+                        timeout=10, check=False, shell=False,
+                    )
                 if completed.returncode in {0, 1}:
                     for line in (completed.stdout or "").splitlines():
                         parts = line.split(":", 2)
@@ -629,6 +648,8 @@ class Indexer:
                 definitions = self.symbols(name=term)[:definitions_per_term]
                 candidates = self.search(
                     term,
+                    extension=ext or None,
+                    path_prefix=prefix or None,
                     limit=min(300, max(references_per_term * 3, references_per_term)),
                 )
                 references = [
@@ -702,6 +723,7 @@ class Indexer:
             "files": [item["file"] for item in impact_files[:64]],
             "engine": engine,
             "single_pass": cold_git,
+            "filters": {"extension": ext or None, "path_prefix": prefix or None},
             "index_state": "READY" if self._fully_indexed else "WARMING",
             "duration_ms": round((time.perf_counter() - started) * 1000, 2),
         }

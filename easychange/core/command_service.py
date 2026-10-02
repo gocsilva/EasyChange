@@ -919,6 +919,8 @@ class CommandService:
                             limit_per_term=max(1, min(50, int(item.get("limit") or 12))),
                             definitions_per_term=max(1, min(20, int(item.get("definitions") or 4))),
                             references_per_term=max(1, min(100, int(item.get("references") or 12))),
+                            extension=str(item.get("extension") or "").strip() or None,
+                            path_prefix=str(item.get("path_prefix") or "").strip() or None,
                         )
                         radius = max(0, min(30, int(item.get("context") or 0)))
                         if radius > 0:
@@ -1405,7 +1407,9 @@ class CommandService:
             limit = _option_int(args, "--limit", 12, minimum=1, maximum=50)
             definitions = _option_int(args, "--definitions", 4, minimum=1, maximum=20)
             references = _option_int(args, "--references", 12, minimum=1, maximum=100)
-            option_names = {"--limit", "--definitions", "--references"}
+            extension = _option_value(args, "--ext") or _option_value(args, "--extension")
+            path_prefix = _option_value(args, "--path") or _option_value(args, "--path-prefix")
+            option_names = {"--limit", "--definitions", "--references", "--ext", "--extension", "--path", "--path-prefix"}
             terms = []
             skip = False
             for value in args:
@@ -1424,6 +1428,8 @@ class CommandService:
                 limit_per_term=limit,
                 definitions_per_term=definitions,
                 references_per_term=references,
+                extension=extension,
+                path_prefix=path_prefix,
             )
             for bucket in (data.get("by_term") or {}).values():
                 if isinstance(bucket, dict) and isinstance(bucket.get("references"), list):
