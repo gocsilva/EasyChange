@@ -1,0 +1,2 @@
+class CachedExample:
+    pass

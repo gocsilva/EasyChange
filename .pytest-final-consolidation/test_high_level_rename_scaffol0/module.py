@@ -1,0 +1,2 @@
+class OldName:
+    value = OldName
