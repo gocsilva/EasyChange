@@ -240,52 +240,114 @@ def validate_text(path: str, text: str) -> None:
         _validate_csharp_structure(text)
 
 
+
 def _validate_csharp_structure(text: str) -> None:
-    """Cheap corruption guard; build/Roslyn remains authoritative when requested."""
+    """Conservative corruption guard for C#.
+
+    This is intentionally permissive: it only checks (), [] and {} that are
+    unquestionably in code. All C# string literal forms are treated as opaque;
+    Roslyn/dotnet build remains the authority for syntax correctness.
+    """
     stack: list[str] = []
     pairs = {")": "(", "]": "[", "}": "{"}
     opening = set(pairs.values())
     i = 0
-    state = "code"
-    while i < len(text):
+    length = len(text)
+
+    def quote_run(pos: int) -> int:
+        count = 0
+        while pos + count < length and text[pos + count] == '"':
+            count += 1
+        return count
+
+    while i < length:
         ch = text[i]
-        nxt = text[i + 1] if i + 1 < len(text) else ""
-        if state == "line_comment":
-            if ch in "\r\n":
-                state = "code"
-        elif state == "block_comment":
-            if ch == "*" and nxt == "/":
-                state = "code"
+        nxt = text[i + 1] if i + 1 < length else ""
+
+        # Comments.
+        if ch == "/" and nxt == "/":
+            i += 2
+            while i < length and text[i] not in "\r\n":
                 i += 1
-        elif state == "string":
-            if ch == "\\":
+            continue
+        if ch == "/" and nxt == "*":
+            end = text.find("*/", i + 2)
+            if end < 0:
+                # Leave malformed comment detection to Roslyn/build. The
+                # precheck must not reject valid code through lexer guesses.
+                return
+            i = end + 2
+            continue
+
+        # Character literal.
+        if ch == "'":
+            i += 1
+            while i < length:
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                if text[i] == "'":
+                    i += 1
+                    break
                 i += 1
-            elif ch == '"':
-                state = "code"
-        elif state == "char":
-            if ch == "\\":
-                i += 1
-            elif ch == "'":
-                state = "code"
-        else:
-            if ch == "/" and nxt == "/":
-                state = "line_comment"
-                i += 1
-            elif ch == "/" and nxt == "*":
-                state = "block_comment"
-                i += 1
-            elif ch == '"':
-                state = "string"
-            elif ch == "'":
-                state = "char"
-            elif ch in opening:
-                stack.append(ch)
-            elif ch in pairs:
-                if not stack or stack.pop() != pairs[ch]:
-                    raise SafeEditError("STRUCTURAL_VALIDATION_FAILED", f"Unbalanced delimiter {ch} in {path if False else 'C# file'}")
+            continue
+
+        # Raw string literal: """...""" or interpolated forms such as
+        # $"""...""" / $$"""...""". We detect at the quote itself, so the
+        # leading '$' characters remain harmless code characters.
+        if ch == '"':
+            run = quote_run(i)
+            if run >= 3:
+                delimiter = '"' * run
+                end = text.find(delimiter, i + run)
+                if end < 0:
+                    # Do not produce false positives for newer C# literal
+                    # forms. Roslyn/build will report an unterminated literal.
+                    return
+                i = end + run
+                continue
+
+            # Verbatim string: @"..." and interpolated verbatim variants
+            # $@"..." / @$"...". Looking immediately backward is enough to
+            # recognize the '@' attached to the literal.
+            verbatim = i > 0 and text[i - 1] == "@"
+            i += 1
+            if verbatim:
+                while i < length:
+                    if text[i] == '"':
+                        if i + 1 < length and text[i + 1] == '"':
+                            i += 2
+                            continue
+                        i += 1
+                        break
+                    i += 1
+            else:
+                while i < length:
+                    if text[i] == "\\":
+                        i += 2
+                        continue
+                    if text[i] == '"':
+                        i += 1
+                        break
+                    i += 1
+            continue
+
+        if ch in opening:
+            stack.append(ch)
+        elif ch in pairs:
+            if not stack or stack.pop() != pairs[ch]:
+                raise SafeEditError(
+                    "STRUCTURAL_VALIDATION_FAILED",
+                    f"Unbalanced delimiter {ch} in C# file",
+                )
         i += 1
-    if state in {"string", "char", "block_comment"} or stack:
-        raise SafeEditError("STRUCTURAL_VALIDATION_FAILED", "Unbalanced C# structure")
+
+    if stack:
+        raise SafeEditError(
+            "STRUCTURAL_VALIDATION_FAILED",
+            "Unbalanced C# structure",
+        )
+
 
 
 def plan_file_mutations(

@@ -327,10 +327,28 @@ class CommandService:
             }
             self.state_store.data["ec_results"] = dict(list(journal.items())[-128:])
             self.result_store.mark_running(sequence, digest, command, mutation=is_mutation)
+            if is_mutation:
+                self.result_store.update_mutation_state(
+                    sequence,
+                    "NOT_STARTED",
+                    mutation_receipt={
+                        "mutation_id": f"M-{sequence}",
+                        "sequence": sequence,
+                        "state": "NOT_STARTED",
+                        "lifecycle_state": "NOT_STARTED",
+                        "operations_requested": None,
+                        "operations_applied": 0,
+                        "matched_occurrences": 0,
+                        "validation_result": None,
+                        "journal_ids": [],
+                        "files": [],
+                        "verified": False,
+                    },
+                )
             self._persist_state()
 
         try:
-            result = self._execute_structured(structured, persist=False) if structured is not None else self.execute(command)
+            result = self._execute_structured(structured, persist=False, sequence=sequence) if structured is not None else self.execute(command)
         except Exception as exc:
             # A catastrophic exception during a mutating transaction must be
             # converted into an explicit rollback receipt instead of UNKNOWN.
@@ -339,14 +357,18 @@ class CommandService:
                 try:
                     rollback = self.execute_tokens("rollback", [], raw=":rollback", persist=False)
                     receipt = {
-                        "mutation_id": self.transaction_id,
+                        "mutation_id": self.transaction_id or f"M-{sequence}",
+                        "sequence": sequence,
                         "state": "ROLLED_BACK" if rollback.ok else "ROLLBACK_UNKNOWN",
+                        "lifecycle_state": "ROLLED_BACK" if rollback.ok else "FAILED",
                         "verified": bool(rollback.ok),
                     }
                 except Exception as rollback_exc:
                     receipt = {
-                        "mutation_id": self.transaction_id,
+                        "mutation_id": self.transaction_id or f"M-{sequence}",
+                        "sequence": sequence,
                         "state": "ROLLBACK_UNKNOWN",
+                        "lifecycle_state": "FAILED",
                         "verified": False,
                         "rollback_error": type(rollback_exc).__name__,
                     }
@@ -367,6 +389,30 @@ class CommandService:
             result.data = {**(result.data or {}), "transport_codec": codec}
 
         receipt = result.data.get("mutation_receipt") if isinstance(result.data, dict) else None
+        if is_mutation and not isinstance(receipt, dict):
+            current = self.result_store.status(sequence) or {}
+            prior = current.get("mutation_receipt") if isinstance(current.get("mutation_receipt"), dict) else {}
+            receipt = {
+                **prior,
+                "mutation_id": prior.get("mutation_id") or f"M-{sequence}",
+                "sequence": sequence,
+                "state": "COMMITTED" if result.ok else "FAILED",
+                "lifecycle_state": "APPLIED" if result.ok else "FAILED",
+                "operations_applied": prior.get("operations_applied", 1 if result.ok else 0),
+                "validation_result": prior.get("validation_result") or {
+                    "ok": bool(result.ok),
+                    "stage": "legacy_text_mutation",
+                },
+                "verified": bool(result.ok),
+                **({
+                    "failure": {
+                        "code": result.code,
+                        "error": (result.error or "")[:512] or None,
+                    }
+                } if not result.ok else {}),
+            }
+            result.data = {**(result.data or {}), "mutation_receipt": receipt}
+            self.result_store.update_mutation_state(sequence, str(receipt.get("lifecycle_state") or "FAILED"), mutation_receipt=receipt)
         stored = self.result_store.complete(
             sequence,
             digest,
@@ -429,7 +475,7 @@ class CommandService:
             del self.journal[:-64]
 
     def _execute_planned_mutation_batch(self, operations: list[dict], operation: str,
-                                        *, persist: bool, started: float) -> Result:
+                                        *, persist: bool, started: float, sequence: str | None = None) -> Result:
         """Plan all file edits against original snapshots, then write each file once."""
         mutation_types = STRUCTURED_MUTATION_TYPES
         normalized: list[dict] = []
@@ -505,9 +551,51 @@ class CommandService:
         if not opened.ok:
             return opened
         transaction_id = self.transaction_id
+        operation_hash = hashlib.sha256(
+            json.dumps(mutation_ops, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        validation_requested = any(
+            str(item.get("type") or "").casefold() == "validate" for item in normalized
+        )
+        matched_occurrences = sum(
+            len(plan.edits) if plan.edits else 1 for plan in plans.values()
+        )
+        base_receipt = {
+            "mutation_id": transaction_id,
+            "sequence": sequence,
+            "state": "STARTED",
+            "lifecycle_state": "STARTED",
+            "operation_hash": operation_hash,
+            "operations_requested": len(mutation_ops),
+            "operations_applied": 0,
+            "matched_occurrences": matched_occurrences,
+            "validation_requested": validation_requested,
+            "validation_result": None,
+            "journal_ids": [],
+            "files": [
+                {"path": path, "before_hash": plan.before_hash, "after_hash": plan.after_hash}
+                for path, plan in plans.items()
+            ],
+            "verified": False,
+        }
+
+        def persist_receipt(receipt: dict) -> dict:
+            if sequence:
+                lifecycle = str(receipt.get("lifecycle_state") or receipt.get("state") or "FAILED").upper()
+                if lifecycle == "ROLLBACK_UNKNOWN":
+                    lifecycle = "FAILED"
+                self.result_store.update_mutation_state(
+                    sequence,
+                    lifecycle,
+                    mutation_receipt=receipt,
+                )
+            return receipt
+
+        persist_receipt(base_receipt)
         write_outcomes: dict[str, dict] = {}
         results: list[dict] = []
         validation_failed = False
+        validation_result: dict | None = None
         rollback_data: dict = {"state": "NOT_REQUIRED"}
 
         try:
@@ -517,15 +605,59 @@ class CommandService:
             for path, plan in plans.items():
                 write_outcomes[path] = self._write(path, plan.after)
 
+            applied_files = [
+                {
+                    "path": path,
+                    "before_hash": plan.before_hash,
+                    "after_hash": plan.after_hash,
+                    "bytes_written": int(write_outcomes[path].get("bytes_written") or len(plan.after.encode("utf-8"))),
+                    "verified": bool(write_outcomes[path].get("verified")),
+                    "diff": str(write_outcomes[path].get("diff") or "")[:12000],
+                    "changed_ranges": [
+                        {
+                            "start": edit.start,
+                            "end": edit.end,
+                            "operation_index": edit.operation_index,
+                            "operation_type": edit.operation_type,
+                        }
+                        for edit in plan.edits
+                    ],
+                }
+                for path, plan in plans.items()
+            ]
+            persist_receipt({
+                **base_receipt,
+                "state": "APPLIED",
+                "lifecycle_state": "APPLIED",
+                "operations_applied": len(mutation_ops),
+                "files": applied_files,
+                "verified": all(bool(item["verified"]) for item in applied_files),
+            })
+
             for item in normalized:
                 kind = str(item.get("type") or "").casefold()
                 if kind == "validate":
                     args = ["--test"] if item.get("test") else []
                     sub = self.execute_tokens("validate", args, raw="EC1 validate", persist=False)
                     results.append(sub.to_dict())
+                    validation_result = {
+                        "ok": bool(sub.ok),
+                        "code": sub.code,
+                        "error": sub.error,
+                        "duration_ms": sub.duration_ms,
+                    }
                     if not sub.ok:
                         validation_failed = True
                         break
+                    persist_receipt({
+                        **base_receipt,
+                        "state": "VALIDATED",
+                        "lifecycle_state": "VALIDATED",
+                        "operations_applied": len(mutation_ops),
+                        "files": applied_files,
+                        "validation_result": validation_result,
+                        "verified": all(bool(item["verified"]) for item in applied_files),
+                    })
                     continue
 
                 path = str(item.get("path") or "")
@@ -546,18 +678,15 @@ class CommandService:
             if validation_failed:
                 rollback = self.execute_tokens("rollback", [], raw=":rollback", persist=False)
                 rollback_data = rollback.data if rollback.ok else {"state": "UNKNOWN", "error": rollback.code}
-                receipt = {
-                    "mutation_id": transaction_id,
+                receipt = persist_receipt({
+                    **base_receipt,
                     "state": "ROLLED_BACK" if rollback.ok else "ROLLBACK_UNKNOWN",
-                    "operation_hash": hashlib.sha256(
-                        json.dumps(mutation_ops, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                    ).hexdigest(),
-                    "files": [
-                        {"path": path, "before_hash": plan.before_hash, "after_hash": plan.after_hash}
-                        for path, plan in plans.items()
-                    ],
+                    "lifecycle_state": "ROLLED_BACK" if rollback.ok else "FAILED",
+                    "operations_applied": len(mutation_ops),
+                    "files": applied_files,
+                    "validation_result": validation_result,
                     "verified": bool(rollback.ok),
-                }
+                })
                 result = Result(
                     False, "structured",
                     data={
@@ -580,27 +709,21 @@ class CommandService:
             commit = self.execute_tokens("commit", [], raw=":commit", persist=False)
             if not commit.ok:
                 raise RuntimeError(f"TRANSACTION_COMMIT_FAILED:{commit.code or commit.error}")
-            receipt_files = []
-            for path, plan in plans.items():
-                outcome = write_outcomes[path]
-                receipt_files.append({
-                    "path": path,
-                    "before_hash": plan.before_hash,
-                    "after_hash": plan.after_hash,
-                    "bytes_written": int(outcome.get("bytes_written") or len(plan.after.encode("utf-8"))),
-                    "verified": bool(outcome.get("verified")),
-                    "diff": str(outcome.get("diff") or "")[:12000],
-                })
-            receipt = {
-                "mutation_id": transaction_id,
+            receipt_files = applied_files
+            receipt = persist_receipt({
+                **base_receipt,
                 "state": "COMMITTED",
-                "operation_hash": hashlib.sha256(
-                    json.dumps(mutation_ops, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                ).hexdigest(),
+                "lifecycle_state": "VALIDATED" if validation_requested else "APPLIED",
+                "operations_applied": len(mutation_ops),
                 "files": receipt_files,
                 "changed_files": len(receipt_files),
+                "journal_ids": list(commit.data.get("journal_ids") or []),
+                "validation_result": validation_result or {
+                    "ok": True,
+                    "stage": "structural_precheck_and_verified_write",
+                },
                 "verified": all(bool(item["verified"]) for item in receipt_files),
-            }
+            })
             result = Result(
                 True, "structured",
                 data={
@@ -625,15 +748,25 @@ class CommandService:
                     rollback_data = rollback.data if rollback.ok else {"state": "UNKNOWN", "error": rollback.code}
                 except Exception as rollback_exc:
                     rollback_data = {"state": "UNKNOWN", "error": type(rollback_exc).__name__}
-            receipt = {
-                "mutation_id": transaction_id,
-                "state": "ROLLED_BACK" if rollback_data.get("state") != "UNKNOWN" else "ROLLBACK_UNKNOWN",
+            rollback_known = rollback_data.get("state") != "UNKNOWN"
+            receipt = persist_receipt({
+                **base_receipt,
+                "state": "ROLLED_BACK" if rollback_known else "ROLLBACK_UNKNOWN",
+                "lifecycle_state": "ROLLED_BACK" if rollback_known else "FAILED",
+                "operations_applied": len(write_outcomes),
                 "files": [
-                    {"path": path, "before_hash": plan.before_hash, "after_hash": plan.after_hash}
+                    {
+                        "path": path,
+                        "before_hash": plan.before_hash,
+                        "after_hash": plan.after_hash,
+                        "verified": bool((write_outcomes.get(path) or {}).get("verified")),
+                    }
                     for path, plan in plans.items()
                 ],
-                "verified": rollback_data.get("state") != "UNKNOWN",
-            }
+                "validation_result": validation_result,
+                "verified": rollback_known,
+                "failure": {"type": type(exc).__name__, "error": str(exc)[:512]},
+            })
             result = Result(
                 False, "structured",
                 data={
@@ -782,7 +915,7 @@ class CommandService:
             "merge_overlaps": bool(merge_overlaps),
         }
 
-    def _execute_structured(self, payload: dict, *, persist: bool = True) -> Result:
+    def _execute_structured(self, payload: dict, *, persist: bool = True, sequence: str | None = None) -> Result:
         """Execute bounded HID-delivered operations; read-only batches avoid transactions."""
         started = time.monotonic()
         operation = str(payload.get("op") or "").casefold()
@@ -801,6 +934,11 @@ class CommandService:
                     return Result(False, query_kind, error="VALID_TARGET_SEQUENCE_REQUIRED", code="INVALID_SEQUENCE")
                 if query_kind in {"result_status", "mutation_status"}:
                     data = self.result_store.status(target_sequence)
+                elif query_kind == "result_header":
+                    data = self.result_store.header(
+                        target_sequence,
+                        chunk_bytes=int(query_item.get("chunk_bytes") or 640),
+                    )
                 elif query_kind == "result_get":
                     data = self.result_store.result(target_sequence)
                 elif query_kind == "result_meta":
@@ -899,7 +1037,7 @@ class CommandService:
         # snapshots before the first byte is written. This prevents stale line
         # coordinates when an earlier edit changes line counts.
         if transactional and all(kind in mutation_types or kind == "validate" for kind in kinds):
-            return self._execute_planned_mutation_batch(operations, operation, persist=persist, started=started)
+            return self._execute_planned_mutation_batch(operations, operation, persist=persist, started=started, sequence=sequence)
 
         if transactional:
             # begin persists the active transaction itself; avoid the second
@@ -2043,15 +2181,17 @@ class CommandService:
         if name == "commit":
             if self.transaction is None: raise RuntimeError("No active transaction")
             count = len(self.transaction)
+            journal_ids = []
             for change in self.transaction:
                 entry = self.journal_store.record(change.command, change.path, change.before, change.after, self.transaction_id)
                 change.change_id = entry.change_id
+                journal_ids.append(entry.change_id)
                 self._remember_journal_metadata(change)
             self.transaction = None; self.transaction_id = None
             self._clear_transaction()
             indexed = self._flush_transaction_index()
             self._persist_state()
-            return {"committed_changes": count, "indexed_paths": indexed}
+            return {"committed_changes": count, "indexed_paths": indexed, "journal_ids": journal_ids}
         if name == "rollback":
             if self.transaction is None: raise RuntimeError("No active transaction")
             changes = list(reversed(self.transaction))
