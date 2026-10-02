@@ -11,6 +11,7 @@ import re
 import threading
 import json
 import secrets
+import binascii
 import hashlib
 from dataclasses import dataclass
 
@@ -967,6 +968,34 @@ class CommandService:
                                 "result_hash": first.get("h"),
                                 "crc32": first.get("c"),
                             }
+                        elif query_kind == "optical_chunks":
+                            try:
+                                raw_indexes = query_item.get("chunk_indexes")
+                                if not isinstance(raw_indexes, list) or not 1 <= len(raw_indexes) <= 32:
+                                    raise ValueError("CHUNK_INDEXES_REQUIRES_1_TO_32_ITEMS")
+                                indexes = []
+                                for raw_index in raw_indexes:
+                                    if isinstance(raw_index, bool):
+                                        raise ValueError("INVALID_CHUNK_INDEX")
+                                    index = int(raw_index)
+                                    if index < 0 or index >= len(packets):
+                                        raise IndexError("OPTICAL_CHUNK_OUT_OF_RANGE")
+                                    if index not in indexes:
+                                        indexes.append(index)
+                                selected_packets = [json.loads(packets[index]) for index in indexes]
+                                data = {
+                                    "target_sequence": target_sequence,
+                                    "requested": indexes,
+                                    "total_chunks": len(packets),
+                                    "packets": selected_packets,
+                                    "chunk_crc32": {
+                                        str(packet["i"]): f"{binascii.crc32(str(packet.get('d') or '').encode('ascii')) & 0xffffffff:08x}"
+                                        for packet in selected_packets
+                                    },
+                                    "complete": True,
+                                }
+                            except (TypeError, ValueError, IndexError) as exc:
+                                return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_CHUNK")
                         else:
                             try:
                                 chunk_index = int(query_item.get("chunk_index"))

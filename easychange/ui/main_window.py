@@ -1,5 +1,5 @@
 from __future__ import annotations
-from easychange.remote.optical_protocol import encode_result_chunks
+from easychange.remote.optical_protocol import encode_result_chunks, encode_result_header
 
 from pathlib import Path
 
@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
         self.machine_qr = self.machine_qrs[0]
 
         self._optical_payloads: list[str] = []
+        self._optical_header_payload: str | None = None
         self._optical_pixmaps: dict[str, QPixmap] = {}
         self._optical_page = 0
         self._optical_burst = False
@@ -371,6 +372,7 @@ class MainWindow(QMainWindow):
     def _update_machine_qr(self, result) -> None:
         self._optical_timer.stop()
         self._optical_payloads = []
+        self._optical_header_payload = None
         self._optical_pixmaps.clear()
         self._optical_page = 0
         for label in self.machine_qrs:
@@ -382,9 +384,14 @@ class MainWindow(QMainWindow):
         try:
             self._optical_payloads = encode_result_chunks(result)
             self._set_optical_burst(len(self._optical_payloads) > self._OPTICAL_BURST_THRESHOLD)
+            if self._optical_burst:
+                self._optical_header_payload = encode_result_header(
+                    result, chunk_count=len(self._optical_payloads)
+                )
             self._render_optical_page()
             slots = self._OPTICAL_BURST_SLOTS if self._optical_burst else self._OPTICAL_NORMAL_SLOTS
-            if len(self._optical_payloads) > slots:
+            data_slots = max(1, slots - (1 if self._optical_header_payload else 0))
+            if len(self._optical_payloads) > data_slots:
                 self._optical_timer.start()
         except (ImportError, ValueError, RuntimeError):
             self._set_optical_burst(False)
@@ -398,10 +405,14 @@ class MainWindow(QMainWindow):
 
         requested_slots = self._OPTICAL_BURST_SLOTS if self._optical_burst else self._OPTICAL_NORMAL_SLOTS
         slots = min(requested_slots, len(self.machine_qrs))
-        page_count = max(1, (len(self._optical_payloads) + slots - 1) // slots)
+        header_slots = 1 if self._optical_header_payload else 0
+        data_slots = max(1, slots - header_slots)
+        page_count = max(1, (len(self._optical_payloads) + data_slots - 1) // data_slots)
         page = self._optical_page % page_count
-        start = page * slots
-        payloads = self._optical_payloads[start:start + slots]
+        start = page * data_slots
+        payloads = self._optical_payloads[start:start + data_slots]
+        if self._optical_header_payload:
+            payloads = [self._optical_header_payload, *payloads]
         # In burst mode keep all optical cells populated even on the final
         # partial page. Repeating already-present chunks costs no protocol state
         # and lets the HDMI decoder reliably identify the dense burst grid.

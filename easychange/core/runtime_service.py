@@ -321,6 +321,54 @@ class ProjectRuntimeService:
         result = self.processes.start(list(argv), process_id)
         return {**result, "profile": profile}
 
+    @staticmethod
+    def _test_summary(results: list[dict]) -> dict:
+        tests_passed = tests_failed = tests_skipped = 0
+        build_errors = 0
+        return_codes = []
+        for item in results:
+            try:
+                return_codes.append(int(item.get("returncode") or 0))
+            except (TypeError, ValueError):
+                return_codes.append(1)
+            text = "\n".join([
+                str(item.get("stdout") or ""),
+                str(item.get("stderr") or ""),
+                str(item.get("diagnostics") or ""),
+            ])
+            # dotnet/vstest labels and pytest-style summaries.
+            labels = {
+                "passed": re.findall(r"(?i)\bPassed\s*:\s*(\d+)", text),
+                "failed": re.findall(r"(?i)\bFailed\s*:\s*(\d+)", text),
+                "skipped": re.findall(r"(?i)\bSkipped\s*:\s*(\d+)", text),
+            }
+            if labels["passed"]:
+                tests_passed += int(labels["passed"][-1])
+            else:
+                pytest_passed = re.findall(r"(?i)\b(\d+)\s+passed\b", text)
+                tests_passed += int(pytest_passed[-1]) if pytest_passed else 0
+            if labels["failed"]:
+                tests_failed += int(labels["failed"][-1])
+            else:
+                pytest_failed = re.findall(r"(?i)\b(\d+)\s+failed\b", text)
+                tests_failed += int(pytest_failed[-1]) if pytest_failed else 0
+            if labels["skipped"]:
+                tests_skipped += int(labels["skipped"][-1])
+            else:
+                pytest_skipped = re.findall(r"(?i)\b(\d+)\s+skipped\b", text)
+                tests_skipped += int(pytest_skipped[-1]) if pytest_skipped else 0
+            build_errors += len(re.findall(r"(?im)^.*\berror\s+[A-Z]{2,}\d+\s*:", text))
+        return_code = next((code for code in return_codes if code != 0), 0)
+        return {
+            "finished": True,
+            "return_code": return_code,
+            "tests_passed": tests_passed,
+            "tests_failed": tests_failed,
+            "tests_skipped": tests_skipped,
+            "build_errors_count": build_errors,
+            "test_failures_count": tests_failed,
+        }
+
     def smart_test(self, profile_id: str = "", timeout: int = 600) -> dict:
         started_at = time.monotonic()
         profiles = self.profiles()
@@ -343,6 +391,7 @@ class ProjectRuntimeService:
             if result.get("returncode"):
                 break
         if commands:
+            summary = self._test_summary(results)
             return {
                 "passed": all(item.get("returncode") == 0 for item in results),
                 "mode": "test",
@@ -350,6 +399,8 @@ class ProjectRuntimeService:
                 "requested": len(commands),
                 "completed": len(results),
                 "duration_ms": int((time.monotonic() - started_at) * 1000),
+                **summary,
+                "test_summary": summary,
             }
 
         target = selected or self.profile("", profiles=profiles)
@@ -361,14 +412,26 @@ class ProjectRuntimeService:
         status = next((item for item in self.processes.list() if item["process_id"] == process_id), {})
         logs = self.processes.logs(process_id, limit=12000)
         self.processes.stop(process_id)
+        smoke_return = status.get("returncode")
+        smoke_summary = {
+            "finished": True,
+            "return_code": 0 if smoke_return is None else int(smoke_return),
+            "tests_passed": 0,
+            "tests_failed": 0,
+            "tests_skipped": 0,
+            "build_errors_count": 0,
+            "test_failures_count": 0,
+        }
         return {
-            "passed": status.get("state") in {"RUNNING", "EXITED"} and status.get("returncode") in {None, 0},
+            "passed": status.get("state") in {"RUNNING", "EXITED"} and smoke_return in {None, 0},
             "mode": "startup-smoke",
             "profile": target,
             "process": started,
             "status": status,
             "logs": logs,
             "duration_ms": int((time.monotonic() - started_at) * 1000),
+            **smoke_summary,
+            "test_summary": smoke_summary,
         }
 
     def _http_get(self, url: str, timeout: float = 4.0, max_bytes: int = 2_000_000) -> dict:

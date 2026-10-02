@@ -11,6 +11,32 @@ import time
 import zlib
 
 
+def _find_execution_summary(value: Any, depth: int = 0) -> dict[str, Any] | None:
+    if depth > 6:
+        return None
+    if isinstance(value, dict):
+        summary = value.get("test_summary")
+        if isinstance(summary, dict):
+            return dict(summary)
+        marker_keys = {
+            "finished", "return_code", "tests_passed", "tests_failed",
+            "tests_skipped", "build_errors_count", "test_failures_count",
+        }
+        if "finished" in value and ("return_code" in value or "passed" in value):
+            return {key: value.get(key) for key in marker_keys | {"passed"} if key in value}
+        for key in ("data", "primary", "results", "test", "result"):
+            if key in value:
+                found = _find_execution_summary(value.get(key), depth + 1)
+                if found:
+                    return found
+    elif isinstance(value, list):
+        for item in value[:32]:
+            found = _find_execution_summary(item, depth + 1)
+            if found:
+                return found
+    return None
+
+
 class DurableResultStore:
     """Bounded durable EC1 result/receipt store keyed by sequence."""
 
@@ -179,6 +205,7 @@ class DurableResultStore:
             "payload_length": result_bytes,
             "chunk_count": chunk_count,
             "sha256": value.get("result_hash"),
+            "summary": value.get("summary"),
             "mutation_receipt": value.get("mutation_receipt"),
         }
 
@@ -192,6 +219,7 @@ class DurableResultStore:
         mutation_receipt: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        execution_summary = _find_execution_summary(result)
         with self._lock:
             current = self.get(sequence) or {}
             success = bool(result.get("ok"))
@@ -225,7 +253,12 @@ class DurableResultStore:
                 "started_at": current.get("started_at") or time.time(),
                 "finished_at": time.time(),
                 "success": success,
-                "return_code": result.get("code"),
+                "return_code": (
+                    execution_summary.get("return_code")
+                    if isinstance(execution_summary, dict) and execution_summary.get("return_code") is not None
+                    else result.get("code")
+                ),
+                "summary": execution_summary,
                 "result_hash": hashlib.sha256(serialized).hexdigest(),
                 "result_bytes": len(serialized),
                 "result": result,
