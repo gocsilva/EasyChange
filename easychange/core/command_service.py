@@ -22,6 +22,10 @@ from .ids import IdFactory
 from .journal import Journal
 from .locks import LockManager
 from .process_service import ProcessService
+from .operation_registry import (
+    STRUCTURED_CONTINUE_SAFE_TYPES, STRUCTURED_JOB_TYPES, STRUCTURED_MUTATION_TYPES,
+    STRUCTURED_RECOVERY_TYPES, TEXT_MUTATION_COMMANDS, structured_capabilities,
+)
 from .result import Result
 from .transport_codec import decode_command
 from .state import MachineSession
@@ -159,10 +163,7 @@ class CommandService:
                 return Result(False, "ec", error=str(exc), code="INVALID_STRUCTURED_PAYLOAD", sequence=sequence)
 
         digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
-        mutation_types = {
-            "write_file", "create_file", "replace_line", "replace_range", "replace_text",
-            "replace_exact", "replace_anchor", "insert_before", "insert_after", "insert", "append",
-        }
+        mutation_types = STRUCTURED_MUTATION_TYPES
         if structured is not None:
             structured_op = str(structured.get("op") or "").casefold()
             structured_items = structured.get("operations") if structured_op == "batch" else [structured]
@@ -172,10 +173,7 @@ class CommandService:
             )
         else:
             first = command.strip().split(maxsplit=1)[0].lstrip(":").casefold() if command.strip() else ""
-            is_mutation = first in {
-                "write", "save", "force-write", "append", "insert", "replace", "replace-line",
-                "replace-range", "delete", "rename", "move", "mkdir", "new", "batch",
-            }
+            is_mutation = first in TEXT_MUTATION_COMMANDS
 
         # Durable store is authoritative for replay. A lost HDMI frame or MCP
         # restart therefore never requires a mutating command to execute twice.
@@ -341,10 +339,7 @@ class CommandService:
     def _execute_planned_mutation_batch(self, operations: list[dict], operation: str,
                                         *, persist: bool, started: float) -> Result:
         """Plan all file edits against original snapshots, then write each file once."""
-        mutation_types = {
-            "write_file", "create_file", "replace_line", "replace_range", "replace_text",
-            "replace_exact", "replace_anchor", "insert_before", "insert_after", "insert", "append",
-        }
+        mutation_types = STRUCTURED_MUTATION_TYPES
         normalized: list[dict] = []
         originals: dict[str, str | None] = {}
         actual_hashes: dict[str, str | None] = {}
@@ -609,32 +604,41 @@ class CommandService:
                     elif start <= current_end + 2:
                         current_end = max(current_end, end)
                     else:
-                        merged.append({
-                            "path": path,
-                            "start": current_start,
-                            "count": current_end - current_start + 1,
-                        })
+                        merged.append({"path": path, "start": current_start,
+                                       "count": current_end - current_start + 1})
                         current_start, current_end = start, end
                 if current_start is not None:
-                    merged.append({
-                        "path": path,
-                        "start": current_start,
-                        "count": current_end - current_start + 1,
-                    })
+                    merged.append({"path": path, "start": current_start,
+                                   "count": current_end - current_start + 1})
             normalized = merged[:64]
+
+        def safe_read(spec: dict) -> tuple[dict, dict | None, dict | None]:
+            try:
+                info = self.files.read(spec["path"], spec["start"], spec["count"])
+                return spec, info, None
+            except Exception as exc:
+                return spec, None, {
+                    "path": spec["path"],
+                    "start": spec["start"],
+                    "count": spec["count"],
+                    "error": str(exc)[:512],
+                    "code": str(getattr(exc, "code", "") or type(exc).__name__),
+                }
 
         workers = min(12, len(normalized))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="easychange-regions") as pool:
-            loaded = list(pool.map(
-                lambda item: self.files.read(item["path"], item["start"], item["count"]),
-                normalized,
-            ))
+            loaded = list(pool.map(safe_read, normalized))
 
         max_bytes = max(32768, min(8388608, int(max_bytes)))
-        output = []
-        skipped = []
+        output: list[dict] = []
+        skipped: list[dict] = []
+        errors: list[dict] = []
         total_bytes = 0
-        for position, (spec, info) in enumerate(zip(normalized, loaded)):
+        for position, (spec, info, error) in enumerate(loaded):
+            if error is not None:
+                errors.append(error)
+                continue
+            assert info is not None
             value = {
                 "path": info.get("path") or spec["path"],
                 "start": info.get("start", spec["start"]),
@@ -643,6 +647,8 @@ class CommandService:
                 "total_lines": info.get("total_lines"),
                 "hash": info.get("hash"),
                 "lines": list(info.get("lines") or []),
+                "has_more": bool(info.get("has_more")),
+                "next_start": info.get("next_start"),
             }
             encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             if total_bytes + len(encoded) > max_bytes:
@@ -653,16 +659,19 @@ class CommandService:
                         value["lines"] = lines
                         value["returned_count"] = len(lines)
                         value["budget_truncated"] = True
+                        value["has_more"] = True
+                        value["next_start"] = int(value["start"]) + len(lines)
                         encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                     output.append(value)
                     total_bytes += len(encoded)
-                    skipped.extend(normalized[position + 1:])
+                    skipped.extend(item[0] for item in loaded[position + 1:] if item[2] is None)
                 else:
-                    skipped.extend(normalized[position:])
+                    skipped.extend(item[0] for item in loaded[position:] if item[2] is None)
                 break
             output.append(value)
             total_bytes += len(encoded)
 
+        budget_truncated = bool(skipped) or any(bool(item.get("budget_truncated")) for item in output)
         return {
             "regions": output,
             "count": len(output),
@@ -670,8 +679,13 @@ class CommandService:
             "coalesced": len(normalized),
             "raw_bytes": total_bytes,
             "byte_budget": max_bytes,
-            "truncated": bool(skipped) or any(bool(item.get("budget_truncated")) for item in output),
+            "truncated": budget_truncated,
             "skipped": skipped,
+            "errors": errors,
+            "failed": len(errors),
+            "partial": bool(errors) or budget_truncated,
+            "has_more": bool(skipped),
+            "remaining": len(skipped),
             "parallel_workers": workers,
             "merge_overlaps": bool(merge_overlaps),
         }
@@ -689,7 +703,7 @@ class CommandService:
         if len(operations) == 1 and isinstance(operations[0], dict):
             query_item = operations[0]
             query_kind = str(query_item.get("type") or "").casefold()
-            if query_kind in {"result_status", "mutation_status", "result_get", "result_meta", "result_chunk", "optical_meta", "optical_chunk"}:
+            if query_kind in STRUCTURED_RECOVERY_TYPES:
                 target_sequence = str(query_item.get("sequence") or query_item.get("target_sequence") or "").upper()
                 if not re.fullmatch(r"Q[A-Z0-9_-]{4,40}", target_sequence):
                     return Result(False, query_kind, error="VALID_TARGET_SEQUENCE_REQUIRED", code="INVALID_SEQUENCE")
@@ -746,7 +760,7 @@ class CommandService:
         if len(operations) == 1 and isinstance(operations[0], dict):
             job_item = operations[0]
             job_kind = str(job_item.get("type") or "").casefold()
-            if job_kind in {"job_start", "job_status", "job_result", "job_cancel"}:
+            if job_kind in STRUCTURED_JOB_TYPES:
                 try:
                     job_id = str(job_item.get("job_id") or "")
                     if job_kind == "job_start":
@@ -779,12 +793,13 @@ class CommandService:
                                   command_id=self.ids.next("C"),
                                   duration_ms=int((time.monotonic() - started) * 1000))
 
-        mutation_types = {
-            "write_file", "create_file", "replace_line", "replace_range", "replace_text",
-            "replace_exact", "replace_anchor", "insert_before", "insert_after", "insert", "append",
-        }
+        mutation_types = STRUCTURED_MUTATION_TYPES
         kinds = [str(item.get("type") or "").casefold() if isinstance(item, dict) else "" for item in operations]
         transactional = any(kind in mutation_types for kind in kinds)
+        continue_on_error = bool(payload.get("continue_on_error", False))
+        if continue_on_error and (transactional or not all(kind in STRUCTURED_CONTINUE_SAFE_TYPES for kind in kinds)):
+            return Result(False, "structured", error="CONTINUE_ON_ERROR_REQUIRES_SAFE_READ_BATCH",
+                          code="INVALID_STRUCTURED_PAYLOAD")
         if transactional and self.transaction is not None:
             return Result(False, "structured", error="BATCH_CANNOT_NEST_TRANSACTION", code="TRANSACTION_ACTIVE")
 
@@ -807,6 +822,7 @@ class CommandService:
         # sub-operation.
         sub_persist = False
         for item in operations:
+            item_started = time.monotonic()
             if not isinstance(item, dict):
                 result = Result(False, "structured", error="OPERATION_OBJECT_REQUIRED", code="INVALID_STRUCTURED_PAYLOAD")
             else:
@@ -1002,7 +1018,17 @@ class CommandService:
                             args += ["--max-bytes", str(item["max_bytes"])]
                         result = self.execute_tokens("read-many", args, raw="EC1 read-many", persist=sub_persist)
                 elif kind == "runtime_profiles":
-                    result = Result(True, kind, data={"profiles": self.runtime.profiles()})
+                    profiles = self.runtime.profiles()
+                    ecosystems: dict[str, int] = {}
+                    for profile in profiles:
+                        ecosystem = str(profile.get("ecosystem") or "unknown")
+                        ecosystems[ecosystem] = ecosystems.get(ecosystem, 0) + 1
+                    result = Result(True, kind, data={
+                        "profiles": profiles,
+                        "count": len(profiles),
+                        "runnable": sum(1 for profile in profiles if profile.get("runnable")),
+                        "ecosystems": ecosystems,
+                    })
                 elif kind == "runtime_configure":
                     result = Result(True, kind, data=self.runtime.configure_profile(
                         str(item.get("profile_id") or ""), kind=str(item.get("kind") or "custom"),
@@ -1090,11 +1116,22 @@ class CommandService:
                     result = self.execute_tokens("validate", args, raw="EC1 validate", persist=sub_persist)
                 else:
                     result = Result(False, "structured", error=f"Unsupported operation: {kind}", code="OPERATION_NOT_ALLOWED")
+            if not result.command_id:
+                result.command_id = self.ids.next("C")
+            if not result.duration_ms:
+                result.duration_ms = int((time.monotonic() - item_started) * 1000)
             results.append(result.to_dict())
-            if not result.ok:
+            if not result.ok and not continue_on_error:
                 break
 
-        ok = len(results) == len(operations) and all(item["ok"] for item in results)
+        succeeded = sum(1 for item in results if item.get("ok"))
+        failed = len(results) - succeeded
+        summary = {
+            "requested": len(operations), "completed": len(results), "succeeded": succeeded,
+            "failed": failed, "skipped": max(0, len(operations) - len(results)),
+            "continue_on_error": continue_on_error,
+        }
+        ok = len(results) == len(operations) and failed == 0
         transaction_data = {"state": "NOT_REQUIRED"}
         if transactional:
             transaction = self.execute_tokens(
@@ -1113,6 +1150,7 @@ class CommandService:
                 "results": results,
                 "primary": results[0] if len(results) == 1 else None,
                 "count": len(results),
+                "summary": summary,
                 "transaction": transaction_data,
             },
             error=None if ok else ("Structured batch failed and was rolled back" if transactional else "Structured read batch failed"),
@@ -1285,7 +1323,7 @@ class CommandService:
                     "new", "mkdir", "write", "append", "insert", "replace", "replace-line", "replace-range", "delete", "rename", "move", "stat", "hash", "exists",
                     "rename-symbol", "create-class", "create-interface", "create-test", "format", "fix-imports", "organize-imports",
                     "journal", "undo", "redo", "begin", "commit", "rollback", "snapshot", "lock", "unlock", "locks", "watch", "batch", "macro", "alias", "complete", "history", "repeat", "clear",
-                    "status", "diff", "branch", "log", "build", "test", "run", "processes", "stop", "errors", "next-error", "previous-error", "remote", "remote-guide", "remote-profile", "prepare-hid", "set", "machine", "human", "quit"],
+                    "status", "health", "diff", "branch", "log", "build", "test", "run", "processes", "stop", "errors", "next-error", "previous-error", "remote", "remote-guide", "remote-profile", "prepare-hid", "set", "machine", "human", "quit"],
                     "capabilities": {"workspace": True, "git": "GIT" in self.workspace.adapters,
                     "build_test": self.workspace.adapters, "index": True, "symbols": True,
                     "ai_machine": {"optical_protocol": "EC2", "qr_slots": 16, "chunked_results": True,
@@ -1296,6 +1334,7 @@ class CommandService:
                                    "discovery_context_pack": True,
                                    "read_many_max_files": 64, "read_many_byte_budget": True,
                                    "structured_max_operations": 64, "expected_hash_guards": True,
+                                   "structured_operations": structured_capabilities(),
                                    "validate": True, "cold_search": "git-grep", "warm_search": "sqlite-fts5"},
                     "runtime": {"profiles": True, "smart_test": True, "background_run": True,
                                 "swagger_evidence": True, "local_screenshots": True},
@@ -1303,6 +1342,31 @@ class CommandService:
                                  "postgres_cli": True, "mysql_cli": True},
                     "remote_control": {"input": "ESP32_HID", "output": "HDMI",
                                        "mcp_on_remote_pc": False, "api_on_remote_pc": False}}}
+        if name == "health":
+            index = self.indexer.status()
+            processes = self.processes.list()
+            active_processes = sum(1 for item in processes if str(item.get("state") or "").upper() == "RUNNING")
+            transaction_state = "ACTIVE" if self.transaction is not None else "NONE"
+            degraded_reasons = []
+            if transaction_state == "ACTIVE":
+                degraded_reasons.append("TRANSACTION_ACTIVE")
+            if str(index.get("state") or index.get("status") or "").upper() in {"FAILED", "ERROR"}:
+                degraded_reasons.append("INDEX_ERROR")
+            return {
+                "healthy": not degraded_reasons,
+                "state": "READY" if not degraded_reasons else "DEGRADED",
+                "workspace": str(self.workspace.root_path),
+                "workspace_type": self.workspace.kind,
+                "index": index,
+                "transaction": transaction_state,
+                "machine_mode": self.machine,
+                "transport": self.state_store.data.get("transport", "local"),
+                "process_count": len(processes),
+                "active_processes": active_processes,
+                "durable_results": True,
+                "structured_operations": structured_capabilities(),
+                "degraded_reasons": degraded_reasons,
+            }
         if name == "state":
             compact = "--compact" in args or "compact" in args
             base = {
@@ -1342,16 +1406,23 @@ class CommandService:
             if len(self.file_refs) > 1024:
                 self.file_refs = dict(list(self.file_refs.items())[-1024:])
             total = self.indexer.count()
-            return {"page": offset // limit + 1, "pages": max(1, (total + limit - 1) // limit), "total": total, "files": items}
+            has_more = offset + len(items) < total
+            return {"page": offset // limit + 1, "pages": max(1, (total + limit - 1) // limit),
+                    "total": total, "returned": len(items), "files": items,
+                    "has_more": has_more, "next_offset": offset + limit if has_more else None,
+                    "previous_offset": max(0, offset - limit) if offset > 0 else None}
         if name in {"next", "prev"}:
             offset = max(0, self.page_offset + (self.page_size if name == "next" else -self.page_size))
             if self.page_kind == "search" and self.page_query:
                 query, extension, path_prefix, regex = self.page_query
-                matches = self.indexer.search(query, extension=extension, path_prefix=path_prefix, regex=regex,
-                                              offset=offset, limit=self.page_size)
-                matches = self._register_matches(matches)
+                candidate_matches = self.indexer.search(query, extension=extension, path_prefix=path_prefix, regex=regex,
+                                                        offset=offset, limit=self.page_size + 1)
+                has_more = len(candidate_matches) > self.page_size
+                matches = self._register_matches(candidate_matches[:self.page_size])
                 self.page_offset = offset; self.page_items = matches
-                return {"page": offset // self.page_size + 1, "matches": matches}
+                return {"page": offset // self.page_size + 1, "matches": matches, "returned": len(matches),
+                        "has_more": has_more, "next_offset": offset + self.page_size if has_more else None,
+                        "previous_offset": max(0, offset - self.page_size) if offset > 0 else None}
             return self._dispatch("files", ["--offset", str(offset), "--limit", str(self.page_size)])
         if name in {"read", "open", "context", "head", "tail", "goto"}:
             if name == "context" and args and args[0].isdigit():
@@ -1366,16 +1437,17 @@ class CommandService:
             ref = args[0]
             result_ref = self.results.get(ref)
             args[0] = self._resolve_ref(ref)
-            start = _int_arg(args, 1, 1)
-            count = _int_arg(args, 2, 120)
+            start = 1 if name == "tail" and "--count" in args else _int_arg(args, 1, 1)
+            count = _option_int(args, "--count", _int_arg(args, 2, 120), minimum=1, maximum=100000)
             if result_ref:
                 line = int(result_ref["line"])
                 start = max(1, line - 4) if name in {"context", "open"} else line
                 count = 12 if name in {"context", "open"} else count
             if name == "tail":
-                info = self.files.read(args[0], 1, 100000)
-                info["lines"] = info["lines"][-count:]
-                self._set_current(args[0], max(1, info["total_lines"]-count+1))
+                metadata = self.files.read(args[0], 1, 1)
+                tail_start = max(1, int(metadata["total_lines"]) - count + 1)
+                info = self.files.read(args[0], tail_start, count)
+                self._set_current(args[0], tail_start)
                 return info
             if name == "head": start = 1
             if name == "goto":
@@ -1389,9 +1461,10 @@ class CommandService:
             _require(args, 1, "query")
             query, extension, path_prefix, regex = _search_args(args)
             offset, limit = _page_args(args, default_limit=10 if name == "locate" else self.page_size)
-            matches = self.indexer.search(query, extension=extension, path_prefix=path_prefix, regex=regex,
-                                          offset=offset, limit=limit)
-            matches = self._register_matches(matches)
+            candidate_matches = self.indexer.search(query, extension=extension, path_prefix=path_prefix, regex=regex,
+                                                    offset=offset, limit=limit + 1)
+            has_more = len(candidate_matches) > limit
+            matches = self._register_matches(candidate_matches[:limit])
             self.page_items = matches; self.page_offset = offset; self.page_size = limit
             self.page_kind = "search"; self.page_query = (query, extension, path_prefix, regex)
             if name == "locate":
@@ -1399,8 +1472,12 @@ class CommandService:
                 for match in matches:
                     start = max(1, int(match["line"]) - radius)
                     match["context"] = self.files.read(match["file"], start, radius * 2 + 1)["lines"]
-                return {"query": query, "count": len(matches), "matches": matches}
-            return {"page": offset // limit + 1, "matches": matches}
+                return {"query": query, "count": len(matches), "returned": len(matches), "matches": matches,
+                        "has_more": has_more, "next_offset": offset + limit if has_more else None,
+                        "previous_offset": max(0, offset - limit) if offset > 0 else None}
+            return {"page": offset // limit + 1, "matches": matches, "returned": len(matches),
+                    "has_more": has_more, "next_offset": offset + limit if has_more else None,
+                    "previous_offset": max(0, offset - limit) if offset > 0 else None}
 
         if name == "discover-many":
             _require(args, 1, "one or more symbols/search terms")
@@ -1530,11 +1607,27 @@ class CommandService:
 
             files = []
             skipped = []
+            errors = []
             total_bytes = 0
             workers = min(12, len(paths))
+
+            def safe_read(path):
+                try:
+                    return path, self.files.read(path, 1, count), None
+                except Exception as exc:
+                    return path, None, {
+                        "path": path,
+                        "error": str(exc)[:512],
+                        "code": str(getattr(exc, "code", "") or type(exc).__name__),
+                    }
+
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="easychange-read") as pool:
-                loaded = list(pool.map(lambda path: self.files.read(path, 1, count), paths))
-            for position, (path, info) in enumerate(zip(paths, loaded)):
+                loaded = list(pool.map(safe_read, paths))
+            for position, (path, info, error) in enumerate(loaded):
+                if error is not None:
+                    errors.append(error)
+                    continue
+                assert info is not None
                 encoded = json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                 if total_bytes + len(encoded) > max_bytes:
                     if not files:
@@ -1543,25 +1636,38 @@ class CommandService:
                         lines = list(info.get("lines") or [])
                         while len(encoded) > max_bytes and len(lines) > 1:
                             lines = lines[:max(1, len(lines) // 2)]
-                            info = {**info, "lines": lines, "budget_truncated": True}
+                            info = {
+                                **info,
+                                "lines": lines,
+                                "returned_lines": len(lines),
+                                "budget_truncated": True,
+                                "has_more": True,
+                                "next_start": int(info.get("start") or 1) + len(lines),
+                            }
                             encoded = json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                         files.append(info)
                         total_bytes += len(encoded)
-                        skipped.extend(paths[position + 1:])
+                        skipped.extend(item[0] for item in loaded[position + 1:] if item[2] is None)
                     else:
-                        skipped.extend(paths[position:])
+                        skipped.extend(item[0] for item in loaded[position:] if item[2] is None)
                     break
                 files.append(info)
                 total_bytes += len(encoded)
 
+            budget_truncated = bool(skipped) or any(bool(item.get("budget_truncated")) for item in files)
             return {
                 "files": files,
                 "count": len(files),
                 "requested": len(paths),
                 "raw_bytes": total_bytes,
                 "byte_budget": max_bytes,
-                "truncated": bool(skipped) or any(bool(item.get("budget_truncated")) for item in files),
+                "truncated": budget_truncated,
                 "skipped": skipped,
+                "errors": errors,
+                "failed": len(errors),
+                "partial": bool(errors) or budget_truncated,
+                "has_more": bool(skipped),
+                "remaining": len(skipped),
                 "parallel_workers": workers,
             }
 
@@ -1609,7 +1715,11 @@ class CommandService:
         if name == "macro": return self._macro(args)
         if name == "history":
             offset, limit = _page_args(args, default_limit=50)
-            return {"history": self.history[-(offset+limit):-offset if offset else None]}
+            items = self.history[-(offset+limit):-offset if offset else None]
+            has_more = offset + len(items) < len(self.history)
+            return {"history": items, "returned": len(items), "total": len(self.history),
+                    "has_more": has_more, "next_offset": offset + limit if has_more else None,
+                    "previous_offset": max(0, offset - limit) if offset > 0 else None}
         if name == "clear":
             self.results.clear(); self.file_refs.clear(); self.page_items = []; self.page_offset = 0
             return {"cleared": ["results", "file_refs", "page"]}
@@ -1681,12 +1791,28 @@ class CommandService:
             raise NotImplementedError(f"{name} requires a language adapter; none is configured for this workspace")
         if name == "journal":
             offset, limit = _page_args(args, default_limit=50)
+            compact = "--compact" in args or "--summary" in args
             entries = self.journal_store.entries
-            return {"total": len(entries), "entries": [entry.__dict__ if hasattr(entry, "__dict__") else {
+            selected = entries[offset:offset+limit]
+            if compact:
+                rendered = [{
                     "change_id": entry.change_id, "timestamp": entry.timestamp, "command": entry.command,
                     "path": entry.path, "before_hash": entry.before_hash, "after_hash": entry.after_hash,
-                    "transaction_id": entry.transaction_id, "source": entry.source}
-                    for entry in entries[offset:offset+limit]]}
+                    "transaction_id": entry.transaction_id, "source": entry.source,
+                } for entry in selected]
+            else:
+                rendered = [entry.__dict__ if hasattr(entry, "__dict__") else {
+                    "change_id": entry.change_id, "timestamp": entry.timestamp, "command": entry.command,
+                    "path": entry.path, "before_hash": entry.before_hash, "after_hash": entry.after_hash,
+                    "transaction_id": entry.transaction_id, "source": entry.source,
+                } for entry in selected]
+            has_more = offset + len(selected) < len(entries)
+            return {
+                "total": len(entries), "entries": rendered, "returned": len(rendered),
+                "compact": compact, "has_more": has_more,
+                "next_offset": offset + limit if has_more else None,
+                "previous_offset": max(0, offset - limit) if offset > 0 else None,
+            }
         if name == "snapshot": return self._snapshot(args)
         if name == "lock":
             _require(args, 1, "file ID or path")
@@ -1697,7 +1823,9 @@ class CommandService:
             _require(args, 1, "file ID or path")
             path = self.workspace.resolve(self._resolve_ref(args[0])).relative_to(self.workspace.root_path).as_posix()
             return {"unlocked": self.locks.release(path, self.instance_id, self.session_id), "path": path}
-        if name == "locks": return {"locks": self.locks.list()}
+        if name == "locks":
+            locks = self.locks.list()
+            return {"locks": locks, "count": len(locks)}
         if name == "watch": return self._watch(args)
         if name == "new":
             _require(args, 1, "path")
@@ -1770,12 +1898,33 @@ class CommandService:
             return self._dispatch(args[0], args[1:])
         if name in {"status", "diff", "branch", "log"} and "GIT" not in self.workspace.adapters:
             raise NotImplementedError("Git is unavailable because this workspace is not inside a Git repository")
-        if name == "status": return self.git.status()
+        if name == "status": return self.git.status(summary="--summary" in args)
         if name == "diff":
-            path = self._resolve_ref(args[0]) if args else None
-            return {"diff": self.git.diff(path)}
-        if name == "branch": return {"branch": self.git.branch()}
-        if name == "log": return {"commits": self.git.log(_int_arg(args, 0, 10))}
+            path_arg = next((value for value in args if not value.startswith("--")
+                             and (not args or args.index(value) == 0 or args[args.index(value)-1] != "--max-bytes")), None)
+            path = self._resolve_ref(path_arg) if path_arg else None
+            diff = self.git.diff(path)
+            raw = diff.encode("utf-8")
+            max_bytes = _option_int(args, "--max-bytes", 0, minimum=0, maximum=8388608)
+            truncated = bool(max_bytes and len(raw) > max_bytes)
+            if truncated:
+                returned = raw[:max_bytes].decode("utf-8", errors="ignore")
+            else:
+                returned = diff
+            return {
+                "diff": returned,
+                "diff_bytes": len(raw),
+                "returned_bytes": len(returned.encode("utf-8")),
+                "truncated": truncated,
+                "max_bytes": max_bytes or None,
+            }
+        if name == "branch": return {"branch": self.git.branch(summary="--summary" in args)}
+        if name == "log":
+            requested = max(1, min(_int_arg(args, 0, 10), 100))
+            candidates = self.git.log(min(100, requested + 1))
+            has_more = len(candidates) > requested
+            commits = candidates[:requested]
+            return {"commits": commits, "returned": len(commits), "requested": requested, "has_more": has_more}
         if name == "begin":
             if self.transaction is not None: raise RuntimeError("A transaction is already active")
             self.transaction = []
@@ -1919,7 +2068,11 @@ class CommandService:
                                 code="BUILD_FAILED" if name == "build" else "TEST_FAILED" if name == "test" else "PROCESS_FAILED")
                 raise ProcessFailure(result)
             return outcome
-        if name == "processes": return {"processes": self.processes.list()}
+        if name == "processes":
+            processes = self.processes.list()
+            running = sum(1 for item in processes if str(item.get("state") or "").upper() == "RUNNING")
+            return {"processes": processes, "count": len(processes), "running": running,
+                    "terminal": len(processes) - running}
         if name == "stop":
             _require(args, 1, "process ID")
             return self.processes.stop(args[0])

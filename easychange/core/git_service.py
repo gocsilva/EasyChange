@@ -16,27 +16,44 @@ class GitService:
             raise RuntimeError((result.stderr or result.stdout).strip() or "Git command failed")
         return result.stdout.strip()
 
-    def status(self) -> dict:
+    def status(self, summary: bool = False) -> dict:
         """Return branch + short changes with one Git process."""
         output = self._run("status", "--short", "--branch")
         lines = output.splitlines()
         header = lines[0] if lines and lines[0].startswith("## ") else ""
         changes = lines[1:] if header else lines
         branch = ""
+        branch_text = ""
         if header:
             branch_text = header[3:].strip()
             if branch_text.startswith("HEAD "):
                 branch = "HEAD"
             else:
                 branch = branch_text.split("...", 1)[0].split(" ", 1)[0]
-        return {"branch": branch, "changes": changes, "clean": not changes}
+        result = {"branch": branch, "changes": changes, "clean": not changes}
+        if summary:
+            import re
+            ahead_match = re.search(r"ahead (\d+)", branch_text)
+            behind_match = re.search(r"behind (\d+)", branch_text)
+            result.update({
+                "change_count": len(changes),
+                "ahead": int(ahead_match.group(1)) if ahead_match else 0,
+                "behind": int(behind_match.group(1)) if behind_match else 0,
+            })
+        return result
 
     def diff(self, path: str | None = None) -> str:
         return self._run("diff", "--no-ext-diff", "--", *( [path] if path else [] ))
 
-    def branch(self) -> dict:
-        return {"current": self._run("branch", "--show-current"),
-                "branches": self._run("branch", "--list").splitlines()}
+    def branch(self, summary: bool = False) -> dict:
+        branches = self._run("branch", "--list").splitlines()
+        result = {
+            "current": self._run("branch", "--show-current"),
+            "branches": branches,
+        }
+        if summary:
+            result["count"] = len(branches)
+        return result
 
     def log(self, limit: int = 10) -> list[dict]:
         output = self._run("log", f"-{max(1, min(limit, 100))}", "--date=iso-strict",

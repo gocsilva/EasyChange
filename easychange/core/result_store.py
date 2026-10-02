@@ -123,6 +123,9 @@ class DurableResultStore:
         value = self.get(sequence)
         if value is None:
             return None
+        started = float(value.get("started_at") or 0.0)
+        finished = float(value.get("finished_at") or 0.0)
+        elapsed_end = finished or time.time()
         return {
             "sequence": sequence,
             "state": value.get("state"),
@@ -132,6 +135,7 @@ class DurableResultStore:
             "result_bytes": value.get("result_bytes"),
             "started_at": value.get("started_at"),
             "finished_at": value.get("finished_at"),
+            "duration_ms": int(max(0.0, elapsed_end - started) * 1000) if started else None,
             "mutation_receipt": value.get("mutation_receipt"),
         }
 
@@ -140,35 +144,39 @@ class DurableResultStore:
         result = value.get("result") if value else None
         return result if isinstance(result, dict) else None
 
-    def chunk_meta(self, sequence: str, *, chunk_bytes: int = 640) -> dict[str, Any] | None:
+    def _result_payload(self, sequence: str) -> tuple[dict[str, Any], bytes] | None:
         result = self.result(sequence)
         if result is None:
             return None
         raw = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return result, raw
+    def chunk_meta(self, sequence: str, *, chunk_bytes: int = 640) -> dict[str, Any] | None:
+        payload = self._result_payload(sequence)
+        if payload is None:
+            return None
+        _, raw = payload
         size = max(256, min(4096, int(chunk_bytes)))
         total = max(1, (len(raw) + size - 1) // size)
-        return {
-            "sequence": sequence,
-            "total_chunks": total,
-            "chunk_bytes": size,
-            "result_bytes": len(raw),
-            "result_hash": hashlib.sha256(raw).hexdigest(),
-        }
+        return {"sequence": sequence, "total_chunks": total, "chunk_bytes": size,
+                "result_bytes": len(raw), "result_hash": hashlib.sha256(raw).hexdigest()}
 
     def chunk(self, sequence: str, index: int, *, chunk_bytes: int = 640) -> dict[str, Any] | None:
-        meta = self.chunk_meta(sequence, chunk_bytes=chunk_bytes)
-        result = self.result(sequence)
-        if meta is None or result is None:
+        payload = self._result_payload(sequence)
+        if payload is None:
             return None
-        raw = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        total = int(meta["total_chunks"])
+        _, raw = payload
+        size = max(256, min(4096, int(chunk_bytes)))
+        total = max(1, (len(raw) + size - 1) // size)
         if index < 0 or index >= total:
             raise IndexError("RESULT_CHUNK_OUT_OF_RANGE")
-        size = int(meta["chunk_bytes"])
-        payload = raw[index * size : (index + 1) * size]
+        chunk_payload = raw[index * size:(index + 1) * size]
         return {
-            **meta,
-            "chunk_index": index,
-            "crc32": f"{binascii.crc32(payload) & 0xFFFFFFFF:08x}",
-            "payload_b64": base64.urlsafe_b64encode(payload).decode("ascii").rstrip("="),
+            "sequence": sequence, "total_chunks": total, "chunk_bytes": size,
+            "result_bytes": len(raw), "result_hash": hashlib.sha256(raw).hexdigest(),
+            "chunk_index": index, "payload_bytes": len(chunk_payload),
+            "crc32": f"{binascii.crc32(chunk_payload) & 0xFFFFFFFF:08x}",
+            "payload_b64": base64.urlsafe_b64encode(chunk_payload).decode("ascii").rstrip("="),
+            "has_more": index + 1 < total,
+            "next_chunk_index": index + 1 if index + 1 < total else None,
+            "previous_chunk_index": index - 1 if index > 0 else None,
         }

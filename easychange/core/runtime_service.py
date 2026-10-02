@@ -322,6 +322,7 @@ class ProjectRuntimeService:
         return {**result, "profile": profile}
 
     def smart_test(self, profile_id: str = "", timeout: int = 600) -> dict:
+        started_at = time.monotonic()
         profiles = self.profiles()
         selected = self.profile(profile_id, profiles=profiles) if profile_id else None
         commands = []
@@ -342,7 +343,14 @@ class ProjectRuntimeService:
             if result.get("returncode"):
                 break
         if commands:
-            return {"passed": all(item.get("returncode") == 0 for item in results), "mode": "test", "results": results}
+            return {
+                "passed": all(item.get("returncode") == 0 for item in results),
+                "mode": "test",
+                "results": results,
+                "requested": len(commands),
+                "completed": len(results),
+                "duration_ms": int((time.monotonic() - started_at) * 1000),
+            }
 
         target = selected or self.profile("", profiles=profiles)
         if not target.get("run_argv"):
@@ -353,8 +361,15 @@ class ProjectRuntimeService:
         status = next((item for item in self.processes.list() if item["process_id"] == process_id), {})
         logs = self.processes.logs(process_id, limit=12000)
         self.processes.stop(process_id)
-        return {"passed": status.get("state") in {"RUNNING", "EXITED"} and status.get("returncode") in {None, 0},
-                "mode": "startup-smoke", "profile": target, "process": started, "status": status, "logs": logs}
+        return {
+            "passed": status.get("state") in {"RUNNING", "EXITED"} and status.get("returncode") in {None, 0},
+            "mode": "startup-smoke",
+            "profile": target,
+            "process": started,
+            "status": status,
+            "logs": logs,
+            "duration_ms": int((time.monotonic() - started_at) * 1000),
+        }
 
     def _http_get(self, url: str, timeout: float = 4.0, max_bytes: int = 2_000_000) -> dict:
         request = urllib.request.Request(url, headers={"User-Agent": "EasyChange/0.1"})
@@ -460,7 +475,23 @@ class ProjectRuntimeService:
         return {"ok": True, "evidence_dir": _rel(self.workspace.root_path, folder),
                 "report": _rel(self.workspace.root_path, report_path), **evidence}
 
+    def _evidence_metadata(self, folder: Path) -> dict:
+        files = []
+        total_bytes = 0
+        try:
+            candidates = sorted(path for path in folder.rglob("*") if path.is_file())
+        except OSError:
+            candidates = []
+        for path in candidates:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            total_bytes += size
+            files.append({"path": _rel(self.workspace.root_path, path), "bytes": size})
+        return {"file_count": len(files), "total_bytes": total_bytes, "files": files}
     def evidence(self, title: str = "test-evidence", process_id: str = "") -> dict:
+        started_at = time.monotonic()
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         folder = self.evidence_root / f"{stamp}-{_slug(title)}"
         folder.mkdir(parents=True, exist_ok=True)
@@ -492,17 +523,28 @@ class ProjectRuntimeService:
             encoding="utf-8",
         )
         screenshot = self._browser_screenshot(html_path.resolve().as_uri(), folder / "evidence.png")
-        return {"evidence_dir": _rel(self.workspace.root_path, folder),
-                "evidence_json": _rel(self.workspace.root_path, json_path),
-                "report": _rel(self.workspace.root_path, report),
-                "html_report": _rel(self.workspace.root_path, html_path),
-                "screenshot_file": _rel(self.workspace.root_path, screenshot) if screenshot else None}
+        metadata = self._evidence_metadata(folder)
+        return {
+            "evidence_dir": _rel(self.workspace.root_path, folder),
+            "evidence_json": _rel(self.workspace.root_path, json_path),
+            "report": _rel(self.workspace.root_path, report),
+            "html_report": _rel(self.workspace.root_path, html_path),
+            "screenshot_file": _rel(self.workspace.root_path, screenshot) if screenshot else None,
+            **metadata,
+            "duration_ms": int((time.monotonic() - started_at) * 1000),
+        }
 
     def test_with_evidence(self, profile_id: str = "", timeout: int = 600,
                            title: str = "test-evidence") -> dict:
+        started_at = time.monotonic()
         test = self.smart_test(profile_id, timeout)
         evidence = self.evidence(title)
-        return {"passed": bool(test.get("passed")), "test": test, "evidence": evidence}
+        return {
+            "passed": bool(test.get("passed")),
+            "test": test,
+            "evidence": evidence,
+            "duration_ms": int((time.monotonic() - started_at) * 1000),
+        }
 
     @staticmethod
     def _browser_candidates() -> list[str]:

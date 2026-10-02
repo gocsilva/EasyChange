@@ -27,11 +27,9 @@ class DatabaseService:
         value = self._config()
         sanitized = {}
         for name, cfg in value.items():
-            sanitized[name] = {
-                key: val for key, val in cfg.items()
-                if key not in {"password", "token", "secret"} and not key.endswith("_value")
-            }
-        return {"connections": sanitized, "config": ".easychange/db_connections.json"}
+            sanitized[name] = {key: val for key, val in cfg.items()
+                               if key not in {"password", "token", "secret"} and not key.endswith("_value")}
+        return {"connections": sanitized, "count": len(sanitized), "config": ".easychange/db_connections.json"}
 
     def configure(self, name: str, provider: str, settings: dict | None = None) -> dict:
         """Persist a connection alias without accepting secret values."""
@@ -81,7 +79,6 @@ class DatabaseService:
             return {"provider": "sqlite", "path": name}
         raise LookupError(f"Database connection not found: {name}")
 
-    @staticmethod
     @staticmethod
     def _is_read_only(sql: str) -> bool:
         """Conservative SQL classifier for the default read-only path.
@@ -140,14 +137,20 @@ class DatabaseService:
         cfg = self._connection(connection)
         provider = str(cfg.get("provider") or "").casefold()
         if provider in {"sqlite", "sqlite3"}:
-            return self._sqlite_query(cfg, sql, allow_write=allow_write, max_rows=max_rows, timeout=timeout)
-        if provider in {"sqlserver", "mssql"}:
-            return self._sqlcmd_query(cfg, sql, max_rows=max_rows, timeout=timeout)
-        if provider in {"postgres", "postgresql"}:
-            return self._psql_query(cfg, sql, max_rows=max_rows, timeout=timeout)
-        if provider in {"mysql", "mariadb"}:
-            return self._mysql_query(cfg, sql, max_rows=max_rows, timeout=timeout)
-        raise ValueError(f"Unsupported database provider: {provider}")
+            result = self._sqlite_query(cfg, sql, allow_write=allow_write, max_rows=max_rows, timeout=timeout)
+        elif provider in {"sqlserver", "mssql"}:
+            result = self._sqlcmd_query(cfg, sql, max_rows=max_rows, timeout=timeout)
+        elif provider in {"postgres", "postgresql"}:
+            result = self._psql_query(cfg, sql, max_rows=max_rows, timeout=timeout)
+        elif provider in {"mysql", "mariadb"}:
+            result = self._mysql_query(cfg, sql, max_rows=max_rows, timeout=timeout)
+        else:
+            raise ValueError(f"Unsupported database provider: {provider}")
+        result.setdefault("connection", connection)
+        result.setdefault("read_only", not allow_write)
+        result.setdefault("max_rows", max(1, min(5000, int(max_rows))))
+        result.setdefault("has_more", bool(result.get("truncated")))
+        return result
 
     def schema(self, connection: str, max_rows: int = 500) -> dict:
         cfg = self._connection(connection)
@@ -256,7 +259,6 @@ class DatabaseService:
                 argv += [flag, str(value)]
         return self._cli_query("mysql", argv, self._secret_env(cfg, "MYSQL_PWD"), max_rows, timeout)
 
-    @staticmethod
     @staticmethod
     def _cli_query(provider: str, argv: list[str], env: dict, max_rows: int, timeout: int) -> dict:
         """Run a DB CLI with disk-backed capture so large query output cannot exhaust RAM."""

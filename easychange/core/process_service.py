@@ -77,13 +77,27 @@ class ProcessService:
         return data if isinstance(data, dict) else None
 
     @staticmethod
+    @staticmethod
+    def _hash_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                while True:
+                    block = handle.read(1024 * 1024)
+                    if not block:
+                        break
+                    digest.update(block)
+        except OSError:
+            return hashlib.sha256(b"").hexdigest()
+        return digest.hexdigest()
+    @staticmethod
     def _tail_file(path: Path, limit: int) -> tuple[str, int, str]:
         try:
             with path.open("rb") as handle:
                 size = handle.seek(0, 2)
                 handle.seek(max(0, size - max(512, int(limit))))
                 payload = handle.read()
-            return payload.decode("utf-8", errors="replace"), size, hashlib.sha256(path.read_bytes()).hexdigest()
+            return payload.decode("utf-8", errors="replace"), size, ProcessService._hash_file(path)
         except OSError:
             return "", 0, hashlib.sha256(b"").hexdigest()
 
@@ -95,27 +109,20 @@ class ProcessService:
         stdout, stdout_size, stdout_hash = self._tail_file(item.stdout_path, 32000 if code == 0 else 64000)
         stderr, stderr_size, stderr_hash = self._tail_file(item.stderr_path, 32000 if code == 0 else 64000)
         state = "CANCELLED" if cancelled else ("SUCCEEDED" if code == 0 else "FAILED")
+        finished_at = time.time()
+        started_at = float(current.get("started_at") or finished_at)
         result = {
-            **current,
-            "job_id": job_id,
-            "process_id": item.process_id,
-            "pid": item.process.pid,
-            "argv": item.argv,
-            "state": state,
-            "returncode": code,
-            "finished_at": time.time(),
-            "stdout": stdout,
-            "stderr": stderr,
-            "stdout_chars": stdout_size,
-            "stderr_chars": stderr_size,
-            "stdout_hash": stdout_hash,
-            "stderr_hash": stderr_hash,
+            **current, "job_id": job_id, "process_id": item.process_id, "pid": item.process.pid,
+            "argv": item.argv, "state": state, "returncode": code, "finished_at": finished_at,
+            "duration_ms": int(max(0.0, finished_at - started_at) * 1000),
+            "stdout": stdout, "stderr": stderr, "stdout_chars": stdout_size, "stderr_chars": stderr_size,
+            "stdout_bytes": stdout_size, "stderr_bytes": stderr_size,
+            "stdout_hash": stdout_hash, "stderr_hash": stderr_hash,
             "diagnostics": _diagnostics(stdout, stderr),
-            "result_hash": hashlib.sha256(
-                (stdout_hash + ":" + stderr_hash + ":" + str(code)).encode("ascii")
-            ).hexdigest(),
+            "result_hash": hashlib.sha256((stdout_hash + ":" + stderr_hash + ":" + str(code)).encode("ascii")).hexdigest(),
             "output_truncated": stdout_size > len(stdout.encode("utf-8", errors="replace"))
                                 or stderr_size > len(stderr.encode("utf-8", errors="replace")),
+            "terminal": True,
         }
         self._write_job(job_id, result)
         return result
@@ -147,16 +154,20 @@ class ProcessService:
             code = item.process.poll()
             if code is None:
                 if current is None:
-                    current = {
-                        "job_id": job_id, "process_id": job_id, "pid": item.process.pid,
-                        "argv": item.argv, "state": "RUNNING", "started_at": time.time(),
-                    }
+                    current = {"job_id": job_id, "process_id": job_id, "pid": item.process.pid,
+                               "argv": item.argv, "state": "RUNNING", "started_at": time.time()}
                     self._write_job(job_id, current)
-                return {k: v for k, v in current.items() if k not in {"stdout", "stderr"}}
+                snapshot = {k: v for k, v in current.items() if k not in {"stdout", "stderr"}}
+                started = float(snapshot.get("started_at") or time.time())
+                snapshot["duration_ms"] = int(max(0.0, time.time() - started) * 1000)
+                snapshot["terminal"] = False
+                return snapshot
             current = self._finalize_job(job_id, item)
         if current is None:
             raise LookupError(f"Job not found: {job_id}")
-        return {k: v for k, v in current.items() if k not in {"stdout", "stderr"}}
+        snapshot = {k: v for k, v in current.items() if k not in {"stdout", "stderr"}}
+        snapshot.setdefault("terminal", snapshot.get("state") != "RUNNING")
+        return snapshot
 
     def job_result(self, job_id: str) -> dict:
         item = self._processes.get(job_id)
@@ -166,13 +177,13 @@ class ProcessService:
         if current is None:
             raise LookupError(f"Job not found: {job_id}")
         if current.get("state") == "RUNNING":
-            return {
-                "job_id": job_id,
-                "state": "RUNNING",
-                "pid": current.get("pid"),
-                "started_at": current.get("started_at"),
-            }
-        return current
+            started = float(current.get("started_at") or time.time())
+            return {"job_id": job_id, "state": "RUNNING", "pid": current.get("pid"),
+                    "started_at": current.get("started_at"),
+                    "duration_ms": int(max(0.0, time.time() - started) * 1000), "terminal": False}
+        result = dict(current)
+        result.setdefault("terminal", True)
+        return result
 
     def job_cancel(self, job_id: str) -> dict:
         item = self._processes.get(job_id)
@@ -265,15 +276,20 @@ class ProcessService:
                 except OSError:
                     continue
 
+            stdout = tail(stdout_path, tail_limit)
+            stderr = tail(stderr_path, tail_limit)
             self.last_execution = {
                 "argv": argv,
                 "returncode": completed.returncode,
-                "stdout": tail(stdout_path, tail_limit),
-                "stderr": tail(stderr_path, tail_limit),
+                "stdout": stdout,
+                "stderr": stderr,
                 "diagnostics": "\n".join(diagnostics[-200:])[-12000:],
                 "stdout_chars": stdout_size,
                 "stderr_chars": stderr_size,
-                "output_truncated": stdout_size > tail_limit or stderr_size > tail_limit,
+                "stdout_bytes": stdout_size,
+                "stderr_bytes": stderr_size,
+                "output_truncated": stdout_size > len(stdout.encode("utf-8", errors="replace"))
+                                    or stderr_size > len(stderr.encode("utf-8", errors="replace")),
                 "duration_ms": int((time.monotonic() - started) * 1000),
                 "capture_backend": "tempfile-tail",
             }
@@ -352,23 +368,40 @@ class ProcessService:
 
     def logs(self, process_id: str, limit: int = 12000) -> dict:
         item = self._processes.get(process_id)
+        size_limit = max(512, int(limit))
         if item is None:
-            raise LookupError(f"Process not found: {process_id}")
-        def tail(path: Path) -> str:
+            current = self._read_job(process_id)
+            if current is None:
+                raise LookupError(f"Process not found: {process_id}")
+            stdout = str(current.get("stdout") or "")
+            stderr = str(current.get("stderr") or "")
+            return {
+                "process_id": process_id, "job_id": current.get("job_id") or process_id,
+                "state": current.get("state"), "returncode": current.get("returncode"),
+                "stdout": stdout[-size_limit:], "stderr": stderr[-size_limit:],
+                "stdout_bytes": current.get("stdout_bytes", current.get("stdout_chars")),
+                "stderr_bytes": current.get("stderr_bytes", current.get("stderr_chars")),
+                "output_truncated": bool(current.get("output_truncated")) or len(stdout) > size_limit or len(stderr) > size_limit,
+                "durable": True, "terminal": current.get("state") != "RUNNING",
+            }
+        def tail(path: Path) -> tuple[str, int]:
             try:
-                size_limit = max(512, int(limit))
                 with path.open("rb") as handle:
                     size = handle.seek(0, 2)
                     handle.seek(max(0, size - size_limit))
-                    return handle.read().decode("utf-8", errors="replace")
+                    return handle.read().decode("utf-8", errors="replace"), size
             except OSError:
-                return ""
+                return "", 0
+        stdout, stdout_size = tail(item.stdout_path)
+        stderr, stderr_size = tail(item.stderr_path)
+        running = item.process.poll() is None
         return {
-            "process_id": process_id,
-            "state": "RUNNING" if item.process.poll() is None else "EXITED",
-            "returncode": item.process.poll(),
-            "stdout": tail(item.stdout_path),
-            "stderr": tail(item.stderr_path),
+            "process_id": process_id, "state": "RUNNING" if running else "EXITED",
+            "returncode": item.process.poll(), "stdout": stdout, "stderr": stderr,
+            "stdout_bytes": stdout_size, "stderr_bytes": stderr_size,
+            "output_truncated": stdout_size > len(stdout.encode("utf-8", errors="replace"))
+                                or stderr_size > len(stderr.encode("utf-8", errors="replace")),
+            "durable": False, "terminal": not running,
         }
 
     def stop_all(self) -> None:

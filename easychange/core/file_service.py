@@ -106,20 +106,31 @@ class FileService:
                 raise ValueError(f"File exceeds text read limit ({MAX_TEXT_FILE_BYTES} bytes)")
             lines = data.decode("utf-8-sig").splitlines()
             digest = hashlib.sha256(data).hexdigest()
-            # Use the post-read stat for cache identity. Atomic external replaces
-            # between the first stat and read cannot poison a future cache hit.
             post = target.stat()
             self._read_cache_put(relative, post.st_size, post.st_mtime_ns, digest, lines)
         else:
             digest, lines = cached
         with self._guard:
             self._baselines[relative] = digest
-        start = max(1, start)
-        chunk = lines[start - 1:start - 1 + max(1, count)]
-        return {"path": relative, "start": start,
-                "total_lines": len(lines), "hash": digest[:12],
-                "cache_hit": cache_hit,
-                "lines": [f"{i}|{line}" for i, line in enumerate(chunk, start)]}
+        start = max(1, int(start))
+        requested_count = max(1, int(count))
+        chunk = lines[start - 1:start - 1 + requested_count]
+        returned_lines = len(chunk)
+        has_more = start - 1 + returned_lines < len(lines)
+        return {
+            "path": relative,
+            "start": start,
+            "total_lines": len(lines),
+            "hash": digest[:12],
+            "cache_hit": cache_hit,
+            "lines": [f"{i}|{line}" for i, line in enumerate(chunk, start)],
+            "requested_count": requested_count,
+            "returned_lines": returned_lines,
+            "content_bytes": sum(len(line.encode("utf-8")) for line in chunk),
+            "has_more": has_more,
+            "next_start": start + returned_lines if has_more else None,
+            "previous_start": max(1, start - requested_count) if start > 1 else None,
+        }
 
     def _read_for_edit(self, path: str) -> tuple[Path, str, str]:
         """Read one editable text snapshot and establish/verify its baseline."""
