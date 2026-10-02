@@ -509,6 +509,204 @@ class Indexer:
         return page
 
 
+    def discover_many(self, terms: list[str], *, limit_per_term: int = 12,
+                      definitions_per_term: int = 6, references_per_term: int = 24) -> dict:
+        """Resolve many definitions/usages with one cold Git scan or parallel warm-index queries."""
+        started = time.perf_counter()
+        clean: list[str] = []
+        seen_terms: set[str] = set()
+        for value in terms or []:
+            term = str(value or "").strip()
+            key = term.casefold()
+            if not term or key in seen_terms:
+                continue
+            seen_terms.add(key)
+            clean.append(term)
+            if len(clean) >= 32:
+                break
+        if not clean:
+            return {
+                "terms": [], "by_term": {}, "impact_files": [], "files": [],
+                "engine": "none", "single_pass": True, "duration_ms": 0.0,
+            }
+
+        limit_per_term = max(1, min(50, int(limit_per_term)))
+        definitions_per_term = max(1, min(20, int(definitions_per_term)))
+        references_per_term = max(1, min(100, int(references_per_term)))
+        by_term: dict[str, dict] = {
+            term: {"definitions": [], "references": [], "files": [], "occurrences": 0}
+            for term in clean
+        }
+        file_counts: dict[str, dict[str, object]] = {}
+        cold_git = bool(not self._fully_indexed and (self.root / ".git").exists())
+        engine = "git-grep" if cold_git else ("sqlite-fts5" if self._fts_enabled else "sqlite-index")
+
+        def term_matches(term: str, text: str) -> bool:
+            if re.fullmatch(r"[A-Za-z_$][\w$]*", term):
+                return re.search(
+                    rf"(?<![\w$]){re.escape(term)}(?![\w$])", text, re.IGNORECASE
+                ) is not None
+            return term.casefold() in text.casefold()
+
+        def record_reference(term: str, item: dict) -> None:
+            bucket = by_term[term]
+            bucket["occurrences"] = int(bucket["occurrences"]) + 1
+            if len(bucket["references"]) < references_per_term:
+                bucket["references"].append(item)
+            path = str(item.get("file") or "")
+            if not path:
+                return
+            if path not in bucket["files"]:
+                bucket["files"].append(path)
+            aggregate = file_counts.setdefault(
+                path, {"file": path, "occurrences": 0, "terms": []}
+            )
+            aggregate["occurrences"] = int(aggregate["occurrences"]) + 1
+            if term not in aggregate["terms"]:
+                aggregate["terms"].append(term)
+
+        if cold_git:
+            argv = ["git", "grep", "-n", "-I", "-i", "-F"]
+            for term in clean:
+                argv += ["-e", term]
+            argv += ["--"]
+            rows: list[tuple[str, int, str]] = []
+            try:
+                completed = subprocess.run(
+                    argv, cwd=self.root, text=True, capture_output=True,
+                    timeout=10, check=False, shell=False,
+                )
+                if completed.returncode in {0, 1}:
+                    for line in (completed.stdout or "").splitlines():
+                        parts = line.split(":", 2)
+                        if len(parts) != 3:
+                            continue
+                        try:
+                            number = int(parts[1])
+                        except ValueError:
+                            continue
+                        rows.append((parts[0].replace("\\", "/"), number, parts[2].rstrip()))
+            except (OSError, subprocess.TimeoutExpired):
+                rows = []
+
+            wanted_names = {term.casefold(): term for term in clean}
+            hard_occurrence_cap = max(references_per_term, limit_per_term * 4)
+            for file_path, line_no, line_text in rows:
+                matched_terms = [term for term in clean if term_matches(term, line_text)]
+                if not matched_terms:
+                    continue
+                for term in matched_terms:
+                    if int(by_term[term]["occurrences"]) < hard_occurrence_cap:
+                        record_reference(term, {
+                            "file": file_path,
+                            "line": line_no,
+                            "text": line_text,
+                            "score": self._score_match(term, file_path, line_text),
+                        })
+
+                for kind, pattern in _SYMBOL_PATTERNS:
+                    match = pattern.match(line_text)
+                    if not match:
+                        continue
+                    symbol_name = match.group(1)
+                    term = wanted_names.get(symbol_name.casefold())
+                    if term is not None and len(by_term[term]["definitions"]) < definitions_per_term:
+                        by_term[term]["definitions"].append({
+                            "file": file_path,
+                            "name": symbol_name,
+                            "kind": kind if kind != "python" else "function",
+                            "line": line_no,
+                            "column": max(1, len(line_text) - len(line_text.lstrip()) + 1),
+                            "signature": line_text.strip(),
+                        })
+                    break
+            self.start_background_refresh()
+        else:
+            if not self._fully_indexed:
+                self.refresh()
+
+            def resolve_term(term: str) -> tuple[str, list[dict], list[dict]]:
+                definitions = self.symbols(name=term)[:definitions_per_term]
+                candidates = self.search(
+                    term,
+                    limit=min(300, max(references_per_term * 3, references_per_term)),
+                )
+                references = [
+                    item for item in candidates
+                    if term_matches(term, str(item.get("text") or ""))
+                ]
+                return term, definitions, references[:references_per_term]
+
+            workers = min(_INDEX_WORKERS, len(clean))
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="easychange-discover"
+            ) as pool:
+                resolved = list(pool.map(resolve_term, clean))
+            for term, definitions, references in resolved:
+                by_term[term]["definitions"] = definitions
+                for item in references:
+                    record_reference(term, item)
+
+        impact_files = list(file_counts.values())
+        impact_files.sort(
+            key=lambda item: (
+                -len(item.get("terms") or []),
+                -int(item.get("occurrences") or 0),
+                str(item.get("file") or "").casefold(),
+            )
+        )
+        for term in clean:
+            bucket = by_term[term]
+            refs = list(bucket["references"])
+            refs.sort(
+                key=lambda item: (
+                    -int(item.get("score") or 0),
+                    str(item.get("file") or "").casefold(),
+                    int(item.get("line") or 0),
+                )
+            )
+            definition_locations = {
+                (str(item.get("file") or ""), int(item.get("line") or 0))
+                for item in bucket["definitions"]
+                if isinstance(item, dict)
+            }
+            compact_refs = []
+            for item in refs:
+                if (
+                    str(item.get("file") or ""),
+                    int(item.get("line") or 0),
+                ) in definition_locations:
+                    continue
+                value = dict(item)
+                value.pop("score", None)
+                text = str(value.get("text") or "")
+                if len(text) > 320:
+                    value["text"] = text[:319] + "…"
+                    value["text_truncated"] = True
+                compact_refs.append(value)
+                if len(compact_refs) >= references_per_term:
+                    break
+            for definition in bucket["definitions"]:
+                if isinstance(definition, dict):
+                    signature = str(definition.get("signature") or "")
+                    if len(signature) > 320:
+                        definition["signature"] = signature[:319] + "…"
+                        definition["signature_truncated"] = True
+            bucket["references"] = compact_refs
+            bucket["files"] = list(bucket["files"])[:32]
+
+        return {
+            "terms": clean,
+            "by_term": by_term,
+            "impact_files": impact_files[:64],
+            "files": [item["file"] for item in impact_files[:64]],
+            "engine": engine,
+            "single_pass": cold_git,
+            "index_state": "READY" if self._fully_indexed else "WARMING",
+            "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+
+
 def _language(extension: str) -> str:
     return {".py": "python", ".cs": "csharp", ".js": "javascript", ".ts": "typescript",
             ".java": "java", ".kt": "kotlin", ".rs": "rust", ".go": "go", ".cpp": "cpp",

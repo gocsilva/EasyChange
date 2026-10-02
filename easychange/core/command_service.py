@@ -564,6 +564,118 @@ class CommandService:
             if persist:
                 self._persist_state(result)
             return result
+    def _read_regions_data(self, regions: list[dict], *, max_bytes: int = 2097152,
+                           merge_overlaps: bool = True) -> dict:
+        """Bulk-read arbitrary source ranges with overlap coalescing and a hard response budget."""
+        if not isinstance(regions, list) or not 1 <= len(regions) <= 64:
+            raise ValueError("read_regions requires 1 to 64 regions")
+        normalized: list[dict] = []
+        for item in regions:
+            if not isinstance(item, dict):
+                raise ValueError("read_regions entries must be objects")
+            path = item.get("path")
+            start = item.get("start", 1)
+            count = item.get("count", 40)
+            if not isinstance(path, str) or not path.strip():
+                raise ValueError("read_regions path is required")
+            if isinstance(start, bool) or not isinstance(start, int):
+                raise ValueError("read_regions start must be an integer")
+            if isinstance(count, bool) or not isinstance(count, int):
+                raise ValueError("read_regions count must be an integer")
+            normalized.append({
+                "path": self._resolve_ref(path.strip()),
+                "start": max(1, int(start)),
+                "count": max(1, min(2400, int(count))),
+            })
+
+        requested_count = len(normalized)
+        if merge_overlaps:
+            grouped: dict[str, list[tuple[int, int]]] = {}
+            order: list[str] = []
+            for item in normalized:
+                path = item["path"]
+                if path not in grouped:
+                    grouped[path] = []
+                    order.append(path)
+                start = int(item["start"])
+                grouped[path].append((start, start + int(item["count"]) - 1))
+            merged: list[dict] = []
+            for path in order:
+                ranges = sorted(grouped[path])
+                current_start = current_end = None
+                for start, end in ranges:
+                    if current_start is None:
+                        current_start, current_end = start, end
+                    elif start <= current_end + 2:
+                        current_end = max(current_end, end)
+                    else:
+                        merged.append({
+                            "path": path,
+                            "start": current_start,
+                            "count": current_end - current_start + 1,
+                        })
+                        current_start, current_end = start, end
+                if current_start is not None:
+                    merged.append({
+                        "path": path,
+                        "start": current_start,
+                        "count": current_end - current_start + 1,
+                    })
+            normalized = merged[:64]
+
+        workers = min(12, len(normalized))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="easychange-regions") as pool:
+            loaded = list(pool.map(
+                lambda item: self.files.read(item["path"], item["start"], item["count"]),
+                normalized,
+            ))
+
+        max_bytes = max(32768, min(8388608, int(max_bytes)))
+        output = []
+        skipped = []
+        total_bytes = 0
+        for position, (spec, info) in enumerate(zip(normalized, loaded)):
+            value = {
+                "path": info.get("path") or spec["path"],
+                "start": info.get("start", spec["start"]),
+                "requested_count": spec["count"],
+                "returned_count": len(info.get("lines") or []),
+                "total_lines": info.get("total_lines"),
+                "hash": info.get("hash"),
+                "lines": list(info.get("lines") or []),
+            }
+            encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            if total_bytes + len(encoded) > max_bytes:
+                if not output:
+                    lines = list(value["lines"])
+                    while len(encoded) > max_bytes and len(lines) > 1:
+                        lines = lines[:max(1, len(lines) // 2)]
+                        value["lines"] = lines
+                        value["returned_count"] = len(lines)
+                        value["budget_truncated"] = True
+                        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                    output.append(value)
+                    total_bytes += len(encoded)
+                    skipped.extend(normalized[position + 1:])
+                else:
+                    skipped.extend(normalized[position:])
+                break
+            output.append(value)
+            total_bytes += len(encoded)
+
+        return {
+            "regions": output,
+            "count": len(output),
+            "requested": requested_count,
+            "coalesced": len(normalized),
+            "raw_bytes": total_bytes,
+            "byte_budget": max_bytes,
+            "truncated": bool(skipped) or any(bool(item.get("budget_truncated")) for item in output),
+            "skipped": skipped,
+            "parallel_workers": workers,
+            "merge_overlaps": bool(merge_overlaps),
+        }
+
     def _execute_structured(self, payload: dict, *, persist: bool = True) -> Result:
         """Execute bounded HID-delivered operations; read-only batches avoid transactions."""
         started = time.monotonic()
@@ -794,6 +906,88 @@ class CommandService:
                         if kind in {"locate", "study"} and isinstance(item.get("context"), int):
                             args += ["--context", str(item["context"])]
                         result = self.execute_tokens(kind, args, raw=f"EC1 {kind} {query}", persist=sub_persist)
+                elif kind == "discover_many":
+                    terms = item.get("terms")
+                    if not isinstance(terms, list) or not 1 <= len(terms) <= 32 or not all(
+                        isinstance(term, str) and term.strip() for term in terms
+                    ):
+                        result = Result(False, kind, error="TERMS_REQUIRES_1_TO_32_STRINGS",
+                                        code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        data = self.indexer.discover_many(
+                            terms,
+                            limit_per_term=max(1, min(50, int(item.get("limit") or 12))),
+                            definitions_per_term=max(1, min(20, int(item.get("definitions") or 4))),
+                            references_per_term=max(1, min(100, int(item.get("references") or 12))),
+                        )
+                        radius = max(0, min(30, int(item.get("context") or 0)))
+                        if radius > 0:
+                            context_files = max(1, min(16, int(item.get("context_files") or 8)))
+                            hits_per_file = max(1, min(8, int(item.get("hits_per_file") or 2)))
+                            selected_paths = [
+                                str(entry.get("file"))
+                                for entry in (data.get("impact_files") or [])[:context_files]
+                                if isinstance(entry, dict) and entry.get("file")
+                            ]
+                            regions = []
+                            by_term = data.get("by_term") or {}
+                            for path in selected_paths:
+                                lines = []
+                                for bucket in by_term.values():
+                                    if not isinstance(bucket, dict):
+                                        continue
+                                    for ref in list(bucket.get("definitions") or []) + list(bucket.get("references") or []):
+                                        if isinstance(ref, dict) and str(ref.get("file") or "") == path:
+                                            try:
+                                                lines.append(int(ref.get("line")))
+                                            except (TypeError, ValueError):
+                                                pass
+                                chosen = []
+                                for line_no in sorted(set(lines)):
+                                    if any(abs(line_no - prior) <= radius for prior in chosen):
+                                        continue
+                                    chosen.append(line_no)
+                                    if len(chosen) >= hits_per_file:
+                                        break
+                                for line_no in chosen:
+                                    regions.append({
+                                        "path": path,
+                                        "start": max(1, line_no - radius),
+                                        "count": radius * 2 + 1,
+                                    })
+                            if regions:
+                                data["context_pack"] = self._read_regions_data(
+                                    regions,
+                                    max_bytes=max(32768, min(
+                                        4194304, int(item.get("context_max_bytes") or 1048576)
+                                    )),
+                                    merge_overlaps=True,
+                                )
+                            else:
+                                data["context_pack"] = {
+                                    "regions": [], "count": 0, "requested": 0,
+                                    "coalesced": 0, "raw_bytes": 0, "truncated": False,
+                                }
+                        for bucket in (data.get("by_term") or {}).values():
+                            if isinstance(bucket, dict) and isinstance(bucket.get("references"), list):
+                                bucket["references"] = self._register_matches(bucket["references"])
+                        result = Result(True, kind, data=data)
+                elif kind == "read_regions":
+                    regions = item.get("regions")
+                    if not isinstance(regions, list):
+                        result = Result(False, kind, error="REGIONS_REQUIRED",
+                                        code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        try:
+                            data = self._read_regions_data(
+                                regions,
+                                max_bytes=int(item.get("max_bytes") or 2097152),
+                                merge_overlaps=bool(item.get("merge_overlaps", True)),
+                            )
+                            result = Result(True, kind, data=data)
+                        except (ValueError, TypeError, OSError, PermissionError, FileNotFoundError) as exc:
+                            result = Result(False, kind, error=str(exc),
+                                            code=str(getattr(exc, "code", "") or "INVALID_READ_REGIONS"))
                 elif kind == "read_many":
                     paths = item.get("paths")
                     if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
@@ -1073,7 +1267,7 @@ class CommandService:
     def _dispatch(self, name: str, args: list[str]) -> dict:
         if name in {
             "files", "tree", "projects", "next", "prev",
-            "search", "locate", "study",
+            "search", "locate", "study", "discover-many",
             "symbols", "symbol", "definition", "references", "implementations", "outline",
         } and self._transaction_dirty_paths:
             # Preserve read-after-write semantics while allowing mutation-only
@@ -1082,7 +1276,7 @@ class CommandService:
         if name in {"help", "capabilities"}:
             return {"commands": ["state", "workspace", "pwd", "files", "tree", "next", "prev", "read", "head", "tail", "context", "goto",
                     "search", "find", "index", "symbols", "symbol", "definition", "references", "implementations", "outline", "file-summary",
-                    "locate", "study", "read-many", "validate", "edit-result",
+                    "locate", "study", "discover-many", "read-many", "validate", "edit-result",
                     "runtime-profile", "run-project", "test-smart", "test-evidence",
                     "swagger-evidence", "evidence", "process-logs",
                     "db-connections", "db-schema", "db-query",
@@ -1094,6 +1288,10 @@ class CommandService:
                     "build_test": self.workspace.adapters, "index": True, "symbols": True,
                     "ai_machine": {"optical_protocol": "EC2", "qr_slots": 16, "chunked_results": True,
                                    "optical_burst": True, "composite_study": True, "read_many": True,
+                                   "mass_discovery": True, "mass_discovery_max_terms": 32,
+                                   "cold_discovery": "single-git-grep-multi-pattern",
+                                   "mass_read_regions": True, "read_regions_max": 64,
+                                   "discovery_context_pack": True,
                                    "read_many_max_files": 64, "read_many_byte_budget": True,
                                    "structured_max_operations": 64, "expected_hash_guards": True,
                                    "validate": True, "cold_search": "git-grep", "warm_search": "sqlite-fts5"},
@@ -1201,6 +1399,36 @@ class CommandService:
                     match["context"] = self.files.read(match["file"], start, radius * 2 + 1)["lines"]
                 return {"query": query, "count": len(matches), "matches": matches}
             return {"page": offset // limit + 1, "matches": matches}
+
+        if name == "discover-many":
+            _require(args, 1, "one or more symbols/search terms")
+            limit = _option_int(args, "--limit", 12, minimum=1, maximum=50)
+            definitions = _option_int(args, "--definitions", 4, minimum=1, maximum=20)
+            references = _option_int(args, "--references", 12, minimum=1, maximum=100)
+            option_names = {"--limit", "--definitions", "--references"}
+            terms = []
+            skip = False
+            for value in args:
+                if skip:
+                    skip = False
+                    continue
+                if value in option_names:
+                    skip = True
+                    continue
+                if value and value not in terms:
+                    terms.append(value)
+            if not terms or len(terms) > 32:
+                raise ValueError("discover-many requires 1 to 32 terms")
+            data = self.indexer.discover_many(
+                terms,
+                limit_per_term=limit,
+                definitions_per_term=definitions,
+                references_per_term=references,
+            )
+            for bucket in (data.get("by_term") or {}).values():
+                if isinstance(bucket, dict) and isinstance(bucket.get("references"), list):
+                    bucket["references"] = self._register_matches(bucket["references"])
+            return data
 
         if name == "study":
             _require(args, 1, "symbol or search term")

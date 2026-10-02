@@ -1371,3 +1371,193 @@ def test_job_start_is_idempotent_by_job_id_and_conflicting_argv_is_rejected(tmp_
     assert not conflict.ok
     assert "JOB_ID_CONFLICT" in (conflict.error or "")
     service.processes.job_cancel("JIDEMP1")
+
+
+def test_discover_many_returns_definitions_references_and_impact(service, tmp_path):
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "Feature.cs").write_text(
+        "public sealed class Feature { public int NumeroProtocolo; }\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "Caller.cs").write_text(
+        "public sealed class Caller { Feature value = new Feature(); int x = NumeroProtocolo; }\n",
+        encoding="utf-8",
+    )
+    service.indexer.invalidate()
+
+    result = service._execute_structured({
+        "op": "operation",
+        "type": "discover_many",
+        "terms": ["Feature", "NumeroProtocolo"],
+        "limit": 8,
+        "definitions": 4,
+        "references": 8,
+    })
+
+    assert result.ok
+    data = result.data["primary"]["data"] if "primary" in result.data else result.data["results"][0]["data"]
+    assert data["terms"] == ["Feature", "NumeroProtocolo"]
+    assert data["by_term"]["Feature"]["definitions"]
+    assert data["by_term"]["Feature"]["references"]
+    assert data["by_term"]["NumeroProtocolo"]["references"]
+    assert any(item["file"].endswith("Caller.cs") for item in data["impact_files"])
+    assert data["duration_ms"] >= 0
+
+
+def test_discover_many_cli_preserves_existing_search_tools(service, tmp_path):
+    (tmp_path / "Alpha.cs").write_text(
+        "public sealed class Alpha { public void Run() {} }\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Use.cs").write_text(
+        "public sealed class Use { Alpha item = new Alpha(); }\n",
+        encoding="utf-8",
+    )
+    service.indexer.invalidate()
+
+    discovered = service.execute(":discover-many Alpha --limit 6 --definitions 4 --references 6")
+    searched = service.execute(":search Alpha")
+
+    assert discovered.ok
+    assert discovered.data["by_term"]["Alpha"]["definitions"]
+    assert discovered.data["by_term"]["Alpha"]["references"]
+    assert searched.ok and searched.data["matches"]
+
+
+def test_cold_git_discovery_uses_one_multi_pattern_process(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    from easychange.core.indexer import Indexer
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "A.cs").write_text(
+        "public sealed class Alpha { Beta value; }\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "B.cs").write_text(
+        "public sealed class Beta { Alpha value; }\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "A.cs:1:public sealed class Alpha { Beta value; }\n"
+                "B.cs:1:public sealed class Beta { Alpha value; }\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    indexer = Indexer(tmp_path)
+    try:
+        result = indexer.discover_many(["Alpha", "Beta"], references_per_term=8)
+        assert result["engine"] == "git-grep"
+        assert result["single_pass"] is True
+        assert len(calls) == 1
+        assert calls[0].count("-e") == 2
+        assert "Alpha" in calls[0] and "Beta" in calls[0]
+        assert result["by_term"]["Alpha"]["definitions"]
+        assert result["by_term"]["Beta"]["definitions"]
+    finally:
+        indexer.close()
+
+
+def test_read_regions_coalesces_overlaps_and_reads_in_parallel(service, tmp_path):
+    (tmp_path / "A.cs").write_text(
+        "\n".join(f"line {i}" for i in range(1, 121)) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "B.cs").write_text(
+        "\n".join(f"other {i}" for i in range(1, 81)) + "\n",
+        encoding="utf-8",
+    )
+    result = service._execute_structured({
+        "op": "operation",
+        "type": "read_regions",
+        "regions": [
+            {"path": "A.cs", "start": 10, "count": 12},
+            {"path": "A.cs", "start": 18, "count": 10},
+            {"path": "B.cs", "start": 30, "count": 8},
+        ],
+        "max_bytes": 262144,
+        "merge_overlaps": True,
+    })
+    assert result.ok
+    data = result.data["primary"]["data"]
+    assert data["requested"] == 3
+    assert data["coalesced"] == 2
+    assert data["count"] == 2
+    assert data["parallel_workers"] == 2
+    a = next(item for item in data["regions"] if item["path"].endswith("A.cs"))
+    assert a["start"] == 10
+    assert a["returned_count"] >= 18
+
+
+def test_discover_many_can_attach_context_pack_in_same_operation(service, tmp_path):
+    (tmp_path / "src").mkdir(exist_ok=True)
+    lines = [
+        "public sealed class Feature",
+        "{",
+        "    public int NumeroProtocolo;",
+        "    public void Run() { NumeroProtocolo++; }",
+        "}",
+        "public sealed class Caller",
+        "{",
+        "    Feature value = new Feature();",
+        "}",
+    ]
+    (tmp_path / "src" / "Feature.cs").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    service.indexer.invalidate()
+    result = service._execute_structured({
+        "op": "operation",
+        "type": "discover_many",
+        "terms": ["Feature", "NumeroProtocolo"],
+        "references": 8,
+        "context": 2,
+        "context_files": 4,
+        "hits_per_file": 2,
+        "context_max_bytes": 262144,
+    })
+    assert result.ok
+    data = result.data["primary"]["data"]
+    assert data["context_pack"]["count"] >= 1
+    joined = "\n".join(
+        line
+        for region in data["context_pack"]["regions"]
+        for line in region["lines"]
+    )
+    assert "Feature" in joined
+    assert "NumeroProtocolo" in joined
+
+
+def test_file_read_cache_reuses_snapshot_and_invalidates_external_change(service, tmp_path):
+    path = tmp_path / "cache.txt"
+    path.write_text("\n".join(f"line-{i}" for i in range(200)) + "\n", encoding="utf-8")
+
+    first = service.files.read("cache.txt", 1, 20)
+    second = service.files.read("cache.txt", 40, 20)
+
+    assert first["cache_hit"] is False
+    assert second["cache_hit"] is True
+    assert first["hash"] == second["hash"]
+
+    path.write_text("externally changed\n", encoding="utf-8")
+    changed = service.files.read("cache.txt", 1, 20)
+
+    assert changed["cache_hit"] is False
+    assert changed["lines"] == ["1|externally changed"]
+    assert changed["hash"] != first["hash"]
+
+
+def test_verified_write_refreshes_read_cache(service):
+    service.files.read("sample.py", 1, 20)
+    result = service.files.write("sample.py", "updated = True\n")
+    assert result["verified"] is True
+
+    read = service.files.read("sample.py", 1, 20)
+    assert read["cache_hit"] is True
+    assert read["lines"] == ["1|updated = True"]

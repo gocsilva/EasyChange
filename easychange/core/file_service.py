@@ -5,6 +5,7 @@ import difflib
 import hashlib
 import mimetypes
 import threading
+from collections import OrderedDict
 from pathlib import Path
 
 from .workspace import Workspace
@@ -26,10 +27,52 @@ class FileService:
         self._opened: dict[str, Path] = {}
         self._baselines: dict[str, str] = dict(baselines or {})
         self._guard = threading.RLock()
+        # Read-only hot cache. Mutation paths deliberately bypass this cache and
+        # hash the actual file again so external-change protection is unchanged.
+        self._read_cache: OrderedDict[str, tuple[int, int, str, list[str]]] = OrderedDict()
+        self._read_cache_bytes = 0
+        self._read_cache_max_entries = 32
+        self._read_cache_max_bytes = 16 * 1024 * 1024
 
     @property
     def baselines(self) -> dict[str, str]:
         with self._guard: return dict(self._baselines)
+
+    def _read_cache_get(self, relative: str, size: int, mtime_ns: int):
+        with self._guard:
+            cached = self._read_cache.get(relative)
+            if cached is None:
+                return None
+            cached_size, cached_mtime, digest, lines = cached
+            if cached_size != size or cached_mtime != mtime_ns:
+                self._read_cache.pop(relative, None)
+                self._read_cache_bytes = max(0, self._read_cache_bytes - cached_size)
+                return None
+            self._read_cache.move_to_end(relative)
+            return digest, lines
+
+    def _read_cache_put(self, relative: str, size: int, mtime_ns: int,
+                        digest: str, lines: list[str]) -> None:
+        if size > self._read_cache_max_bytes:
+            return
+        with self._guard:
+            previous = self._read_cache.pop(relative, None)
+            if previous is not None:
+                self._read_cache_bytes = max(0, self._read_cache_bytes - previous[0])
+            self._read_cache[relative] = (size, mtime_ns, digest, lines)
+            self._read_cache_bytes += size
+            while (
+                len(self._read_cache) > self._read_cache_max_entries
+                or self._read_cache_bytes > self._read_cache_max_bytes
+            ):
+                _, stale = self._read_cache.popitem(last=False)
+                self._read_cache_bytes = max(0, self._read_cache_bytes - stale[0])
+
+    def _read_cache_drop(self, relative: str) -> None:
+        with self._guard:
+            previous = self._read_cache.pop(relative, None)
+            if previous is not None:
+                self._read_cache_bytes = max(0, self._read_cache_bytes - previous[0])
 
     def list_files(self, limit: int = 500) -> list[dict[str, str]]:
         items = []
@@ -49,20 +92,33 @@ class FileService:
         target = self.workspace.resolve(path, must_exist=True)
         if not target.is_file():
             raise IsADirectoryError(str(target))
-        data = target.read_bytes()
-        if b"\0" in data:
-            raise ValueError("Binary files cannot be read as text")
-        if len(data) > MAX_TEXT_FILE_BYTES:
-            raise ValueError(f"File exceeds text read limit ({MAX_TEXT_FILE_BYTES} bytes)")
-        lines = data.decode("utf-8-sig").splitlines()
         relative = target.relative_to(self.workspace.root_path).as_posix()
-        digest = hashlib.sha256(data).hexdigest()
+        stat = target.stat()
+        if stat.st_size > MAX_TEXT_FILE_BYTES:
+            raise ValueError(f"File exceeds text read limit ({MAX_TEXT_FILE_BYTES} bytes)")
+        cached = self._read_cache_get(relative, stat.st_size, stat.st_mtime_ns)
+        cache_hit = cached is not None
+        if cached is None:
+            data = target.read_bytes()
+            if b"\0" in data:
+                raise ValueError("Binary files cannot be read as text")
+            if len(data) > MAX_TEXT_FILE_BYTES:
+                raise ValueError(f"File exceeds text read limit ({MAX_TEXT_FILE_BYTES} bytes)")
+            lines = data.decode("utf-8-sig").splitlines()
+            digest = hashlib.sha256(data).hexdigest()
+            # Use the post-read stat for cache identity. Atomic external replaces
+            # between the first stat and read cannot poison a future cache hit.
+            post = target.stat()
+            self._read_cache_put(relative, post.st_size, post.st_mtime_ns, digest, lines)
+        else:
+            digest, lines = cached
         with self._guard:
             self._baselines[relative] = digest
         start = max(1, start)
         chunk = lines[start - 1:start - 1 + max(1, count)]
         return {"path": relative, "start": start,
                 "total_lines": len(lines), "hash": digest[:12],
+                "cache_hit": cache_hit,
                 "lines": [f"{i}|{line}" for i, line in enumerate(chunk, start)]}
 
     def _read_for_edit(self, path: str) -> tuple[Path, str, str]:
@@ -144,6 +200,11 @@ class FileService:
         self._opened[path] = target
         with self._guard:
             self._baselines[relative] = actual_after_hash
+        written_stat = target.stat()
+        self._read_cache_put(
+            relative, written_stat.st_size, written_stat.st_mtime_ns,
+            actual_after_hash, content.splitlines(),
+        )
 
         return {
             "path": relative,
@@ -245,10 +306,12 @@ class FileService:
         if expected and expected != actual: raise ExternalChangeError(relative, expected, actual)
         target.unlink()
         with self._guard: self._baselines.pop(relative, None)
+        self._read_cache_drop(relative)
 
     def forget(self, path: str) -> None:
         relative = self.workspace.resolve(path).relative_to(self.workspace.root_path).as_posix()
         with self._guard: self._baselines.pop(relative, None)
+        self._read_cache_drop(relative)
 
     def remember(self, path: str, *, replace: bool = False) -> str:
         target = self.workspace.resolve(path, must_exist=True)
