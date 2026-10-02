@@ -21,6 +21,7 @@ from .indexer import Indexer
 from .ids import IdFactory
 from .journal import Journal
 from .locks import LockManager
+from .maintenance_service import MaintenanceService
 from .process_service import ProcessService
 from .operation_registry import (
     STRUCTURED_CONTINUE_SAFE_TYPES, STRUCTURED_JOB_TYPES, STRUCTURED_MUTATION_TYPES,
@@ -74,7 +75,8 @@ class CommandService:
         # immediately instead of blocking the AI on a full repository scan.
         self.indexer.start_background_refresh()
         self.journal_store = Journal(workspace.root_path / ".easychange" / "journal.jsonl", self.session_id)
-        self.journal: list[Change] = [Change(e.path, e.before, e.after, e.change_id, e.command) for e in self.journal_store.entries]
+        # Compatibility-only recent metadata; full snapshots stay lazy in Journal.
+        self.journal: list[Change] = []
         self.locks = LockManager(workspace.root_path / ".easychange" / "locks.json")
         self.transaction_path = workspace.root_path / ".easychange" / "active_transaction.json"
         self.transaction_log_path = workspace.root_path / ".easychange" / "active_transaction.jsonl"
@@ -105,7 +107,67 @@ class CommandService:
         # Persisted session state keeps hashes/summaries so read-many/study
         # cannot make session.json grow by megabytes per command.
         self._ec_result_cache: dict[str, Result] = {}
+        self._ec_result_cache_sizes: dict[str, int] = {}
+        self._ec_result_cache_max_items = 8
+        self._ec_result_cache_max_bytes = 8 * 1024 * 1024
         self.result_store = DurableResultStore(workspace.root_path / ".easychange" / "results")
+        self.maintenance = MaintenanceService(workspace.root_path)
+        self._maintenance_interval_seconds = 300.0
+        self._maintenance_last = 0.0
+        self._maintenance_report: dict = {}
+        self._run_maintenance(force=True)
+
+    def _run_maintenance(self, *, force: bool = False, dry_run: bool = False, scan_workspace_temps: bool = False) -> dict:
+        now = time.monotonic()
+        if (
+            not force
+            and self._maintenance_report
+            and now - self._maintenance_last < self._maintenance_interval_seconds
+        ):
+            return dict(self._maintenance_report)
+        process_state = self.processes.maintenance(keep_finished=8)
+        report = self.maintenance.automatic_cleanup(
+            referenced_blobs=self.journal_store.referenced_blobs(),
+            active_process_ids=self.processes.active_process_ids(),
+            dry_run=dry_run,
+            scan_workspace_temps=scan_workspace_temps,
+        )
+        report["process_memory"] = process_state
+        report["memory_bounds"] = {
+            "history_items": len(self.history),
+            "history_limit": 100,
+            "journal_entries": self.journal_store.count,
+            "journal_recent_metadata": len(self.journal),
+            "journal_recent_metadata_limit": 64,
+            "ec_result_cache_items": len(self._ec_result_cache),
+            "ec_result_cache_bytes": sum(self._ec_result_cache_sizes.values()),
+            "ec_result_cache_item_limit": self._ec_result_cache_max_items,
+            "ec_result_cache_byte_limit": self._ec_result_cache_max_bytes,
+            "navigation_results": len(self.results),
+            "navigation_results_limit": 512,
+        }
+        self._maintenance_last = now
+        self._maintenance_report = report
+        return dict(report)
+
+    def maintenance_report(self) -> dict:
+        return {
+            "last": dict(self._maintenance_report),
+            "storage": self.maintenance.stats(),
+            "memory_bounds": {
+                "history_items": len(self.history),
+                "history_limit": 100,
+                "journal_entries": self.journal_store.count,
+                "journal_recent_metadata": len(self.journal),
+                "journal_recent_metadata_limit": 64,
+                "ec_result_cache_items": len(self._ec_result_cache),
+                "ec_result_cache_bytes": sum(self._ec_result_cache_sizes.values()),
+                "ec_result_cache_item_limit": self._ec_result_cache_max_items,
+                "ec_result_cache_byte_limit": self._ec_result_cache_max_bytes,
+                "navigation_results": len(self.results),
+                "navigation_results_limit": 512,
+            },
+        }
 
     def close(self) -> None:
         if self.watcher:
@@ -330,11 +392,41 @@ class CommandService:
                 "finished_at": stored.get("finished_at"),
             }
             self.state_store.data["ec_results"] = dict(list(journal.items())[-128:])
-            self._ec_result_cache[sequence] = result
-            if len(self._ec_result_cache) > 32:
-                self._ec_result_cache = dict(list(self._ec_result_cache.items())[-32:])
+            self._remember_ec_result(sequence, result, len(serialized))
             self._persist_state(result)
         return result
+
+    def _remember_ec_result(self, sequence: str, result: Result, serialized_bytes: int) -> None:
+        """Keep a small replay hot cache; durable result_store stays authoritative."""
+        size = max(0, int(serialized_bytes))
+        if size > self._ec_result_cache_max_bytes:
+            self._ec_result_cache.pop(sequence, None)
+            self._ec_result_cache_sizes.pop(sequence, None)
+            return
+        self._ec_result_cache.pop(sequence, None)
+        self._ec_result_cache_sizes.pop(sequence, None)
+        self._ec_result_cache[sequence] = result
+        self._ec_result_cache_sizes[sequence] = size
+        while (
+            len(self._ec_result_cache) > self._ec_result_cache_max_items
+            or sum(self._ec_result_cache_sizes.values()) > self._ec_result_cache_max_bytes
+        ):
+            oldest = next(iter(self._ec_result_cache), None)
+            if oldest is None:
+                break
+            self._ec_result_cache.pop(oldest, None)
+            self._ec_result_cache_sizes.pop(oldest, None)
+
+    def _remember_journal_metadata(self, change: Change) -> None:
+        self.journal.append(Change(
+            path=change.path,
+            before=None,
+            after=None,
+            change_id=change.change_id,
+            command=change.command,
+        ))
+        if len(self.journal) > 64:
+            del self.journal[:-64]
 
     def _execute_planned_mutation_batch(self, operations: list[dict], operation: str,
                                         *, persist: bool, started: float) -> Result:
@@ -1231,6 +1323,8 @@ class CommandService:
         if name in self.aliases:
             name = self.aliases[name]
         self.history.append(raw if raw is not None else ":" + " ".join([name, *args]))
+        if len(self.history) > 100:
+            del self.history[:-100]
         self.last_command = name
         try:
             with self._guard:
@@ -1244,6 +1338,11 @@ class CommandService:
         result.duration_ms = int((time.monotonic() - started) * 1000)
         self.last_command = name
         self.last_result = result
+        if name not in {"health", "maintenance"}:
+            try:
+                self._run_maintenance()
+            except (OSError, ValueError, RuntimeError):
+                pass
         if persist:
             self._persist_state(result)
         return result
@@ -1323,7 +1422,7 @@ class CommandService:
                     "new", "mkdir", "write", "append", "insert", "replace", "replace-line", "replace-range", "delete", "rename", "move", "stat", "hash", "exists",
                     "rename-symbol", "create-class", "create-interface", "create-test", "format", "fix-imports", "organize-imports",
                     "journal", "undo", "redo", "begin", "commit", "rollback", "snapshot", "lock", "unlock", "locks", "watch", "batch", "macro", "alias", "complete", "history", "repeat", "clear",
-                    "status", "health", "diff", "branch", "log", "build", "test", "run", "processes", "stop", "errors", "next-error", "previous-error", "remote", "remote-guide", "remote-profile", "prepare-hid", "set", "machine", "human", "quit"],
+                    "status", "health", "maintenance", "diff", "branch", "log", "build", "test", "run", "processes", "stop", "errors", "next-error", "previous-error", "remote", "remote-guide", "remote-profile", "prepare-hid", "set", "machine", "human", "quit"],
                     "capabilities": {"workspace": True, "git": "GIT" in self.workspace.adapters,
                     "build_test": self.workspace.adapters, "index": True, "symbols": True,
                     "ai_machine": {"optical_protocol": "EC2", "qr_slots": 16, "chunked_results": True,
@@ -1335,6 +1434,7 @@ class CommandService:
                                    "read_many_max_files": 64, "read_many_byte_budget": True,
                                    "structured_max_operations": 64, "expected_hash_guards": True,
                                    "structured_operations": structured_capabilities(),
+                                    "automatic_maintenance": True, "maintenance_interval_seconds": 300,
                                    "validate": True, "cold_search": "git-grep", "warm_search": "sqlite-fts5"},
                     "runtime": {"profiles": True, "smart_test": True, "background_run": True,
                                 "swagger_evidence": True, "local_screenshots": True},
@@ -1342,6 +1442,14 @@ class CommandService:
                                  "postgres_cli": True, "mysql_cli": True},
                     "remote_control": {"input": "ESP32_HID", "output": "HDMI",
                                        "mcp_on_remote_pc": False, "api_on_remote_pc": False}}}
+        if name == "maintenance":
+            dry_run = "--dry-run" in args
+            scan_workspace_temps = "--workspace-temps" in args
+            return self._run_maintenance(
+                force=True,
+                dry_run=dry_run,
+                scan_workspace_temps=scan_workspace_temps,
+            )
         if name == "health":
             index = self.indexer.status()
             processes = self.processes.list()
@@ -1365,6 +1473,7 @@ class CommandService:
                 "active_processes": active_processes,
                 "durable_results": True,
                 "structured_operations": structured_capabilities(),
+                "maintenance": self.maintenance_report(),
                 "degraded_reasons": degraded_reasons,
             }
         if name == "state":
@@ -1792,23 +1901,21 @@ class CommandService:
         if name == "journal":
             offset, limit = _page_args(args, default_limit=50)
             compact = "--compact" in args or "--summary" in args
-            entries = self.journal_store.entries
-            selected = entries[offset:offset+limit]
+            total = self.journal_store.count
             if compact:
-                rendered = [{
-                    "change_id": entry.change_id, "timestamp": entry.timestamp, "command": entry.command,
-                    "path": entry.path, "before_hash": entry.before_hash, "after_hash": entry.after_hash,
-                    "transaction_id": entry.transaction_id, "source": entry.source,
-                } for entry in selected]
+                rendered = self.journal_store.metadata(offset, limit)
             else:
-                rendered = [entry.__dict__ if hasattr(entry, "__dict__") else {
-                    "change_id": entry.change_id, "timestamp": entry.timestamp, "command": entry.command,
-                    "path": entry.path, "before_hash": entry.before_hash, "after_hash": entry.after_hash,
+                selected = self.journal_store.slice(offset, offset + limit)
+                rendered = [{
+                    "change_id": entry.change_id, "session_id": entry.session_id,
+                    "timestamp": entry.timestamp, "command": entry.command, "path": entry.path,
+                    "before": entry.before, "after": entry.after,
+                    "before_hash": entry.before_hash, "after_hash": entry.after_hash,
                     "transaction_id": entry.transaction_id, "source": entry.source,
                 } for entry in selected]
-            has_more = offset + len(selected) < len(entries)
+            has_more = offset + len(rendered) < total
             return {
-                "total": len(entries), "entries": rendered, "returned": len(rendered),
+                "total": total, "entries": rendered, "returned": len(rendered),
                 "compact": compact, "has_more": has_more,
                 "next_offset": offset + limit if has_more else None,
                 "previous_offset": max(0, offset - limit) if offset > 0 else None,
@@ -1939,7 +2046,7 @@ class CommandService:
             for change in self.transaction:
                 entry = self.journal_store.record(change.command, change.path, change.before, change.after, self.transaction_id)
                 change.change_id = entry.change_id
-                self.journal.append(change)
+                self._remember_journal_metadata(change)
             self.transaction = None; self.transaction_id = None
             self._clear_transaction()
             indexed = self._flush_transaction_index()
@@ -1956,8 +2063,7 @@ class CommandService:
             return {"rolled_back": len(changes), "indexed_paths": indexed}
         if name == "undo":
             entry_id = args[0] if args else None
-            entries = self.journal_store.entries
-            entry = next((item for item in entries if item.change_id == entry_id), None) if entry_id else (entries[-1] if entries else None)
+            entry = self.journal_store.get(entry_id)
             if entry is None: raise RuntimeError("Journal is empty" if not entry_id else f"Journal entry not found: {entry_id}")
             change = Change(entry.path, entry.before, entry.after, entry.change_id, entry.command)
             self._restore(change)
@@ -1968,7 +2074,7 @@ class CommandService:
             redone = self.journal_store.redo()
             if not redone: raise RuntimeError("Redo journal is empty")
             entry = redone[0]; change = Change(entry.path, entry.before, entry.after, entry.change_id, entry.command)
-            self._apply_after(change); self.journal.append(change)
+            self._apply_after(change); self._remember_journal_metadata(change)
             return {"redone": change.path, "change_id": change.change_id}
         if name == "runtime-profile":
             if args:
@@ -2178,7 +2284,7 @@ class CommandService:
         else:
             entry = self.journal_store.record(change.command, path, before, after)
             change.change_id = entry.change_id
-            self.journal.append(change)
+            self._remember_journal_metadata(change)
 
     def _restore(self, change: Change) -> None:
         target = self.workspace.resolve(change.path)
@@ -2299,14 +2405,14 @@ class CommandService:
         if args[0] == "create":
             if self.transaction is not None: raise RuntimeError("Commit or rollback the active transaction before snapshot")
             snapshot_id = self.ids.next("SN")
-            self.snapshots[snapshot_id] = len(self.journal_store.entries)
+            self.snapshots[snapshot_id] = self.journal_store.count
             self._persist_state()
-            return {"snapshot": snapshot_id, "changes": len(self.journal_store.entries)}
+            return {"snapshot": snapshot_id, "changes": self.journal_store.count}
         if args[0] == "restore":
             _require(args, 2, "restore and snapshot ID")
             snapshot_id = args[1]
             if snapshot_id not in self.snapshots: raise LookupError(f"Snapshot not found: {snapshot_id}")
-            entries = self.journal_store.entries[self.snapshots[snapshot_id]:]
+            entries = self.journal_store.slice(self.snapshots[snapshot_id])
             for entry in reversed(entries):
                 self._restore(Change(entry.path, entry.before, entry.after, entry.change_id, entry.command))
                 self.journal_store.undo(entry.change_id)

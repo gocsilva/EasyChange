@@ -77,7 +77,6 @@ class ProcessService:
         return data if isinstance(data, dict) else None
 
     @staticmethod
-    @staticmethod
     def _hash_file(path: Path) -> str:
         digest = hashlib.sha256()
         try:
@@ -223,6 +222,24 @@ class ProcessService:
                     path.unlink(missing_ok=True)
                 except OSError:
                     pass
+    def maintenance(self, keep_finished: int = 8) -> dict:
+        before = len(self._processes)
+        self._prune_finished(keep=max(0, int(keep_finished)))
+        running = sum(1 for item in self._processes.values() if item.process.poll() is None)
+        return {
+            "tracked_before": before,
+            "tracked_after": len(self._processes),
+            "running": running,
+            "finished_retained": len(self._processes) - running,
+        }
+
+    def active_process_ids(self) -> set[str]:
+        return {
+            process_id
+            for process_id, item in self._processes.items()
+            if item.process.poll() is None
+        }
+
     def run(self, argv: list[str], timeout: int = 300) -> dict:
         """Run a command without buffering unbounded stdout/stderr in RAM."""
         if not argv:

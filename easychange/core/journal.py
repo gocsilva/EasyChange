@@ -35,7 +35,11 @@ def content_hash(value: str | None) -> str | None:
 
 
 class Journal:
-    """Append-only edit journal with content-addressed compressed large snapshots."""
+    """Append-only edit journal with lazy content-addressed snapshots.
+
+    Large before/after values remain compressed on disk and are materialized
+    only when a caller actually needs them.
+    """
 
     def __init__(self, path: Path, session_id: str) -> None:
         self.path = path
@@ -49,22 +53,39 @@ class Journal:
         self.blob_root.mkdir(parents=True, exist_ok=True)
 
         if path.exists():
-            for line in path.read_text(encoding="utf-8").splitlines():
-                try:
-                    value = json.loads(line)
-                    if value.get("type") == "meta":
-                        self._counter = max(self._counter, int(value.get("counter", 0)))
-                        self._redo = [self._deserialize_entry(item) for item in value.get("redo", [])]
-                        continue
-                    entry = self._deserialize_entry(value)
-                except (json.JSONDecodeError, TypeError, KeyError, OSError, ValueError):
-                    continue
-                self._entries.append(entry)
-                self._counter = max(self._counter, int(entry.change_id.removeprefix("CH")))
+            try:
+                stream = path.open("r", encoding="utf-8")
+            except OSError:
+                stream = None
+            if stream is not None:
+                with stream:
+                    for line in stream:
+                        try:
+                            value = json.loads(line)
+                            if value.get("type") == "meta":
+                                self._counter = max(self._counter, int(value.get("counter", 0)))
+                                self._redo = [
+                                    self._compact_from_serialized(item)
+                                    for item in value.get("redo", [])
+                                    if isinstance(item, dict)
+                                ]
+                                continue
+                            entry = self._compact_from_serialized(value)
+                        except (json.JSONDecodeError, TypeError, KeyError, OSError, ValueError):
+                            continue
+                        self._entries.append(entry)
+                        try:
+                            self._counter = max(self._counter, int(entry.change_id.removeprefix("CH")))
+                        except ValueError:
+                            pass
 
     def _store_text(self, value: str | None) -> str | None:
         if value is None:
             return None
+        if value.startswith(_BLOB_PREFIX):
+            digest = value[len(_BLOB_PREFIX):]
+            if re_full_hash(digest):
+                return value
         raw = value.encode("utf-8")
         if len(raw) < _BLOB_THRESHOLD_BYTES:
             return value
@@ -94,19 +115,61 @@ class Journal:
         value["after"] = self._store_text(entry.after)
         return value
 
-    def _deserialize_entry(self, value: dict) -> JournalEntry:
-        data = dict(value)
+    @staticmethod
+    def _compact_from_serialized(value: dict) -> JournalEntry:
+        return JournalEntry(**dict(value))
+
+    def _materialize_entry(self, entry: JournalEntry) -> JournalEntry:
+        data = asdict(entry)
         data["before"] = self._load_text(data.get("before"))
         data["after"] = self._load_text(data.get("after"))
         return JournalEntry(**data)
 
     @property
     def entries(self) -> list[JournalEntry]:
-        return list(self._entries)
+        with self._lock:
+            return [self._materialize_entry(entry) for entry in self._entries]
 
     @property
     def redo_entries(self) -> list[JournalEntry]:
-        return list(self._redo)
+        with self._lock:
+            return [self._materialize_entry(entry) for entry in self._redo]
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def metadata(self, offset: int = 0, limit: int = 50) -> list[dict]:
+        with self._lock:
+            start = max(0, int(offset))
+            selected = self._entries[start:start + max(1, int(limit))]
+            return [{
+                "change_id": entry.change_id,
+                "session_id": entry.session_id,
+                "timestamp": entry.timestamp,
+                "command": entry.command,
+                "path": entry.path,
+                "before_hash": entry.before_hash,
+                "after_hash": entry.after_hash,
+                "transaction_id": entry.transaction_id,
+                "source": entry.source,
+            } for entry in selected]
+
+    def get(self, change_id: str | None = None) -> JournalEntry | None:
+        with self._lock:
+            if not self._entries:
+                return None
+            compact = (
+                next((entry for entry in self._entries if entry.change_id == change_id), None)
+                if change_id else self._entries[-1]
+            )
+            return self._materialize_entry(compact) if compact is not None else None
+
+    def slice(self, start: int, stop: int | None = None) -> list[JournalEntry]:
+        with self._lock:
+            selected = self._entries[max(0, int(start)):stop]
+            return [self._materialize_entry(entry) for entry in selected]
 
     def record(self, command: str, path: str, before: str | None, after: str | None,
                transaction_id: str | None = None, source: str = "command") -> JournalEntry:
@@ -128,7 +191,7 @@ class Journal:
             serialized = self._serialize_entry(entry)
             with self.path.open("a", encoding="utf-8", newline="\n") as stream:
                 stream.write(json.dumps(serialized, ensure_ascii=False, separators=(",", ":")) + "\n")
-            self._entries.append(entry)
+            self._entries.append(self._compact_from_serialized(serialized))
             self._redo.clear()
             return entry
 
@@ -140,27 +203,38 @@ class Journal:
                 index = next((i for i, entry in enumerate(self._entries) if entry.change_id == change_id), None)
                 if index is None:
                     raise LookupError(f"Journal entry not found: {change_id}")
-                entry = self._entries.pop(index)
-                if any(item.path == entry.path for item in self._entries[index:]):
-                    self._entries.insert(index, entry)
+                compact = self._entries.pop(index)
+                if any(item.path == compact.path for item in self._entries[index:]):
+                    self._entries.insert(index, compact)
                     raise RuntimeError("Cannot undo this change before undoing later changes to the same file")
             else:
-                entry = self._entries.pop()
-            self._redo.append(entry)
+                compact = self._entries.pop()
+            self._redo.append(compact)
             self._rewrite()
-            return [entry]
+            return [self._materialize_entry(compact)]
 
     def redo(self) -> list[JournalEntry]:
         with self._lock:
             if not self._redo:
                 return []
-            entry = self._redo.pop()
-            self._entries.append(entry)
+            compact = self._redo.pop()
+            self._entries.append(compact)
             self._rewrite()
-            return [entry]
+            return [self._materialize_entry(compact)]
 
     def clear_redo(self) -> None:
         self._redo.clear()
+
+    def referenced_blobs(self) -> set[str]:
+        with self._lock:
+            output: set[str] = set()
+            for entry in [*self._entries, *self._redo]:
+                for value in (entry.before, entry.after):
+                    if isinstance(value, str) and value.startswith(_BLOB_PREFIX):
+                        digest = value[len(_BLOB_PREFIX):]
+                        if re_full_hash(digest):
+                            output.add(digest)
+            return output
 
     def _rewrite(self) -> None:
         temporary = self.path.with_suffix(".tmp")
@@ -178,7 +252,6 @@ class Journal:
                     separators=(",", ":"),
                 ) + "\n")
         temporary.replace(self.path)
-
 
 def re_full_hash(value: str) -> bool:
     return len(value) == 64 and all(character in "0123456789abcdef" for character in value)

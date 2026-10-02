@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QGridLayout, QHBoxLayo
                                QVBoxLayout, QWidget)
 
 from easychange.core.command_service import CommandService
+from easychange.core.maintenance_service import MaintenanceService
 from easychange.core.workspace import Workspace
 from easychange.ui.editor import BasicHighlighter, CodeEditor
 
@@ -46,7 +47,16 @@ class MainWindow(QMainWindow):
         self.select_workspace_button = QPushButton("Selecionar projeto…")
         self.select_workspace_button.setObjectName("selectWorkspaceButton")
         self.select_workspace_button.clicked.connect(self.select_workspace)
-        header_row = QHBoxLayout(); header_row.addWidget(self.header, 1); header_row.addWidget(self.select_workspace_button)
+        self.cleanup_easychange_button = QPushButton("Limpar dados do EasyChange")
+        self.cleanup_easychange_button.setObjectName("cleanupEasyChangeButton")
+        self.cleanup_easychange_button.setToolTip(
+            "Remove somente dados, caches, índices, histórico e temporários criados pelo EasyChange neste projeto."
+        )
+        self.cleanup_easychange_button.clicked.connect(self.cleanup_easychange_data)
+        header_row = QHBoxLayout()
+        header_row.addWidget(self.header, 1)
+        header_row.addWidget(self.select_workspace_button)
+        header_row.addWidget(self.cleanup_easychange_button)
 
         self.tree = QTreeWidget(); self.tree.setHeaderLabel("FILES")
         if not self._machine:
@@ -191,6 +201,96 @@ class MainWindow(QMainWindow):
             self._workspace_dialog_open = False
             self.focus_command()
 
+    def cleanup_easychange_data(self) -> None:
+        """Fully remove EasyChange-owned state from the open workspace."""
+        if self._machine:
+            return
+        workspace_path = Path(self.service.workspace.root_path).resolve()
+        answer = QMessageBox.question(
+            self,
+            "Limpar dados do EasyChange",
+            (
+                "Isso removerá somente os dados criados pelo EasyChange neste projeto:\n\n"
+                f"{workspace_path}\n\n"
+                "Serão removidos histórico/undo, índice, jobs, resultados, evidências, caches, "
+                "configurações internas do EasyChange e temporários próprios.\n\n"
+                "O código-fonte, a pasta .git e outros arquivos do projeto NÃO serão apagados.\n\n"
+                "Deseja continuar?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        active_path = self._active_path
+        editor_text = self.editor.toPlainText()
+        editor_modified = self.editor.document().isModified()
+        previous_output = self.service.output
+        old_service = self.service
+        report = None
+        try:
+            old_service.close()
+            report = MaintenanceService(workspace_path).purge_all()
+            new_service = CommandService(Workspace.open(workspace_path))
+            new_service.machine = False
+            new_service.output = previous_output
+            new_service.state_store.data["mode"] = "human"
+            new_service.state_store.data["output_mode"] = previous_output
+            new_service._persist_state()
+            self.service = new_service
+            self._machine = False
+
+            if active_path:
+                try:
+                    target = self.service.workspace.resolve(active_path, must_exist=True)
+                    if target.is_file():
+                        self.service.files.remember(active_path, replace=True)
+                        self._active_path = active_path
+                    else:
+                        self._active_path = None
+                except (OSError, ValueError, PermissionError):
+                    self._active_path = None
+
+            if editor_modified and self._active_path:
+                self.editor.setPlainText(editor_text)
+                self.editor.document().setModified(True)
+
+            self.tree.clear()
+            self._populate_tree()
+            self._apply_machine_style()
+            self._refresh_header()
+
+            reclaimed = int((report or {}).get("reclaimed_bytes") or 0)
+            removed = int((report or {}).get("removed_files") or 0)
+            self.output.setPlainText(
+                f"EasyChange limpo. Itens removidos: {removed} | "
+                f"Espaço recuperado: {reclaimed / (1024 * 1024):.2f} MiB"
+            )
+            QMessageBox.information(
+                self,
+                "Limpeza concluída",
+                (
+                    "Os dados do EasyChange foram removidos do projeto.\n\n"
+                    f"Itens removidos: {removed}\n"
+                    f"Espaço recuperado: {reclaimed / (1024 * 1024):.2f} MiB\n\n"
+                    "O projeto e o código-fonte foram preservados."
+                ),
+            )
+        except Exception as exc:
+            # Always restore a usable service even if cleanup/reinitialization failed.
+            try:
+                self.service = CommandService(Workspace.open(workspace_path))
+                self.service.machine = False
+                self._machine = False
+                self._apply_machine_style()
+                self._refresh_header()
+            except Exception:
+                pass
+            QMessageBox.critical(self, "Falha na limpeza do EasyChange", str(exc))
+        finally:
+            self.focus_command()
+
     def _populate_tree(self) -> None:
         self.tree.clear()
         for item in self.service.files.list_files():
@@ -209,6 +309,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet("QWidget { background:#101820; color:#f2f5f7; font-family: Consolas, monospace; }" if self._machine else "")
         self.tree.setVisible(not self._machine)
         self.select_workspace_button.setVisible(not self._machine)
+        self.cleanup_easychange_button.setVisible(not self._machine)
         self.output.setMaximumHeight(330 if self._machine else 190)
         if not self._machine:
             self._set_optical_burst(False)
