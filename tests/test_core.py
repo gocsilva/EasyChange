@@ -1,5 +1,6 @@
 from pathlib import Path
 import hashlib
+import json
 
 import pytest
 
@@ -128,7 +129,8 @@ def test_sequenced_command_conflict_and_unknown_are_never_replayed(service, tmp_
     }
     service._persist_state()
     unknown = service.execute(":ec QABC125 :write sample.py 'must_not_run = True'")
-    assert unknown.code == "UNKNOWN"
+    assert unknown.code == "RUNNING"
+    assert unknown.data["state"] == "RUNNING"
     assert "must_not_run" not in (tmp_path / "sample.py").read_text(encoding="utf-8")
 
 
@@ -1005,7 +1007,9 @@ def test_file_write_reads_existing_file_only_once(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
     result = service.write("one.txt", "after\n")
     assert result["created"] is False
-    assert calls["target"] == 1
+    # One baseline read plus one mandatory post-write hash verification read.
+    assert calls["target"] == 2
+    assert result["verified"] is True
     assert target.read_text(encoding="utf-8") == "after\n"
 
 
@@ -1122,8 +1126,8 @@ def test_replace_line_reuses_edit_snapshots_without_post_read(tmp_path, monkeypa
     monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
     result = service.execute(":replace-line sample.txt 2 TWO")
     assert result.ok
-    # snapshot + pre-write baseline verification + synchronous index refresh.
-    assert reads["source"] <= 3
+    # snapshot + baseline check + mandatory post-write verification + index refresh.
+    assert reads["source"] <= 4
     assert source.read_text(encoding="utf-8").replace("\r\n", "\n") == "one\nTWO\nthree\n"
 
 
@@ -1192,3 +1196,178 @@ def test_transaction_search_flushes_pending_index_for_read_after_write(tmp_path,
     committed = service.execute(":commit")
     assert committed.ok
     assert committed.data["indexed_paths"] == 0
+
+
+
+def test_patch_set_uses_original_snapshot_coordinates_when_range_changes_line_count(tmp_path):
+    path = tmp_path / "multi.txt"
+    path.write_text("".join(f"L{i}\n" for i in range(1, 121)), encoding="utf-8")
+    service = CommandService(Workspace.open(tmp_path))
+    payload = {
+        "op": "batch",
+        "operations": [
+            {"type": "replace_range", "path": "multi.txt", "start": 55, "end": 58,
+             "content": "\n".join(f"R{i}" for i in range(1, 11))},
+            {"type": "replace_line", "path": "multi.txt", "line": 99, "content": "LINE99_CHANGED"},
+        ],
+    }
+    result = service.execute(":ec QSAFEA1 :j1 " + json.dumps(payload))
+    assert result.ok, result.to_dict()
+    final = path.read_text(encoding="utf-8")
+    assert "LINE99_CHANGED\n" in final
+    assert "L99\n" not in final
+    assert "L93\n" in final
+    receipt = result.data["mutation_receipt"]
+    assert receipt["state"] == "COMMITTED"
+    assert receipt["verified"] is True
+    assert receipt["changed_files"] == 1
+
+
+def test_sequenced_write_receipt_survives_restart_and_replay_does_not_write_twice(tmp_path):
+    path = tmp_path / "receipt.txt"
+    path.write_text("before\n", encoding="utf-8")
+    service = CommandService(Workspace.open(tmp_path))
+    payload = {"op": "operation", "type": "write_file", "path": "receipt.txt", "content": "after\n"}
+    command = ":ec QSAFEB1 :j1 " + json.dumps(payload)
+    first = service.execute(command)
+    assert first.ok
+    first_receipt = first.data["mutation_receipt"]
+    assert first_receipt["state"] == "COMMITTED"
+    assert first_receipt["verified"] is True
+    assert path.read_text(encoding="utf-8") == "after\n"
+    service.close()
+
+    replacement = CommandService(Workspace.open(tmp_path))
+    def fail_if_reexecuted(*args, **kwargs):
+        raise AssertionError("write replayed instead of using durable receipt")
+    replacement.files.write = fail_if_reexecuted
+    replay = replacement.execute(command)
+    assert replay.ok
+    assert replay.data["duplicate"] is True
+    assert replay.data["mutation_receipt"] == first_receipt
+    assert path.read_text(encoding="utf-8") == "after\n"
+
+
+def test_same_sequence_structured_append_is_idempotent(tmp_path):
+    path = tmp_path / "once.txt"
+    path.write_text("base\n", encoding="utf-8")
+    service = CommandService(Workspace.open(tmp_path))
+    payload = {"op": "operation", "type": "append", "path": "once.txt", "content": "ONLY_ONCE"}
+    command = ":ec QSAFEI1 :j1 " + json.dumps(payload)
+    first = service.execute(command)
+    second = service.execute(command)
+    assert first.ok and second.ok
+    assert second.data["duplicate"] is True
+    assert path.read_text(encoding="utf-8").count("ONLY_ONCE") == 1
+
+
+def test_patch_set_rejects_overlapping_original_snapshot_edits_before_write(tmp_path):
+    path = tmp_path / "overlap.txt"
+    original = "".join(f"L{i}\n" for i in range(1, 31))
+    path.write_text(original, encoding="utf-8")
+    service = CommandService(Workspace.open(tmp_path))
+    payload = {
+        "op": "batch",
+        "operations": [
+            {"type": "replace_range", "path": "overlap.txt", "start": 10, "end": 20, "content": "BLOCK"},
+            {"type": "replace_line", "path": "overlap.txt", "line": 15, "content": "CONFLICT"},
+        ],
+    }
+    result = service.execute(":ec QSAFEJ1 :j1 " + json.dumps(payload))
+    assert not result.ok
+    assert result.code == "PATCH_OVERLAP"
+    assert result.data["transaction"]["state"] == "NOT_STARTED"
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_durable_result_store_exposes_individually_verified_chunks(tmp_path):
+    from easychange.core.result_store import DurableResultStore
+    import base64
+    import binascii
+
+    store = DurableResultStore(tmp_path / "results")
+    sequence = "QSAFEC1"
+    result = {"ok": True, "data": {"text": "x" * 6000}}
+    digest = hashlib.sha256(b"command").hexdigest()
+    store.mark_running(sequence, digest, "command", mutation=False)
+    store.complete(sequence, digest, "command", result)
+    meta = store.chunk_meta(sequence, chunk_bytes=512)
+    assert meta and meta["total_chunks"] >= 12
+
+    rebuilt = bytearray()
+    for index in range(meta["total_chunks"]):
+        chunk = store.chunk(sequence, index, chunk_bytes=512)
+        assert chunk is not None
+        payload = base64.urlsafe_b64decode(chunk["payload_b64"] + "=" * (-len(chunk["payload_b64"]) % 4))
+        assert f"{binascii.crc32(payload) & 0xFFFFFFFF:08x}" == chunk["crc32"]
+        rebuilt.extend(payload)
+    assert hashlib.sha256(bytes(rebuilt)).hexdigest() == meta["result_hash"]
+
+    missing = store.chunk(sequence, 5, chunk_bytes=512)
+    assert missing["chunk_index"] == 5
+
+
+
+def test_long_running_job_result_survives_missed_terminal_frame(tmp_path):
+    import sys
+    import time as _time
+
+    service = CommandService(Workspace.open(tmp_path))
+    job_id = "JLONG1"
+    start = service._execute_structured({
+        "op": "operation",
+        "type": "job_start",
+        "job_id": job_id,
+        "argv": [sys.executable, "-c", "import time; print('BEGIN'); time.sleep(0.15); print('BUILD_OK')"],
+    })
+    assert start.ok
+    assert start.data["state"] == "RUNNING"
+
+    deadline = _time.time() + 5
+    status = None
+    while _time.time() < deadline:
+        status = service._execute_structured({
+            "op": "operation", "type": "job_status", "job_id": job_id,
+        })
+        assert status.ok
+        if status.data["state"] != "RUNNING":
+            break
+        _time.sleep(0.03)
+
+    assert status is not None
+    assert status.data["state"] == "SUCCEEDED"
+
+    # Simulate the visual consumer missing the exact completion frame: query
+    # terminal output later through a separate operation.
+    result = service._execute_structured({
+        "op": "operation", "type": "job_result", "job_id": job_id,
+    })
+    assert result.ok
+    assert result.data["state"] == "SUCCEEDED"
+    assert result.data["returncode"] == 0
+    assert "BEGIN" in result.data["stdout"]
+    assert "BUILD_OK" in result.data["stdout"]
+    assert result.data["result_hash"]
+
+
+def test_job_start_is_idempotent_by_job_id_and_conflicting_argv_is_rejected(tmp_path):
+    import sys
+
+    service = CommandService(Workspace.open(tmp_path))
+    argv = [sys.executable, "-c", "import time; time.sleep(0.2)"]
+    first = service._execute_structured({
+        "op": "operation", "type": "job_start", "job_id": "JIDEMP1", "argv": argv,
+    })
+    second = service._execute_structured({
+        "op": "operation", "type": "job_start", "job_id": "JIDEMP1", "argv": argv,
+    })
+    assert first.ok and second.ok
+    assert first.data["pid"] == second.data["pid"]
+
+    conflict = service._execute_structured({
+        "op": "operation", "type": "job_start", "job_id": "JIDEMP1",
+        "argv": [sys.executable, "-c", "print('different')"],
+    })
+    assert not conflict.ok
+    assert "JOB_ID_CONFLICT" in (conflict.error or "")
+    service.processes.job_cancel("JIDEMP1")

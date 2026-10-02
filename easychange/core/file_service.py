@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 
 import difflib
 import hashlib
@@ -94,6 +95,7 @@ class FileService:
         created = not target.exists()
         previous_bytes = b""
         before = ""
+        before_hash = None
         if not created:
             previous_bytes = target.read_bytes()
             if b"\0" in previous_bytes:
@@ -101,6 +103,7 @@ class FileService:
             if len(previous_bytes) > MAX_TEXT_FILE_BYTES:
                 raise ValueError(f"File exceeds text write limit ({MAX_TEXT_FILE_BYTES} bytes)")
             actual_hash = hashlib.sha256(previous_bytes).hexdigest()
+            before_hash = actual_hash
             with self._guard:
                 expected_hash = self._baselines.get(relative)
             if expected_hash and actual_hash != expected_hash and not force:
@@ -110,20 +113,50 @@ class FileService:
         new_bytes = content.encode("utf-8")
         if len(new_bytes) > MAX_TEXT_FILE_BYTES:
             raise ValueError(f"File exceeds text write limit ({MAX_TEXT_FILE_BYTES} bytes)")
+        expected_after_hash = hashlib.sha256(new_bytes).hexdigest()
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        # Binary write preserves the exact UTF-8 byte sequence and lets us use
-        # new_bytes directly for the new baseline instead of reopening the file.
-        target.write_bytes(new_bytes)
+        temporary = target.with_name(f".{target.name}.easychange-{threading.get_ident()}.tmp")
+        try:
+            with temporary.open("wb") as stream:
+                stream.write(new_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+        # Do not make the caller issue a read-after-write just to know whether
+        # the mutation committed. Verify the exact bytes before returning.
+        actual_bytes = target.read_bytes()
+        actual_after_hash = hashlib.sha256(actual_bytes).hexdigest()
+        if actual_after_hash != expected_after_hash:
+            # Best-effort restoration protects against an exotic short/corrupt
+            # local write even outside a higher-level transaction.
+            if created:
+                target.unlink(missing_ok=True)
+            else:
+                recovery = target.with_name(f".{target.name}.easychange-recovery.tmp")
+                recovery.write_bytes(previous_bytes)
+                recovery.replace(target)
+            raise IOError("POST_WRITE_HASH_MISMATCH")
+
         self._opened[path] = target
         with self._guard:
-            self._baselines[relative] = hashlib.sha256(new_bytes).hexdigest()
+            self._baselines[relative] = actual_after_hash
 
-        return {"path": relative, "created": created,
-                "diff": "".join(difflib.unified_diff(
-                    before.splitlines(True), content.splitlines(True),
-                    fromfile="before", tofile="after"
-                ))}
+        return {
+            "path": relative,
+            "created": created,
+            "before_hash": before_hash,
+            "after_hash": actual_after_hash,
+            "bytes_written": len(new_bytes),
+            "verified": True,
+            "diff": "".join(difflib.unified_diff(
+                before.splitlines(True), content.splitlines(True),
+                fromfile="before", tofile="after"
+            )),
+        }
 
     def replace(self, path: str, old: str, new: str, count: int = 0) -> dict:
         _, relative, original = self._read_for_edit(path)

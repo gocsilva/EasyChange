@@ -1,4 +1,7 @@
 from __future__ import annotations
+import hashlib
+import json
+import os
 
 import re
 import subprocess
@@ -41,22 +44,169 @@ class ProcessService:
         self.cwd = cwd
         self.root = cwd / ".easychange" / "processes"
         self.root.mkdir(parents=True, exist_ok=True)
+        self.jobs_root = cwd / ".easychange" / "jobs"
+        self.jobs_root.mkdir(parents=True, exist_ok=True)
         self._processes: dict[str, RunningProcess] = {}
         self.last_execution: dict | None = None
 
+    def _job_path(self, job_id: str) -> Path:
+        safe = "".join(ch for ch in str(job_id) if ch.isalnum() or ch in "_-")
+        if not safe or safe != str(job_id):
+            raise ValueError("INVALID_JOB_ID")
+        return self.jobs_root / f"{safe}.json"
+
+    def _write_job(self, job_id: str, data: dict) -> dict:
+        target = self._job_path(job_id)
+        temporary = target.with_suffix(".json.tmp")
+        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        with temporary.open("wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(target)
+        return data
+
+    def _read_job(self, job_id: str) -> dict | None:
+        target = self._job_path(job_id)
+        if not target.exists():
+            return None
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _tail_file(path: Path, limit: int) -> tuple[str, int, str]:
+        try:
+            with path.open("rb") as handle:
+                size = handle.seek(0, 2)
+                handle.seek(max(0, size - max(512, int(limit))))
+                payload = handle.read()
+            return payload.decode("utf-8", errors="replace"), size, hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return "", 0, hashlib.sha256(b"").hexdigest()
+
+    def _finalize_job(self, job_id: str, item: RunningProcess, *, cancelled: bool = False) -> dict:
+        current = self._read_job(job_id) or {}
+        code = item.process.poll()
+        if code is None:
+            return current
+        stdout, stdout_size, stdout_hash = self._tail_file(item.stdout_path, 32000 if code == 0 else 64000)
+        stderr, stderr_size, stderr_hash = self._tail_file(item.stderr_path, 32000 if code == 0 else 64000)
+        state = "CANCELLED" if cancelled else ("SUCCEEDED" if code == 0 else "FAILED")
+        result = {
+            **current,
+            "job_id": job_id,
+            "process_id": item.process_id,
+            "pid": item.process.pid,
+            "argv": item.argv,
+            "state": state,
+            "returncode": code,
+            "finished_at": time.time(),
+            "stdout": stdout,
+            "stderr": stderr,
+            "stdout_chars": stdout_size,
+            "stderr_chars": stderr_size,
+            "stdout_hash": stdout_hash,
+            "stderr_hash": stderr_hash,
+            "diagnostics": _diagnostics(stdout, stderr),
+            "result_hash": hashlib.sha256(
+                (stdout_hash + ":" + stderr_hash + ":" + str(code)).encode("ascii")
+            ).hexdigest(),
+            "output_truncated": stdout_size > len(stdout.encode("utf-8", errors="replace"))
+                                or stderr_size > len(stderr.encode("utf-8", errors="replace")),
+        }
+        self._write_job(job_id, result)
+        return result
+
+    def job_start(self, argv: list[str], job_id: str) -> dict:
+        previous = self._read_job(job_id)
+        if previous is not None:
+            if previous.get("argv") != argv:
+                raise RuntimeError("JOB_ID_CONFLICT")
+            return self.job_status(job_id)
+        started = self.start(argv, job_id)
+        record = {
+            "job_id": job_id,
+            "process_id": job_id,
+            "pid": started["pid"],
+            "argv": list(argv),
+            "state": "RUNNING",
+            "created_at": time.time(),
+            "started_at": time.time(),
+            "finished_at": None,
+            "returncode": None,
+        }
+        return self._write_job(job_id, record)
+
+    def job_status(self, job_id: str) -> dict:
+        current = self._read_job(job_id)
+        item = self._processes.get(job_id)
+        if item is not None:
+            code = item.process.poll()
+            if code is None:
+                if current is None:
+                    current = {
+                        "job_id": job_id, "process_id": job_id, "pid": item.process.pid,
+                        "argv": item.argv, "state": "RUNNING", "started_at": time.time(),
+                    }
+                    self._write_job(job_id, current)
+                return {k: v for k, v in current.items() if k not in {"stdout", "stderr"}}
+            current = self._finalize_job(job_id, item)
+        if current is None:
+            raise LookupError(f"Job not found: {job_id}")
+        return {k: v for k, v in current.items() if k not in {"stdout", "stderr"}}
+
+    def job_result(self, job_id: str) -> dict:
+        item = self._processes.get(job_id)
+        if item is not None and item.process.poll() is not None:
+            self._finalize_job(job_id, item)
+        current = self._read_job(job_id)
+        if current is None:
+            raise LookupError(f"Job not found: {job_id}")
+        if current.get("state") == "RUNNING":
+            return {
+                "job_id": job_id,
+                "state": "RUNNING",
+                "pid": current.get("pid"),
+                "started_at": current.get("started_at"),
+            }
+        return current
+
+    def job_cancel(self, job_id: str) -> dict:
+        item = self._processes.get(job_id)
+        if item is None:
+            current = self._read_job(job_id)
+            if current is None:
+                raise LookupError(f"Job not found: {job_id}")
+            return current
+        if item.process.poll() is None:
+            item.process.terminate()
+            try:
+                item.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                item.process.kill()
+                item.process.wait(timeout=3)
+        return self._finalize_job(job_id, item, cancelled=True)
     def _prune_finished(self, keep: int = 32) -> None:
-        """Bound exited-process metadata and ephemeral log files."""
+        """Bound process objects; durable jobs are finalized before log cleanup."""
         keep = max(0, int(keep))
         finished = [
             process_id
             for process_id, item in self._processes.items()
             if item.process.poll() is not None
         ]
+        for process_id in finished:
+            item = self._processes.get(process_id)
+            if item is not None and self._job_path(process_id).exists():
+                self._finalize_job(process_id, item)
         excess = finished[:-keep] if keep else finished
         for process_id in excess:
             item = self._processes.pop(process_id, None)
             if item is None:
                 continue
+            # Terminal job metadata already contains bounded output + hashes.
             for path in (item.stdout_path, item.stderr_path):
                 try:
                     path.unlink(missing_ok=True)
@@ -158,8 +308,10 @@ class ProcessService:
     def list(self) -> list[dict]:
         self._prune_finished()
         output = []
+        seen = set()
         for key, item in list(self._processes.items()):
             code = item.process.poll()
+            seen.add(key)
             output.append({
                 "process_id": key,
                 "pid": item.process.pid,
@@ -167,6 +319,20 @@ class ProcessService:
                 "returncode": code,
                 "argv": item.argv,
             })
+        for path in sorted(self.jobs_root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:128]:
+            job_id = path.stem
+            if job_id in seen:
+                continue
+            current = self._read_job(job_id)
+            if current:
+                output.append({
+                    "process_id": job_id,
+                    "job_id": job_id,
+                    "pid": current.get("pid"),
+                    "state": current.get("state"),
+                    "returncode": current.get("returncode"),
+                    "argv": current.get("argv"),
+                })
         return output
 
     def stop(self, process_id: str) -> dict:

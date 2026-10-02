@@ -2,6 +2,8 @@ from __future__ import annotations
 from .runtime_service import ProjectRuntimeService
 from .database_service import DatabaseService
 from concurrent.futures import ThreadPoolExecutor
+from .safe_edit import SafeEditError, plan_file_mutations, text_hash
+from .result_store import DurableResultStore
 
 import shlex
 import time
@@ -99,6 +101,7 @@ class CommandService:
         # Persisted session state keeps hashes/summaries so read-many/study
         # cannot make session.json grow by megabytes per command.
         self._ec_result_cache: dict[str, Result] = {}
+        self.result_store = DurableResultStore(workspace.root_path / ".easychange" / "results")
 
     def close(self) -> None:
         if self.watcher:
@@ -138,6 +141,7 @@ class CommandService:
     def _execute_sequenced(self, sequence: str, command: str) -> Result:
         if not command:
             return Result(False, "ec", error="Empty sequenced command", code="INVALID_COMMAND", sequence=sequence)
+
         codec = None
         structured = None
         if command.casefold().startswith(":z1 "):
@@ -155,6 +159,64 @@ class CommandService:
                 return Result(False, "ec", error=str(exc), code="INVALID_STRUCTURED_PAYLOAD", sequence=sequence)
 
         digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
+        mutation_types = {
+            "write_file", "create_file", "replace_line", "replace_range", "replace_text",
+            "replace_exact", "replace_anchor", "insert_before", "insert_after", "insert", "append",
+        }
+        if structured is not None:
+            structured_op = str(structured.get("op") or "").casefold()
+            structured_items = structured.get("operations") if structured_op == "batch" else [structured]
+            is_mutation = any(
+                isinstance(item, dict) and str(item.get("type") or "").casefold() in mutation_types
+                for item in (structured_items if isinstance(structured_items, list) else [])
+            )
+        else:
+            first = command.strip().split(maxsplit=1)[0].lstrip(":").casefold() if command.strip() else ""
+            is_mutation = first in {
+                "write", "save", "force-write", "append", "insert", "replace", "replace-line",
+                "replace-range", "delete", "rename", "move", "mkdir", "new", "batch",
+            }
+
+        # Durable store is authoritative for replay. A lost HDMI frame or MCP
+        # restart therefore never requires a mutating command to execute twice.
+        durable = self.result_store.get(sequence)
+        if durable is not None:
+            if str(durable.get("command_hash") or "") != digest:
+                return Result(
+                    False, "ec", error="Sequence reused with different command",
+                    code="SEQUENCE_CONFLICT", sequence=sequence,
+                )
+            if durable.get("state") == "DONE" and isinstance(durable.get("result"), dict):
+                replay = Result(**durable["result"])
+                replay.sequence = sequence
+                replay.data = {
+                    **(replay.data or {}),
+                    "duplicate": True,
+                    "replay": {
+                        "state": "DONE",
+                        "result_hash": durable.get("result_hash"),
+                        "finished_at": durable.get("finished_at"),
+                    },
+                }
+                receipt = durable.get("mutation_receipt")
+                if isinstance(receipt, dict):
+                    replay.data["mutation_receipt"] = receipt
+                return replay
+            return Result(
+                False,
+                "ec",
+                error="Sequence is already running; query/replay the same sequence without changing the command",
+                code="RUNNING",
+                data={
+                    "state": durable.get("state") or "RUNNING",
+                    "mutation": bool(durable.get("mutation")),
+                    "started_at": durable.get("started_at"),
+                },
+                sequence=sequence,
+            )
+
+        # Preserve compatibility with the compact legacy session journal while
+        # migrating successful replays to the durable store.
         with self._guard:
             journal = dict(self.state_store.data.get("ec_results", {}))
             previous = journal.get(sequence)
@@ -162,75 +224,112 @@ class CommandService:
                 if previous.get("sha256") != digest:
                     return Result(False, "ec", error="Sequence reused with different command",
                                   code="SEQUENCE_CONFLICT", sequence=sequence)
-                if previous.get("state") != "DONE":
-                    return Result(False, "ec",
-                                  error="Execution outcome is not yet known; inspect state before continuing",
-                                  code="UNKNOWN",
-                                  data={"state": previous.get("state", "RUNNING")},
-                                  sequence=sequence)
-
                 cached = self._ec_result_cache.get(sequence)
-                if cached is not None:
+                if previous.get("state") == "DONE" and cached is not None:
                     replay = Result(**cached.to_dict())
                     replay.sequence = sequence
-                    replay.data = {**replay.data, "duplicate": True}
+                    replay.data = {**(replay.data or {}), "duplicate": True}
+                    receipt = replay.data.get("mutation_receipt") if isinstance(replay.data, dict) else None
+                    self.result_store.mark_running(sequence, digest, command, mutation=is_mutation)
+                    self.result_store.complete(
+                        sequence, digest, command, replay.to_dict(),
+                        mutation_receipt=receipt if isinstance(receipt, dict) else None,
+                    )
                     return replay
-
-                # Backward compatibility with old session files that persisted
-                # the complete Result payload.
                 legacy = previous.get("result")
-                if isinstance(legacy, dict):
+                if previous.get("state") == "DONE" and isinstance(legacy, dict):
                     replay = Result(**legacy)
                     replay.sequence = sequence
-                    replay.data = {**replay.data, "duplicate": True}
+                    replay.data = {**(replay.data or {}), "duplicate": True}
+                    receipt = replay.data.get("mutation_receipt") if isinstance(replay.data, dict) else None
+                    self.result_store.mark_running(sequence, digest, command, mutation=is_mutation)
+                    self.result_store.complete(
+                        sequence, digest, command, replay.to_dict(),
+                        mutation_receipt=receipt if isinstance(receipt, dict) else None,
+                    )
                     return replay
+                if previous.get("state") != "DONE":
+                    self.result_store.mark_running(sequence, digest, command, mutation=is_mutation)
+                    return Result(
+                        False, "ec",
+                        error="Execution is already marked RUNNING; mutation will not be replayed blindly",
+                        code="RUNNING",
+                        data={"state": previous.get("state", "RUNNING"), "mutation": is_mutation},
+                        sequence=sequence,
+                    )
 
-                # After a process restart the large payload is intentionally not
-                # persisted. Return a small proof that the sequence completed;
-                # never replay a mutation blindly.
-                return Result(
-                    bool(previous.get("ok", True)),
-                    str(previous.get("command_name") or "ec"),
-                    data={
-                        "duplicate": True,
-                        "replay": {
-                            "state": "DONE",
-                            "result_hash": previous.get("result_hash"),
-                            "original_duration_ms": previous.get("duration_ms"),
-                        },
-                    },
-                    error=previous.get("error"),
-                    code=previous.get("code"),
-                    duration_ms=0,
-                    sequence=sequence,
-                )
-
-            journal[sequence] = {"sha256": digest, "state": "RUNNING", "command": command[:256]}
+            journal[sequence] = {
+                "sha256": digest,
+                "state": "RUNNING",
+                "command": command[:256],
+                "mutation": is_mutation,
+                "started_at": time.time(),
+            }
             self.state_store.data["ec_results"] = dict(list(journal.items())[-128:])
+            self.result_store.mark_running(sequence, digest, command, mutation=is_mutation)
             self._persist_state()
 
         try:
             result = self._execute_structured(structured, persist=False) if structured is not None else self.execute(command)
         except Exception as exc:
-            result = Result(False, "ec", error="Structured operation outcome is unknown", code="UNKNOWN",
-                            data={"exception": type(exc).__name__}, sequence=sequence)
+            # A catastrophic exception during a mutating transaction must be
+            # converted into an explicit rollback receipt instead of UNKNOWN.
+            receipt = None
+            if is_mutation and self.transaction is not None:
+                try:
+                    rollback = self.execute_tokens("rollback", [], raw=":rollback", persist=False)
+                    receipt = {
+                        "mutation_id": self.transaction_id,
+                        "state": "ROLLED_BACK" if rollback.ok else "ROLLBACK_UNKNOWN",
+                        "verified": bool(rollback.ok),
+                    }
+                except Exception as rollback_exc:
+                    receipt = {
+                        "mutation_id": self.transaction_id,
+                        "state": "ROLLBACK_UNKNOWN",
+                        "verified": False,
+                        "rollback_error": type(rollback_exc).__name__,
+                    }
+            result = Result(
+                False,
+                "ec",
+                error=str(exc),
+                code="MUTATION_ROLLED_BACK" if receipt and receipt.get("state") == "ROLLED_BACK" else type(exc).__name__,
+                data={
+                    "exception": type(exc).__name__,
+                    **({"mutation_receipt": receipt} if receipt else {}),
+                },
+                sequence=sequence,
+            )
+
         result.sequence = sequence
         if codec:
-            result.data = {**result.data, "transport_codec": codec}
+            result.data = {**(result.data or {}), "transport_codec": codec}
 
+        receipt = result.data.get("mutation_receipt") if isinstance(result.data, dict) else None
+        stored = self.result_store.complete(
+            sequence,
+            digest,
+            command,
+            result.to_dict(),
+            mutation_receipt=receipt if isinstance(receipt, dict) else None,
+        )
         serialized = json.dumps(result.to_dict(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
         with self._guard:
             journal = dict(self.state_store.data.get("ec_results", {}))
             journal[sequence] = {
                 "sha256": digest,
                 "state": "DONE",
                 "command": command[:256],
+                "mutation": is_mutation,
                 "ok": result.ok,
                 "command_name": result.command,
                 "code": result.code,
                 "error": (result.error or "")[:512] or None,
                 "duration_ms": result.duration_ms,
-                "result_hash": hashlib.sha256(serialized).hexdigest(),
+                "result_hash": stored.get("result_hash") or hashlib.sha256(serialized).hexdigest(),
+                "finished_at": stored.get("finished_at"),
             }
             self.state_store.data["ec_results"] = dict(list(journal.items())[-128:])
             self._ec_result_cache[sequence] = result
@@ -239,6 +338,232 @@ class CommandService:
             self._persist_state(result)
         return result
 
+    def _execute_planned_mutation_batch(self, operations: list[dict], operation: str,
+                                        *, persist: bool, started: float) -> Result:
+        """Plan all file edits against original snapshots, then write each file once."""
+        mutation_types = {
+            "write_file", "create_file", "replace_line", "replace_range", "replace_text",
+            "replace_exact", "replace_anchor", "insert_before", "insert_after", "insert", "append",
+        }
+        normalized: list[dict] = []
+        originals: dict[str, str | None] = {}
+        actual_hashes: dict[str, str | None] = {}
+
+        try:
+            for raw in operations:
+                if not isinstance(raw, dict):
+                    raise SafeEditError("INVALID_STRUCTURED_PAYLOAD", "OPERATION_OBJECT_REQUIRED")
+                item = dict(raw)
+                kind = str(item.get("type") or "").casefold()
+                if kind == "validate":
+                    normalized.append(item)
+                    continue
+                if kind not in mutation_types:
+                    raise SafeEditError("OPERATION_NOT_ALLOWED", f"Unsupported planned mutation: {kind}")
+                path = item.get("path")
+                if not isinstance(path, str) or not path.strip():
+                    raise SafeEditError("PATH_REQUIRED", "Mutation path is required")
+                resolved = self.workspace.resolve(path.strip())
+                relative = resolved.relative_to(self.workspace.root_path).as_posix()
+                item["path"] = relative
+                self.locks.check_write(relative, self.instance_id, self.session_id)
+
+                if relative not in originals:
+                    if resolved.exists():
+                        if not resolved.is_file():
+                            raise SafeEditError("NOT_A_FILE", f"Not a file: {relative}")
+                        data = resolved.read_bytes()
+                        if b"\0" in data:
+                            raise SafeEditError("BINARY_FILE", f"Binary file cannot be patched: {relative}")
+                        originals[relative] = data.decode("utf-8-sig")
+                        actual_hashes[relative] = hashlib.sha256(data).hexdigest()
+                        self.files.remember(relative, replace=True)
+                    else:
+                        originals[relative] = None
+                        actual_hashes[relative] = None
+
+                expected_hash = item.get("expected_hash")
+                if expected_hash is not None:
+                    wanted = str(expected_hash).strip().casefold()
+                    actual = str(actual_hashes.get(relative) or "").casefold()
+                    if not wanted or not actual.startswith(wanted):
+                        raise SafeEditError(
+                            "STALE_FILE",
+                            f"File changed since study: {relative}",
+                            path=relative,
+                            expected_hash=wanted,
+                            actual_hash=actual,
+                        )
+                normalized.append(item)
+
+            mutation_ops = [item for item in normalized if str(item.get("type") or "").casefold() in mutation_types]
+            plans = plan_file_mutations(originals, mutation_ops)
+        except Exception as exc:
+            code = str(getattr(exc, "code", "") or "INVALID_STRUCTURED_PAYLOAD")
+            details = dict(getattr(exc, "details", {}) or {})
+            failure = Result(False, "structured-operation", error=str(exc), code=code, data=details)
+            result = Result(
+                False, "structured", error=str(exc), code=code,
+                data={"schema": "easychange.structured/3", "operation": operation or "operation",
+                      "results": [failure.to_dict()], "count": 1,
+                      "transaction": {"state": "NOT_STARTED"}, **details},
+                command_id=self.ids.next("C"),
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            if persist:
+                self._persist_state(result)
+            return result
+
+        opened = self.execute_tokens("begin", [], raw=":begin", persist=False)
+        if not opened.ok:
+            return opened
+        transaction_id = self.transaction_id
+        write_outcomes: dict[str, dict] = {}
+        results: list[dict] = []
+        validation_failed = False
+        rollback_data: dict = {"state": "NOT_REQUIRED"}
+
+        try:
+            self.last_command = "patch-set"
+            # Materialize every final file image exactly once. Coordinates from
+            # all operations were resolved against the original snapshots.
+            for path, plan in plans.items():
+                write_outcomes[path] = self._write(path, plan.after)
+
+            for item in normalized:
+                kind = str(item.get("type") or "").casefold()
+                if kind == "validate":
+                    args = ["--test"] if item.get("test") else []
+                    sub = self.execute_tokens("validate", args, raw="EC1 validate", persist=False)
+                    results.append(sub.to_dict())
+                    if not sub.ok:
+                        validation_failed = True
+                        break
+                    continue
+
+                path = str(item.get("path") or "")
+                plan = plans[path]
+                outcome = write_outcomes[path]
+                results.append(Result(
+                    True,
+                    kind,
+                    data={
+                        "path": path,
+                        "planned_against": "ORIGINAL_SNAPSHOT",
+                        "before_hash": plan.before_hash,
+                        "after_hash": plan.after_hash,
+                        "verified": bool(outcome.get("verified")),
+                    },
+                ).to_dict())
+
+            if validation_failed:
+                rollback = self.execute_tokens("rollback", [], raw=":rollback", persist=False)
+                rollback_data = rollback.data if rollback.ok else {"state": "UNKNOWN", "error": rollback.code}
+                receipt = {
+                    "mutation_id": transaction_id,
+                    "state": "ROLLED_BACK" if rollback.ok else "ROLLBACK_UNKNOWN",
+                    "operation_hash": hashlib.sha256(
+                        json.dumps(mutation_ops, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                    ).hexdigest(),
+                    "files": [
+                        {"path": path, "before_hash": plan.before_hash, "after_hash": plan.after_hash}
+                        for path, plan in plans.items()
+                    ],
+                    "verified": bool(rollback.ok),
+                }
+                result = Result(
+                    False, "structured",
+                    data={
+                        "schema": "easychange.structured/3",
+                        "operation": operation or "operation",
+                        "results": results,
+                        "count": len(results),
+                        "transaction": rollback_data,
+                        "mutation_receipt": receipt,
+                    },
+                    error="Structured batch validation failed and was rolled back",
+                    code="STRUCTURED_BATCH_FAILED",
+                    command_id=self.ids.next("C"),
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+                if persist:
+                    self._persist_state(result)
+                return result
+
+            commit = self.execute_tokens("commit", [], raw=":commit", persist=False)
+            if not commit.ok:
+                raise RuntimeError(f"TRANSACTION_COMMIT_FAILED:{commit.code or commit.error}")
+            receipt_files = []
+            for path, plan in plans.items():
+                outcome = write_outcomes[path]
+                receipt_files.append({
+                    "path": path,
+                    "before_hash": plan.before_hash,
+                    "after_hash": plan.after_hash,
+                    "bytes_written": int(outcome.get("bytes_written") or len(plan.after.encode("utf-8"))),
+                    "verified": bool(outcome.get("verified")),
+                    "diff": str(outcome.get("diff") or "")[:12000],
+                })
+            receipt = {
+                "mutation_id": transaction_id,
+                "state": "COMMITTED",
+                "operation_hash": hashlib.sha256(
+                    json.dumps(mutation_ops, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+                "files": receipt_files,
+                "changed_files": len(receipt_files),
+                "verified": all(bool(item["verified"]) for item in receipt_files),
+            }
+            result = Result(
+                True, "structured",
+                data={
+                    "schema": "easychange.structured/3",
+                    "operation": operation or "operation",
+                    "results": results,
+                    "primary": results[0] if len(results) == 1 else None,
+                    "count": len(results),
+                    "transaction": {**commit.data, "state": "COMMITTED"},
+                    "mutation_receipt": receipt,
+                },
+                command_id=self.ids.next("C"),
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            if persist:
+                self._persist_state(result)
+            return result
+        except Exception as exc:
+            if self.transaction is not None:
+                try:
+                    rollback = self.execute_tokens("rollback", [], raw=":rollback", persist=False)
+                    rollback_data = rollback.data if rollback.ok else {"state": "UNKNOWN", "error": rollback.code}
+                except Exception as rollback_exc:
+                    rollback_data = {"state": "UNKNOWN", "error": type(rollback_exc).__name__}
+            receipt = {
+                "mutation_id": transaction_id,
+                "state": "ROLLED_BACK" if rollback_data.get("state") != "UNKNOWN" else "ROLLBACK_UNKNOWN",
+                "files": [
+                    {"path": path, "before_hash": plan.before_hash, "after_hash": plan.after_hash}
+                    for path, plan in plans.items()
+                ],
+                "verified": rollback_data.get("state") != "UNKNOWN",
+            }
+            result = Result(
+                False, "structured",
+                data={
+                    "schema": "easychange.structured/3",
+                    "operation": operation or "operation",
+                    "results": results,
+                    "transaction": rollback_data,
+                    "mutation_receipt": receipt,
+                },
+                error=str(exc),
+                code=str(getattr(exc, "code", "") or type(exc).__name__),
+                command_id=self.ids.next("C"),
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            if persist:
+                self._persist_state(result)
+            return result
     def _execute_structured(self, payload: dict, *, persist: bool = True) -> Result:
         """Execute bounded HID-delivered operations; read-only batches avoid transactions."""
         started = time.monotonic()
@@ -247,11 +572,115 @@ class CommandService:
         if not isinstance(operations, list) or not 1 <= len(operations) <= 64:
             return Result(False, "structured", error="OPERATION_COUNT_LIMIT", code="INVALID_STRUCTURED_PAYLOAD")
 
-        mutation_types = {"write_file", "create_file", "replace_line", "replace_range", "replace_text", "insert", "append"}
+        # Small durable-result queries intentionally bypass project/index work.
+        # They are the recovery API used when HDMI lost the original frame.
+        if len(operations) == 1 and isinstance(operations[0], dict):
+            query_item = operations[0]
+            query_kind = str(query_item.get("type") or "").casefold()
+            if query_kind in {"result_status", "mutation_status", "result_get", "result_meta", "result_chunk", "optical_meta", "optical_chunk"}:
+                target_sequence = str(query_item.get("sequence") or query_item.get("target_sequence") or "").upper()
+                if not re.fullmatch(r"Q[A-Z0-9_-]{4,40}", target_sequence):
+                    return Result(False, query_kind, error="VALID_TARGET_SEQUENCE_REQUIRED", code="INVALID_SEQUENCE")
+                if query_kind in {"result_status", "mutation_status"}:
+                    data = self.result_store.status(target_sequence)
+                elif query_kind == "result_get":
+                    data = self.result_store.result(target_sequence)
+                elif query_kind == "result_meta":
+                    data = self.result_store.chunk_meta(target_sequence, chunk_bytes=int(query_item.get("chunk_bytes") or 320))
+                elif query_kind == "result_chunk":
+                    try:
+                        data = self.result_store.chunk(
+                            target_sequence,
+                            int(query_item.get("chunk_index")),
+                            chunk_bytes=int(query_item.get("chunk_bytes") or 320),
+                        )
+                    except (TypeError, ValueError, IndexError) as exc:
+                        return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_CHUNK")
+                else:
+                    original_result = self.result_store.result(target_sequence)
+                    if original_result is None:
+                        data = None
+                    else:
+                        from ..remote.optical_protocol import encode_result_chunks
+                        packets = encode_result_chunks(original_result)
+                        if query_kind == "optical_meta":
+                            first = json.loads(packets[0])
+                            data = {
+                                "target_sequence": target_sequence,
+                                "total_chunks": len(packets),
+                                "result_hash": first.get("h"),
+                                "crc32": first.get("c"),
+                            }
+                        else:
+                            try:
+                                chunk_index = int(query_item.get("chunk_index"))
+                                if chunk_index < 0 or chunk_index >= len(packets):
+                                    raise IndexError("OPTICAL_CHUNK_OUT_OF_RANGE")
+                                data = {
+                                    "target_sequence": target_sequence,
+                                    "chunk_index": chunk_index,
+                                    "packet": json.loads(packets[chunk_index]),
+                                }
+                            except (TypeError, ValueError, IndexError) as exc:
+                                return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_CHUNK")
+                if data is None:
+                    return Result(False, query_kind, error="RESULT_NOT_FOUND", code="RESULT_NOT_FOUND")
+                return Result(True, query_kind, data=data, command_id=self.ids.next("C"),
+                              duration_ms=int((time.monotonic() - started) * 1000))
+
+        # Long-running build/test/process work is detached from the visual
+        # result frame. A small job receipt returns immediately while terminal
+        # output remains durable under .easychange/jobs.
+        if len(operations) == 1 and isinstance(operations[0], dict):
+            job_item = operations[0]
+            job_kind = str(job_item.get("type") or "").casefold()
+            if job_kind in {"job_start", "job_status", "job_result", "job_cancel"}:
+                try:
+                    job_id = str(job_item.get("job_id") or "")
+                    if job_kind == "job_start":
+                        argv = job_item.get("argv")
+                        if not isinstance(argv, list) or not 1 <= len(argv) <= 32 or not all(
+                            isinstance(value, str) and value for value in argv
+                        ):
+                            return Result(False, job_kind, error="ARGV_REQUIRES_1_TO_32_STRINGS",
+                                          code="INVALID_STRUCTURED_PAYLOAD")
+                        if not job_id:
+                            job_id = self.ids.next("J")
+                        data = self.processes.job_start(argv, job_id)
+                    elif job_kind == "job_status":
+                        if not job_id:
+                            return Result(False, job_kind, error="JOB_ID_REQUIRED", code="INVALID_JOB_ID")
+                        data = self.processes.job_status(job_id)
+                    elif job_kind == "job_result":
+                        if not job_id:
+                            return Result(False, job_kind, error="JOB_ID_REQUIRED", code="INVALID_JOB_ID")
+                        data = self.processes.job_result(job_id)
+                    else:
+                        if not job_id:
+                            return Result(False, job_kind, error="JOB_ID_REQUIRED", code="INVALID_JOB_ID")
+                        data = self.processes.job_cancel(job_id)
+                    return Result(True, job_kind, data=data, command_id=self.ids.next("C"),
+                                  duration_ms=int((time.monotonic() - started) * 1000))
+                except Exception as exc:
+                    return Result(False, job_kind, error=str(exc),
+                                  code=str(getattr(exc, "code", "") or type(exc).__name__),
+                                  command_id=self.ids.next("C"),
+                                  duration_ms=int((time.monotonic() - started) * 1000))
+
+        mutation_types = {
+            "write_file", "create_file", "replace_line", "replace_range", "replace_text",
+            "replace_exact", "replace_anchor", "insert_before", "insert_after", "insert", "append",
+        }
         kinds = [str(item.get("type") or "").casefold() if isinstance(item, dict) else "" for item in operations]
         transactional = any(kind in mutation_types for kind in kinds)
         if transactional and self.transaction is not None:
             return Result(False, "structured", error="BATCH_CANNOT_NEST_TRANSACTION", code="TRANSACTION_ACTIVE")
+
+        # Mutating HID batches are planned completely against immutable original
+        # snapshots before the first byte is written. This prevents stale line
+        # coordinates when an earlier edit changes line counts.
+        if transactional and all(kind in mutation_types or kind == "validate" for kind in kinds):
+            return self._execute_planned_mutation_batch(operations, operation, persist=persist, started=started)
 
         if transactional:
             # begin persists the active transaction itself; avoid the second
