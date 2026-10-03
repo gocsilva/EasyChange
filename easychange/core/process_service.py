@@ -53,8 +53,16 @@ class ProcessService:
     def __init__(self, cwd: Path) -> None:
         self.cwd = Path(cwd).resolve()
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "EasyChange" / "Workspaces"
+        try:
+            stat = self.cwd.stat()
+            workspace_identity = (
+                f"{str(self.cwd).casefold()}|{int(getattr(stat, 'st_dev', 0))}|"
+                f"{int(getattr(stat, 'st_ino', 0))}"
+            )
+        except OSError:
+            workspace_identity = str(self.cwd).casefold()
         workspace_hash = hashlib.sha256(
-            str(self.cwd).casefold().encode("utf-8", errors="replace")
+            workspace_identity.encode("utf-8", errors="replace")
         ).hexdigest()[:20]
         self.workspace_state_root = base / workspace_hash
         self.root = self.workspace_state_root / "processes"
@@ -168,6 +176,7 @@ class ProcessService:
         *,
         env: dict[str, str] | None = None,
         redact_values: list[str] | tuple[str, ...] | None = None,
+        metadata: dict | None = None,
     ) -> dict:
         previous = self._read_job(job_id)
         if previous is not None:
@@ -185,6 +194,7 @@ class ProcessService:
             "started_at": time.time(),
             "finished_at": None,
             "returncode": None,
+            "metadata": dict(metadata or {}),
         }
         return self._write_job(job_id, record)
 
@@ -226,6 +236,82 @@ class ProcessService:
         result.setdefault("terminal", True)
         return result
 
+    def job_logs(
+        self,
+        job_id: str,
+        *,
+        stream: str = "stdout",
+        cursor: int = 0,
+        max_bytes: int = 16384,
+    ) -> dict:
+        stream = str(stream or "stdout").casefold()
+        if stream not in {"stdout", "stderr"}:
+            raise ValueError("JOB_LOG_STREAM_MUST_BE_STDOUT_OR_STDERR")
+        cursor = max(0, int(cursor or 0))
+        page_bytes = max(256, min(1024 * 1024, int(max_bytes or 16384)))
+
+        current = self._read_job(job_id)
+        item = self._processes.get(job_id)
+        if current is None and item is None:
+            raise LookupError(f"Job not found: {job_id}")
+
+        path = (
+            (item.stdout_path if stream == "stdout" else item.stderr_path)
+            if item is not None
+            else self.root / f"{job_id}.{('out' if stream == 'stdout' else 'err')}"
+        )
+        redact_values = item.redact_values if item is not None else ()
+        if path.exists():
+            try:
+                with path.open("rb") as handle:
+                    total = handle.seek(0, 2)
+                    start = min(cursor, total)
+                    handle.seek(start)
+                    raw = handle.read(page_bytes)
+            except OSError:
+                raw = b""
+                total = 0
+                start = 0
+            text = _redact(raw.decode("utf-8", errors="replace"), redact_values)
+            consumed = len(raw)
+            next_cursor = start + consumed
+            complete = next_cursor >= total
+            return {
+                "job_id": job_id,
+                "stream": stream,
+                "cursor": start,
+                "next_cursor": None if complete else next_cursor,
+                "returned_bytes": consumed,
+                "total_bytes": total,
+                "remaining_bytes": max(0, total - next_cursor),
+                "complete": complete,
+                "text": text,
+                "durable_file": True,
+                "terminal": bool(current and current.get("state") != "RUNNING"),
+            }
+
+        # Compatibility fallback for old durable job records that only retained a tail.
+        text = str((current or {}).get(stream) or "")
+        raw = text.encode("utf-8", errors="replace")
+        start = min(cursor, len(raw))
+        chunk = raw[start:start + page_bytes]
+        next_cursor = start + len(chunk)
+        complete = next_cursor >= len(raw)
+        return {
+            "job_id": job_id,
+            "stream": stream,
+            "cursor": start,
+            "next_cursor": None if complete else next_cursor,
+            "returned_bytes": len(chunk),
+            "total_bytes": len(raw),
+            "remaining_bytes": max(0, len(raw) - next_cursor),
+            "complete": complete,
+            "text": chunk.decode("utf-8", errors="replace"),
+            "durable_file": False,
+            "tail_fallback": True,
+            "terminal": bool(current and current.get("state") != "RUNNING"),
+        }
+
     def job_cancel(self, job_id: str) -> dict:
         item = self._processes.get(job_id)
         if item is None:
@@ -258,12 +344,14 @@ class ProcessService:
             item = self._processes.pop(process_id, None)
             if item is None:
                 continue
-            # Terminal job metadata already contains bounded output + hashes.
-            for path in (item.stdout_path, item.stderr_path):
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            # Durable jobs keep their external log files for cursor-based retrieval.
+            # Non-job processes can still release their transient files immediately.
+            if not self._job_path(process_id).exists():
+                for path in (item.stdout_path, item.stderr_path):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
     def maintenance(self, keep_finished: int = 8) -> dict:
         before = len(self._processes)
         self._prune_finished(keep=max(0, int(keep_finished)))

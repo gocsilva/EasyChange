@@ -191,6 +191,7 @@ class ProjectRuntimeService:
             try:
                 run_argv = self._argv(row.get("run_argv"))
                 test_argv = self._argv(row.get("test_argv"))
+                build_argv = self._argv(row.get("build_argv"))
                 env_values = self._env_values(row.get("env"))
                 env_refs = self._env_refs(row.get("env_refs"))
                 env_allowlist = self._env_allowlist(row.get("env_allowlist"))
@@ -204,6 +205,7 @@ class ProjectRuntimeService:
                 "runnable": bool(run_argv),
                 "run_argv": run_argv,
                 "test_argv": test_argv,
+                "build_argv": build_argv,
                 "urls": [str(item) for item in (row.get("urls") or []) if str(item).startswith(("http://", "https://"))][:16],
                 "swagger_candidates": [str(item) for item in (row.get("swagger_candidates") or []) if str(item).startswith(("http://", "https://"))][:32],
                 "configured": True,
@@ -228,6 +230,7 @@ class ProjectRuntimeService:
         kind: str = "custom",
         run_argv: list[str] | None = None,
         test_argv: list[str] | None = None,
+        build_argv: list[str] | None = None,
         urls: list[str] | None = None,
         env: dict[str, str] | None = None,
         env_refs: dict[str, str] | None = None,
@@ -239,6 +242,7 @@ class ProjectRuntimeService:
             raise ValueError("PROFILE_ID_REQUIRED")
         run = self._argv(run_argv)
         test = self._argv(test_argv)
+        build = self._argv(build_argv)
         safe_urls = [str(item) for item in (urls or []) if str(item).startswith(("http://", "https://"))][:16]
         env_values = self._env_values(env)
         safe_refs = self._env_refs(env_refs)
@@ -247,7 +251,7 @@ class ProjectRuntimeService:
         row = {
             "id": profile_id, "ecosystem": "custom", "kind": str(kind or "custom"),
             "project": "runtime_profiles.json", "runnable": bool(run),
-            "run_argv": run, "test_argv": test, "urls": safe_urls,
+            "run_argv": run, "test_argv": test, "build_argv": build, "urls": safe_urls,
             "swagger_candidates": self._swagger_candidates(safe_urls),
             "configured": True,
             "env": env_values,
@@ -530,6 +534,168 @@ class ProjectRuntimeService:
             "build_errors_count": build_errors,
             "test_failures_count": tests_failed,
         }
+
+    def _adapter_command(self, mode: str) -> list[str] | None:
+        from easychange.adapters.dotnet import DotnetAdapter
+        from easychange.adapters.node import NodeAdapter
+        from easychange.adapters.python import PythonAdapter
+
+        for adapter in (DotnetAdapter(), NodeAdapter(), PythonAdapter()):
+            if not adapter.detect(self.workspace):
+                continue
+            command = adapter.build(self.workspace) if mode == "build" else adapter.test(self.workspace)
+            if command:
+                return list(command)
+        return None
+
+    def _runtime_job_target(
+        self,
+        mode: str,
+        profile_id: str = "",
+    ) -> tuple[list[str], dict[str, Any] | None]:
+        if mode not in {"build", "test"}:
+            raise ValueError("RUNTIME_JOB_MODE_MUST_BE_BUILD_OR_TEST")
+        profiles = self.profiles()
+        target: dict[str, Any] | None = None
+        argv: list[str] | None = None
+
+        if profile_id:
+            target = self.profile(profile_id, profiles=profiles)
+            key = "build_argv" if mode == "build" else "test_argv"
+            candidate = target.get(key)
+            if mode == "test" and not candidate:
+                candidate = target.get("workspace_test_argv")
+            if candidate:
+                argv = list(candidate)
+            elif mode == "build":
+                ecosystem = str(target.get("ecosystem") or "").casefold()
+                project = str(target.get("project") or "")
+                if ecosystem == "dotnet" and project and project != "runtime_profiles.json":
+                    argv = ["dotnet", "build", project]
+                    if "--no-restore" in list(target.get("test_argv") or []):
+                        argv.append("--no-restore")
+        else:
+            if mode == "test":
+                target = next((item for item in profiles if item.get("workspace_test_argv")), None)
+                if target:
+                    argv = list(target["workspace_test_argv"])
+                if argv is None:
+                    target = next((item for item in profiles if item.get("test_argv")), None)
+                    if target:
+                        argv = list(target["test_argv"])
+            else:
+                target = next((item for item in profiles if item.get("build_argv")), None)
+                if target:
+                    argv = list(target["build_argv"])
+
+        if argv is None:
+            argv = self._adapter_command(mode)
+        if not argv:
+            raise RuntimeError(f"No {mode} command detected for this workspace")
+        return argv, target
+
+    def _start_runtime_job(
+        self,
+        mode: str,
+        job_id: str,
+        profile_id: str = "",
+    ) -> dict:
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            raise ValueError("JOB_ID_REQUIRED")
+        argv, profile = self._runtime_job_target(mode, profile_id)
+        if profile is not None:
+            process_env, env_meta = self.resolve_environment(profile)
+            redact_values = self._redaction_values(profile, process_env)
+            profile_name = str(profile.get("id") or profile.get("project") or "")
+        else:
+            process_env = None
+            env_meta = {
+                "inherit_env": True,
+                "env_allowlist": [],
+                "resolved_env_keys": [],
+                "unresolved_env_refs": [],
+                "secret_values_returned": False,
+            }
+            redact_values = []
+            profile_name = ""
+        started = self.processes.job_start(
+            argv,
+            job_id,
+            env=process_env,
+            redact_values=redact_values,
+            metadata={
+                "job_kind": mode,
+                "profile_id": profile_name or None,
+            },
+        )
+        return {
+            **started,
+            "job_kind": mode,
+            "profile_id": profile_name or None,
+            "environment": env_meta,
+        }
+
+    def start_test_job(self, job_id: str, profile_id: str = "") -> dict:
+        return self._start_runtime_job("test", job_id, profile_id)
+
+    def start_build_job(self, job_id: str, profile_id: str = "") -> dict:
+        return self._start_runtime_job("build", job_id, profile_id)
+
+    def test_job_result(self, job_id: str) -> dict:
+        result = self.processes.job_result(job_id)
+        if not result.get("terminal"):
+            return {
+                **result,
+                "finished": False,
+                "passed": None,
+                "tests_passed": 0,
+                "tests_failed": 0,
+                "tests_skipped": 0,
+                "build_errors_count": 0,
+                "test_failures_count": 0,
+            }
+        summary = self._test_summary([result])
+        return {
+            **result,
+            **summary,
+            "passed": bool(result.get("returncode") == 0),
+        }
+
+    def build_job_result(self, job_id: str) -> dict:
+        result = self.processes.job_result(job_id)
+        terminal = bool(result.get("terminal"))
+        return {
+            **result,
+            "finished": terminal,
+            "passed": bool(result.get("returncode") == 0) if terminal else None,
+            "return_code": result.get("returncode"),
+            "build_errors_count": len(
+                re.findall(
+                    r"(?im)^.*error\s+[A-Z]{2,}\d+\s*:",
+                    "\n".join([
+                        str(result.get("stdout") or ""),
+                        str(result.get("stderr") or ""),
+                        str(result.get("diagnostics") or ""),
+                    ]),
+                )
+            ) if terminal else 0,
+        }
+
+    def runtime_job_logs(
+        self,
+        job_id: str,
+        *,
+        stream: str = "stdout",
+        cursor: int = 0,
+        max_bytes: int = 16384,
+    ) -> dict:
+        return self.processes.job_logs(
+            job_id,
+            stream=stream,
+            cursor=cursor,
+            max_bytes=max_bytes,
+        )
 
     def smart_test(self, profile_id: str = "", timeout: int = 600) -> dict:
         started_at = time.monotonic()

@@ -1040,6 +1040,15 @@ class CommandService:
                         if not job_id:
                             return Result(False, job_kind, error="JOB_ID_REQUIRED", code="INVALID_JOB_ID")
                         data = self.processes.job_result(job_id)
+                    elif job_kind == "job_logs":
+                        if not job_id:
+                            return Result(False, job_kind, error="JOB_ID_REQUIRED", code="INVALID_JOB_ID")
+                        data = self.processes.job_logs(
+                            job_id,
+                            stream=str(job_item.get("stream") or "stdout"),
+                            cursor=max(0, int(job_item.get("cursor") or 0)),
+                            max_bytes=max(256, min(1024 * 1024, int(job_item.get("max_bytes") or 16384))),
+                        )
                     else:
                         if not job_id:
                             return Result(False, job_kind, error="JOB_ID_REQUIRED", code="INVALID_JOB_ID")
@@ -1294,6 +1303,7 @@ class CommandService:
                         kind=str(item.get("kind") or "custom"),
                         run_argv=item.get("run_argv"),
                         test_argv=item.get("test_argv"),
+                        build_argv=item.get("build_argv"),
                         urls=item.get("urls") if isinstance(item.get("urls"), list) else None,
                         env=item.get("env") if isinstance(item.get("env"), dict) else None,
                         env_refs=item.get("env_refs") if isinstance(item.get("env_refs"), dict) else None,
@@ -1315,8 +1325,8 @@ class CommandService:
                         True,
                         kind,
                         data=self.git.diff_refs(
-                            base_ref=str(item.get("base_ref") or "") or None,
-                            head_ref=str(item.get("head_ref") or "") or None,
+                            base_ref=str(item.get("base_ref") or ""),
+                            head_ref=str(item.get("head_ref") or "HEAD"),
                             path=str(item.get("path") or "") or None,
                             name_only=bool(item.get("name_only", False)),
                             name_status=bool(item.get("name_status", False)),
@@ -1326,6 +1336,66 @@ class CommandService:
                             max_items=max(1, min(5000, int(item.get("max_items") or 500))),
                         ),
                     )
+                elif kind == "test_job_start":
+                    job_id = str(item.get("job_id") or self.ids.next("J"))
+                    result = Result(True, kind, data=self.runtime.start_test_job(
+                        job_id,
+                        str(item.get("profile") or ""),
+                    ))
+                elif kind == "test_job_result":
+                    job_id = str(item.get("job_id") or "")
+                    if not job_id:
+                        result = Result(False, kind, error="JOB_ID_REQUIRED", code="INVALID_JOB_ID")
+                    else:
+                        data = self.runtime.test_job_result(job_id)
+                        result = Result(
+                            data.get("passed") is not False,
+                            kind,
+                            data=data,
+                            error="Smart test job failed" if data.get("passed") is False else None,
+                            code="TEST_FAILED" if data.get("passed") is False else None,
+                        )
+                elif kind == "test_job_logs":
+                    job_id = str(item.get("job_id") or "")
+                    if not job_id:
+                        result = Result(False, kind, error="JOB_ID_REQUIRED", code="INVALID_JOB_ID")
+                    else:
+                        result = Result(True, kind, data=self.runtime.runtime_job_logs(
+                            job_id,
+                            stream=str(item.get("stream") or "stdout"),
+                            cursor=max(0, int(item.get("cursor") or 0)),
+                            max_bytes=max(256, min(1024 * 1024, int(item.get("max_bytes") or 16384))),
+                        ))
+                elif kind == "build_job_start":
+                    job_id = str(item.get("job_id") or self.ids.next("J"))
+                    result = Result(True, kind, data=self.runtime.start_build_job(
+                        job_id,
+                        str(item.get("profile") or ""),
+                    ))
+                elif kind == "build_job_result":
+                    job_id = str(item.get("job_id") or "")
+                    if not job_id:
+                        result = Result(False, kind, error="JOB_ID_REQUIRED", code="INVALID_JOB_ID")
+                    else:
+                        data = self.runtime.build_job_result(job_id)
+                        result = Result(
+                            data.get("passed") is not False,
+                            kind,
+                            data=data,
+                            error="Build job failed" if data.get("passed") is False else None,
+                            code="BUILD_FAILED" if data.get("passed") is False else None,
+                        )
+                elif kind == "build_job_logs":
+                    job_id = str(item.get("job_id") or "")
+                    if not job_id:
+                        result = Result(False, kind, error="JOB_ID_REQUIRED", code="INVALID_JOB_ID")
+                    else:
+                        result = Result(True, kind, data=self.runtime.runtime_job_logs(
+                            job_id,
+                            stream=str(item.get("stream") or "stdout"),
+                            cursor=max(0, int(item.get("cursor") or 0)),
+                            max_bytes=max(256, min(1024 * 1024, int(item.get("max_bytes") or 16384))),
+                        ))
                 elif kind == "run_project":
                     profile = str(item.get("profile") or "")
                     process_id = self.ids.next("P")

@@ -8,7 +8,7 @@ STRUCTURED_RECOVERY_TYPES = frozenset({
     "result_status", "mutation_status", "result_header", "result_get", "result_meta", "result_chunk",
     "optical_meta", "optical_chunk", "optical_chunks",
 })
-STRUCTURED_JOB_TYPES = frozenset({"job_start", "job_status", "job_result", "job_cancel"})
+STRUCTURED_JOB_TYPES = frozenset({"job_start", "job_status", "job_result", "job_logs", "job_cancel"})
 TEXT_MUTATION_COMMANDS = frozenset({
     "write", "save", "force-write", "append", "insert", "replace", "replace-line",
     "replace-range", "delete", "rename", "move", "mkdir", "new", "batch",
@@ -16,7 +16,8 @@ TEXT_MUTATION_COMMANDS = frozenset({
 STRUCTURED_CONTINUE_SAFE_TYPES = frozenset({
     "read", "search", "locate", "study", "definition", "references",
     "discover_many", "read_regions", "read_many", "runtime_profiles", "runtime_environment",
-    "git_diff", "process_logs", "db_connections", "db_schema", *STRUCTURED_RECOVERY_TYPES,
+    "git_diff", "process_logs", "test_job_result", "test_job_logs", "build_job_result", "build_job_logs",
+    "db_connections", "db_schema", *STRUCTURED_RECOVERY_TYPES,
 })
 _OPERATION_FAMILIES = {
     **{name: "mutation" for name in STRUCTURED_MUTATION_TYPES},
@@ -27,6 +28,8 @@ _OPERATION_FAMILIES = {
     "definition": "discovery", "references": "discovery", "discover_many": "discovery",
     "runtime_profiles": "runtime", "runtime_configure": "runtime", "runtime_environment": "runtime",
     "run_project": "runtime", "git_diff": "git",
+    "test_job_start": "job", "test_job_result": "job", "test_job_logs": "job",
+    "build_job_start": "job", "build_job_result": "job", "build_job_logs": "job",
     "test_smart": "runtime", "test_evidence": "runtime", "swagger_evidence": "runtime",
     "evidence": "runtime", "process_logs": "runtime", "stop_process": "runtime",
     "db_connections": "database", "db_configure": "database", "db_schema": "database",
