@@ -17,6 +17,7 @@ STRUCTURED_CONTINUE_SAFE_TYPES = frozenset({
     "read", "search", "locate", "study", "definition", "references",
     "discover_many", "read_regions", "read_many", "runtime_profiles", "runtime_environment",
     "git_diff", "process_logs", "test_job_result", "test_job_logs", "build_job_result", "build_job_logs",
+    "ef_migrations_list", "ef_script",
     "db_connections", "db_schema", *STRUCTURED_RECOVERY_TYPES,
 })
 _OPERATION_FAMILIES = {
@@ -33,7 +34,9 @@ _OPERATION_FAMILIES = {
     "test_smart": "runtime", "test_evidence": "runtime", "swagger_evidence": "runtime",
     "evidence": "runtime", "process_logs": "runtime", "stop_process": "runtime",
     "db_connections": "database", "db_configure": "database", "db_schema": "database",
-    "db_query": "database", "validate": "validation",
+    "db_query": "database",
+    "ef_migrations_list": "database", "ef_database_update": "database", "ef_script": "database",
+    "validate": "validation",
 }
 
 def structured_operation_profile(kind: str) -> dict:

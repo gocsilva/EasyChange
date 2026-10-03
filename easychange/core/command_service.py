@@ -1,6 +1,7 @@
 from __future__ import annotations
 from .runtime_service import ProjectRuntimeService
 from .database_service import DatabaseService
+from .ef_migration_service import EfMigrationService
 from concurrent.futures import ThreadPoolExecutor
 from .safe_edit import SafeEditError, plan_file_mutations, text_hash
 from .result_store import DurableResultStore
@@ -64,6 +65,7 @@ class CommandService:
         self.processes = ProcessService(workspace.root_path)
         self.runtime = ProjectRuntimeService(workspace, self.processes)
         self.database = DatabaseService(workspace)
+        self.ef_migrations = EfMigrationService(workspace, self.processes, self.runtime, self.database)
         self.ids = IdFactory(self.state_store.data.get("id_counts"))
         self.output = self.state_store.data.get("output_mode", "text")
         self.machine = self.state_store.data.get("mode", "human") == "machine"
@@ -1284,6 +1286,9 @@ class CommandService:
                             args += ["--count", str(item["count"])]
                         if isinstance(item.get("max_bytes"), int):
                             args += ["--max-bytes", str(item["max_bytes"])]
+                        cursor = str(item.get("cursor") or "").strip()
+                        if cursor:
+                            args += ["--cursor", cursor]
                         result = self.execute_tokens("read-many", args, raw="EC1 read-many", persist=sub_persist)
                 elif kind == "runtime_profiles":
                     profiles = self.runtime.profiles()
@@ -1456,6 +1461,66 @@ class CommandService:
                         result = Result(True, kind, data=self.database.schema(
                             connection, max_rows=max(1, min(5000, int(item.get("max_rows") or 500)))
                         ))
+                elif kind == "ef_migrations_list":
+                    migration_project = str(item.get("migration_project") or "")
+                    if not migration_project:
+                        result = Result(False, kind, error="MIGRATION_PROJECT_REQUIRED",
+                                        code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        result = Result(True, kind, data=self.ef_migrations.migrations_list(
+                            migration_project=migration_project,
+                            startup_project=str(item.get("startup_project") or "") or None,
+                            context=str(item.get("context") or "") or None,
+                            environment=str(item.get("environment") or ""),
+                            connection_alias=str(item.get("connection_alias") or ""),
+                            profile_id=str(item.get("profile") or ""),
+                            timeout=max(30, min(1800, int(item.get("timeout") or 300))),
+                        ))
+                elif kind == "ef_script":
+                    migration_project = str(item.get("migration_project") or "")
+                    if not migration_project:
+                        result = Result(False, kind, error="MIGRATION_PROJECT_REQUIRED",
+                                        code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        result = Result(True, kind, data=self.ef_migrations.script(
+                            migration_project=migration_project,
+                            startup_project=str(item.get("startup_project") or "") or None,
+                            context=str(item.get("context") or "") or None,
+                            environment=str(item.get("environment") or ""),
+                            target_migration=str(item.get("target_migration") or ""),
+                            profile_id=str(item.get("profile") or ""),
+                            timeout=max(30, min(1800, int(item.get("timeout") or 300))),
+                            cursor=max(0, int(item.get("cursor") or 0)),
+                            max_bytes=max(512, min(1024 * 1024, int(item.get("max_bytes") or 16384))),
+                        ))
+                elif kind == "ef_database_update":
+                    migration_project = str(item.get("migration_project") or "")
+                    connection_alias = str(item.get("connection_alias") or "")
+                    if len(operations) > 1:
+                        result = Result(False, kind,
+                                        error="EF_DATABASE_UPDATE_CANNOT_BE_MIXED_IN_BATCH",
+                                        code="NON_ATOMIC_EXTERNAL_WRITE")
+                    elif not migration_project or not connection_alias:
+                        result = Result(False, kind,
+                                        error="MIGRATION_PROJECT_AND_CONNECTION_ALIAS_REQUIRED",
+                                        code="INVALID_STRUCTURED_PAYLOAD")
+                    elif not bool(item.get("apply_authorized", False)):
+                        result = Result(False, kind,
+                                        error="EF_DATABASE_UPDATE_REQUIRES_EXPLICIT_AUTHORIZATION",
+                                        code="EXPLICIT_AUTHORIZATION_REQUIRED")
+                    else:
+                        data = self.ef_migrations.database_update(
+                            migration_project=migration_project,
+                            startup_project=str(item.get("startup_project") or "") or None,
+                            context=str(item.get("context") or "") or None,
+                            environment=str(item.get("environment") or ""),
+                            connection_alias=connection_alias,
+                            target_migration=str(item.get("target_migration") or ""),
+                            profile_id=str(item.get("profile") or ""),
+                            apply_authorized=bool(item.get("apply_authorized", False)),
+                            timeout=max(30, min(3600, int(item.get("timeout") or 600))),
+                        )
+                        result = Result(True, kind, data=data)
                 elif kind == "db_query":
                     connection = str(item.get("connection") or "")
                     sql = str(item.get("sql") or "")
@@ -1969,9 +2034,10 @@ class CommandService:
             _require(args, 1, "one or more paths")
             count = _option_int(args, "--count", 240, minimum=1, maximum=2400)
             max_bytes = _option_int(args, "--max-bytes", 2097152, minimum=32768, maximum=8388608)
+            cursor_value = _option_value(args, "--cursor")
+            option_names = {"--count", "--max-bytes", "--cursor"}
             paths = []
             skip = False
-            option_names = {"--count", "--max-bytes"}
             for item in args:
                 if skip:
                     skip = False
@@ -1983,25 +2049,48 @@ class CommandService:
             if not paths or len(paths) > 64:
                 raise ValueError("read-many requires 1 to 64 paths")
 
+            cursor_path_index = 0
+            cursor_start = 1
+            cursor_remaining = count
+            if cursor_value:
+                match = re.fullmatch(r"v1:(\d+):(\d+):(\d+)", str(cursor_value))
+                if not match:
+                    raise ValueError("INVALID_READ_MANY_CURSOR")
+                cursor_path_index = int(match.group(1))
+                cursor_start = max(1, int(match.group(2)))
+                cursor_remaining = max(1, min(count, int(match.group(3))))
+                if cursor_path_index >= len(paths):
+                    raise ValueError("READ_MANY_CURSOR_OUT_OF_RANGE")
+
+            active_specs = []
+            for absolute_index in range(cursor_path_index, len(paths)):
+                start_line = cursor_start if absolute_index == cursor_path_index else 1
+                requested_lines = cursor_remaining if absolute_index == cursor_path_index else count
+                active_specs.append((absolute_index, paths[absolute_index], start_line, requested_lines))
+
             files = []
             skipped = []
             errors = []
             total_bytes = 0
-            workers = min(12, len(paths))
+            workers = min(12, len(active_specs))
 
-            def safe_read(path):
+            def safe_read(spec):
+                absolute_index, path, start_line, requested_lines = spec
                 try:
-                    return path, self.files.read(path, 1, count), None
+                    return spec, self.files.read(path, start_line, requested_lines), None
                 except Exception as exc:
-                    return path, None, {
+                    return spec, None, {
                         "path": path,
                         "error": str(exc)[:512],
                         "code": str(getattr(exc, "code", "") or type(exc).__name__),
                     }
 
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="easychange-read") as pool:
-                loaded = list(pool.map(safe_read, paths))
-            for position, (path, info, error) in enumerate(loaded):
+                loaded = list(pool.map(safe_read, active_specs))
+
+            next_cursor = None
+            for position, (spec, info, error) in enumerate(loaded):
+                absolute_index, path, start_line, requested_lines = spec
                 if error is not None:
                     errors.append(error)
                     continue
@@ -2009,8 +2098,8 @@ class CommandService:
                 encoded = json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                 if total_bytes + len(encoded) > max_bytes:
                     if not files:
-                        # A single very large read is progressively trimmed so
-                        # the optical response remains bounded.
+                        # Trim the first page deterministically. The cursor
+                        # remembers exactly how many requested lines remain.
                         lines = list(info.get("lines") or [])
                         while len(encoded) > max_bytes and len(lines) > 1:
                             lines = lines[:max(1, len(lines) // 2)]
@@ -2020,19 +2109,61 @@ class CommandService:
                                 "returned_lines": len(lines),
                                 "budget_truncated": True,
                                 "has_more": True,
-                                "next_start": int(info.get("start") or 1) + len(lines),
+                                "next_start": start_line + len(lines),
                             }
-                            encoded = json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                            encoded = json.dumps(
+                                info, ensure_ascii=False, separators=(",", ":")
+                            ).encode("utf-8")
                         files.append(info)
                         total_bytes += len(encoded)
-                        skipped.extend(item[0] for item in loaded[position + 1:] if item[2] is None)
+                        consumed = len(lines)
+                        remaining_lines = max(0, requested_lines - consumed)
+                        if remaining_lines > 0:
+                            next_cursor = (
+                                f"v1:{absolute_index}:{start_line + consumed}:{remaining_lines}"
+                            )
+                        else:
+                            next_index = absolute_index + 1
+                            if next_index < len(paths):
+                                next_cursor = f"v1:{next_index}:1:{count}"
+                        skipped.extend(
+                            item[0][1]
+                            for item in loaded[position + 1:]
+                            if item[2] is None
+                        )
                     else:
-                        skipped.extend(item[0] for item in loaded[position:] if item[2] is None)
+                        skipped.extend(
+                            item[0][1]
+                            for item in loaded[position:]
+                            if item[2] is None
+                        )
+                        next_cursor = f"v1:{absolute_index}:{start_line}:{requested_lines}"
                     break
+
                 files.append(info)
                 total_bytes += len(encoded)
 
-            budget_truncated = bool(skipped) or any(bool(item.get("budget_truncated")) for item in files)
+                # If FileService could not return the requested slice in one
+                # page, preserve the exact continuation before advancing paths.
+                returned_lines = int(info.get("returned_lines") or len(info.get("lines") or []))
+                if bool(info.get("has_more")) and returned_lines < requested_lines:
+                    remaining_lines = max(1, requested_lines - returned_lines)
+                    next_cursor = (
+                        f"v1:{absolute_index}:{start_line + returned_lines}:{remaining_lines}"
+                    )
+                    skipped.extend(
+                        item[0][1]
+                        for item in loaded[position + 1:]
+                        if item[2] is None
+                    )
+                    break
+
+            budget_truncated = (
+                bool(next_cursor)
+                or bool(skipped)
+                or any(bool(item.get("budget_truncated")) for item in files)
+            )
+            complete = next_cursor is None
             return {
                 "files": files,
                 "count": len(files),
@@ -2044,8 +2175,11 @@ class CommandService:
                 "errors": errors,
                 "failed": len(errors),
                 "partial": bool(errors) or budget_truncated,
-                "has_more": bool(skipped),
+                "has_more": not complete,
                 "remaining": len(skipped),
+                "cursor": cursor_value,
+                "next_cursor": next_cursor,
+                "complete": complete,
                 "parallel_workers": workers,
             }
 
