@@ -1,2 +1,2 @@
-# Core runtime uses only the Python standard library.
+# Core runtime dependencies are declared in pyproject.toml.
 # Install optional interfaces with: pip install -e ".[gui,api,mcp]"

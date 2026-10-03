@@ -6,6 +6,7 @@ from .ef_migration_service import EfMigrationService
 from concurrent.futures import ThreadPoolExecutor
 from .safe_edit import SafeEditError, plan_file_mutations, text_hash
 from .result_store import DurableResultStore
+from .secret_broker import SecretBroker
 
 import shlex
 import time
@@ -64,8 +65,16 @@ class CommandService:
         self.files = FileService(workspace, self.state_store.data.get("file_hashes", {}))
         self.git = GitService(workspace)
         self.processes = ProcessService(workspace.root_path)
-        self.runtime = ProjectRuntimeService(workspace, self.processes)
-        self.database = DatabaseService(workspace)
+        self.secret_broker = SecretBroker()
+        self.runtime = ProjectRuntimeService(
+            workspace,
+            self.processes,
+            external_env_provider=self.secret_broker.values,
+        )
+        self.database = DatabaseService(
+            workspace,
+            external_env_provider=self.secret_broker.values,
+        )
         self.ef_migrations = EfMigrationService(workspace, self.processes, self.runtime, self.database)
         self.ids = IdFactory(self.state_store.data.get("id_counts"))
         self.output = self.state_store.data.get("output_mode", "text")
@@ -177,6 +186,7 @@ class CommandService:
         if self.watcher:
             self.watcher.stop()
         self.processes.stop_all()
+        self.secret_broker.clear()
         self.indexer.close()
         self.locks.release_owner(self.instance_id, self.session_id)
         self._persist_state(self.last_result)
@@ -219,11 +229,14 @@ class CommandService:
                 command, codec = decode_command(command)
             except ValueError as exc:
                 return Result(False, "ec", error=str(exc), code="INVALID_COMPRESSED_PAYLOAD", sequence=sequence)
+        external_env: dict[str, str] | None = None
         if command.casefold().startswith(":j1 "):
             try:
                 structured = json.loads(command[4:])
                 if not isinstance(structured, dict):
                     raise ValueError("EC1_J1_OBJECT_REQUIRED")
+                if "_external_env" in structured:
+                    raise ValueError("PLAINTEXT_EXTERNAL_ENV_FORBIDDEN_USE_SECRET_BROKER")
                 command = json.dumps(structured, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             except (json.JSONDecodeError, ValueError) as exc:
                 return Result(False, "ec", error=str(exc), code="INVALID_STRUCTURED_PAYLOAD", sequence=sequence)
@@ -352,7 +365,16 @@ class CommandService:
             self._persist_state()
 
         try:
-            result = self._execute_structured(structured, persist=False, sequence=sequence) if structured is not None else self.execute(command)
+            result = (
+                self._execute_structured(
+                    structured,
+                    persist=False,
+                    sequence=sequence,
+                    external_env=external_env,
+                )
+                if structured is not None
+                else self.execute(command)
+            )
         except Exception as exc:
             # A catastrophic exception during a mutating transaction must be
             # converted into an explicit rollback receipt instead of UNKNOWN.
@@ -919,7 +941,14 @@ class CommandService:
             "merge_overlaps": bool(merge_overlaps),
         }
 
-    def _execute_structured(self, payload: dict, *, persist: bool = True, sequence: str | None = None) -> Result:
+    def _execute_structured(
+        self,
+        payload: dict,
+        *,
+        persist: bool = True,
+        sequence: str | None = None,
+        external_env: dict[str, str] | None = None,
+    ) -> Result:
         """Execute bounded HID-delivered operations; read-only batches avoid transactions."""
         started = time.monotonic()
         operation = str(payload.get("op") or "").casefold()
@@ -1301,6 +1330,31 @@ class CommandService:
                             result = Result(True, kind, data=command_schema(command_name))
                         except LookupError as exc:
                             result = Result(False, kind, error=str(exc), code="UNKNOWN_COMMAND")
+                elif kind == "secret_broker_public":
+                    result = Result(True, kind, data=self.secret_broker.public_metadata())
+                elif kind == "secret_broker_status":
+                    result = Result(True, kind, data=self.secret_broker.status())
+                elif kind == "secret_broker_import":
+                    required = {
+                        "broker_id": item.get("broker_id"),
+                        "source_name": item.get("source_name"),
+                        "ephemeral_public_b64": item.get("ephemeral_public_b64"),
+                        "nonce_b64": item.get("nonce_b64"),
+                        "ciphertext_b64": item.get("ciphertext_b64"),
+                    }
+                    if not all(isinstance(value, str) and value for value in required.values()):
+                        result = Result(
+                            False,
+                            kind,
+                            error="SECRET_ENVELOPE_FIELDS_REQUIRED",
+                            code="INVALID_STRUCTURED_PAYLOAD",
+                        )
+                    else:
+                        result = Result(
+                            True,
+                            kind,
+                            data=self.secret_broker.import_envelope(**required),
+                        )
                 elif kind == "runtime_profiles":
                     profiles = self.runtime.profiles()
                     ecosystems: dict[str, int] = {}
@@ -1357,6 +1411,7 @@ class CommandService:
                     result = Result(True, kind, data=self.runtime.start_test_job(
                         job_id,
                         str(item.get("profile") or ""),
+                        external_env=external_env,
                     ))
                 elif kind == "test_job_result":
                     job_id = str(item.get("job_id") or "")
@@ -1387,6 +1442,7 @@ class CommandService:
                     result = Result(True, kind, data=self.runtime.start_build_job(
                         job_id,
                         str(item.get("profile") or ""),
+                        external_env=external_env,
                     ))
                 elif kind == "build_job_result":
                     job_id = str(item.get("job_id") or "")
@@ -1415,11 +1471,23 @@ class CommandService:
                 elif kind == "run_project":
                     profile = str(item.get("profile") or "")
                     process_id = self.ids.next("P")
-                    result = Result(True, kind, data=self.runtime.start(process_id, profile))
+                    result = Result(
+                        True,
+                        kind,
+                        data=self.runtime.start(
+                            process_id,
+                            profile,
+                            external_env=external_env,
+                        ),
+                    )
                 elif kind == "test_smart":
                     profile = str(item.get("profile") or "")
                     timeout = max(5, min(3600, int(item.get("timeout") or 600)))
-                    data = self.runtime.smart_test(profile, timeout)
+                    data = self.runtime.smart_test(
+                        profile,
+                        timeout,
+                        external_env=external_env,
+                    )
                     result = Result(bool(data.get("passed")), kind, data=data,
                                     error=None if data.get("passed") else "Smart test failed",
                                     code=None if data.get("passed") else "TEST_FAILED")
@@ -1427,7 +1495,10 @@ class CommandService:
                     profile = str(item.get("profile") or "")
                     timeout = max(5, min(3600, int(item.get("timeout") or 600)))
                     data = self.runtime.test_with_evidence(
-                        profile, timeout, str(item.get("title") or "test-evidence")
+                        profile,
+                        timeout,
+                        str(item.get("title") or "test-evidence"),
+                        external_env=external_env,
                     )
                     result = Result(bool(data.get("passed")), kind, data=data,
                                     error=None if data.get("passed") else "Test evidence failed",
@@ -1446,9 +1517,14 @@ class CommandService:
                     timeout = max(5.0, min(180.0, float(item.get("timeout") or 45.0)))
                     process_id = self.ids.next("P")
                     data = self.runtime.swagger_evidence(
-                        process_id, profile, url, timeout,
-                        bool(item.get("screenshot", True)), bool(item.get("start_if_needed", True)),
-                        bool(item.get("keep_running", False))
+                        process_id,
+                        profile,
+                        url,
+                        timeout,
+                        bool(item.get("screenshot", True)),
+                        bool(item.get("start_if_needed", True)),
+                        bool(item.get("keep_running", False)),
+                        external_env=external_env,
                     )
                     result = Result(bool(data.get("ok")), kind, data=data,
                                     error=None if data.get("ok") else "Swagger evidence failed",
@@ -1486,6 +1562,7 @@ class CommandService:
                             connection_alias=str(item.get("connection_alias") or ""),
                             profile_id=str(item.get("profile") or ""),
                             timeout=max(30, min(1800, int(item.get("timeout") or 300))),
+                            external_env=external_env,
                         ))
                 elif kind == "ef_script":
                     migration_project = str(item.get("migration_project") or "")
@@ -1503,6 +1580,7 @@ class CommandService:
                             timeout=max(30, min(1800, int(item.get("timeout") or 300))),
                             cursor=max(0, int(item.get("cursor") or 0)),
                             max_bytes=max(512, min(1024 * 1024, int(item.get("max_bytes") or 16384))),
+                            external_env=external_env,
                         ))
                 elif kind == "ef_database_update":
                     migration_project = str(item.get("migration_project") or "")
@@ -1530,6 +1608,7 @@ class CommandService:
                             profile_id=str(item.get("profile") or ""),
                             apply_authorized=bool(item.get("apply_authorized", False)),
                             timeout=max(30, min(3600, int(item.get("timeout") or 600))),
+                            external_env=external_env,
                         )
                         result = Result(True, kind, data=data)
                 elif kind == "db_query":

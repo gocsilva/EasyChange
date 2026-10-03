@@ -19,9 +19,23 @@ _READ_ONLY = re.compile(r"^\s*(?:--[^\n]*\n\s*)*(select|with|pragma|explain|show
 class DatabaseService:
     """Workspace-local SQL helper. Read-only by default; secrets remain in environment variables."""
 
-    def __init__(self, workspace: Workspace) -> None:
+    def __init__(self, workspace: Workspace, external_env_provider=None) -> None:
         self.workspace = workspace
+        self.external_env_provider = external_env_provider
         self.config_path = workspace.root_path / ".easychange" / "db_connections.json"
+
+    def _env_value(self, name: str) -> str | None:
+        key = str(name or "").strip()
+        if not key:
+            return None
+        if self.external_env_provider is not None:
+            try:
+                supplied = dict(self.external_env_provider() or {})
+                if key in supplied:
+                    return str(supplied[key])
+            except Exception:
+                pass
+        return os.environ.get(key)
 
     def connections(self) -> dict:
         value = self._config()
@@ -202,12 +216,11 @@ class DatabaseService:
         finally:
             connection.close()
 
-    @staticmethod
-    def _secret_env(cfg: dict, provider_password_env: str) -> dict:
+    def _secret_env(self, cfg: dict, provider_password_env: str) -> dict:
         env = os.environ.copy()
         name = str(cfg.get("password_env") or "")
         if name:
-            value = os.environ.get(name)
+            value = self._env_value(name)
             if value:
                 env[provider_password_env] = value
         return env
@@ -219,9 +232,9 @@ class DatabaseService:
         server_env = str(cfg.get("server_env") or "")
         database_env = str(cfg.get("database_env") or "")
         user_env = str(cfg.get("user_env") or "")
-        server = str(cfg.get("server") or (os.environ.get(server_env) if server_env else "") or "")
-        database = str(cfg.get("database") or (os.environ.get(database_env) if database_env else "") or "")
-        user = str(cfg.get("user") or (os.environ.get(user_env) if user_env else "") or "")
+        server = str(cfg.get("server") or (self._env_value(server_env) if server_env else "") or "")
+        database = str(cfg.get("database") or (self._env_value(database_env) if database_env else "") or "")
+        user = str(cfg.get("user") or (self._env_value(user_env) if user_env else "") or "")
         if not server:
             raise ValueError("SQLSERVER_SERVER_REQUIRED")
         argv = [exe, "-S", server, "-W", "-s", "|", "-h", "-1", "-Q", sql]
@@ -241,7 +254,7 @@ class DatabaseService:
         for flag, key, env_key in (("-h", "host", "host_env"), ("-p", "port", "port_env"),
                                    ("-d", "database", "database_env"), ("-U", "user", "user_env")):
             env_name = str(cfg.get(env_key) or "")
-            value = cfg.get(key) or (os.environ.get(env_name) if env_name else "")
+            value = cfg.get(key) or (self._env_value(env_name) if env_name else "")
             if value:
                 argv += [flag, str(value)]
         return self._cli_query("postgresql", argv, self._secret_env(cfg, "PGPASSWORD"), max_rows, timeout)
@@ -254,7 +267,7 @@ class DatabaseService:
         for flag, key, env_key in (("-h", "host", "host_env"), ("-P", "port", "port_env"),
                                    ("-D", "database", "database_env"), ("-u", "user", "user_env")):
             env_name = str(cfg.get(env_key) or "")
-            value = cfg.get(key) or (os.environ.get(env_name) if env_name else "")
+            value = cfg.get(key) or (self._env_value(env_name) if env_name else "")
             if value:
                 argv += [flag, str(value)]
         return self._cli_query("mysql", argv, self._secret_env(cfg, "MYSQL_PWD"), max_rows, timeout)

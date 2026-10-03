@@ -36,9 +36,15 @@ def _slug(value: str) -> str:
 class ProjectRuntimeService:
     """Deterministic project runtime/test/evidence helper for Machine Mode."""
 
-    def __init__(self, workspace: Workspace, processes: ProcessService) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        processes: ProcessService,
+        external_env_provider=None,
+    ) -> None:
         self.workspace = workspace
         self.processes = processes
+        self.external_env_provider = external_env_provider
         self.evidence_root = workspace.root_path / ".easychange" / "evidence"
         self.evidence_root.mkdir(parents=True, exist_ok=True)
         self.config_path = workspace.root_path / ".easychange" / "runtime_profiles.json"
@@ -123,6 +129,14 @@ class ProjectRuntimeService:
         refs = self._env_refs(profile.get("env_refs"))
 
         env: dict[str, str] = dict(os.environ) if inherit_env else {}
+        host_env = external_env
+        if host_env is None and self.external_env_provider is not None:
+            try:
+                supplied = self.external_env_provider()
+                host_env = dict(supplied or {})
+            except Exception:
+                host_env = {}
+        host_env = dict(host_env or {})
         for key in allowlist:
             if key in os.environ:
                 env[key] = os.environ[key]
@@ -135,7 +149,7 @@ class ProjectRuntimeService:
             if prefix in {"PROCESS_ENV", "REMOTE_ENV", "ENV"}:
                 source_value = os.environ.get(source)
             else:
-                source_value = (external_env or {}).get(source)
+                source_value = host_env.get(source)
             if source_value is None:
                 unresolved.append(ref)
                 continue
@@ -473,12 +487,21 @@ class ProjectRuntimeService:
             return available[0]
         raise RuntimeError("No runtime profile detected")
 
-    def start(self, process_id: str, profile_id: str = "") -> dict:
+    def start(
+        self,
+        process_id: str,
+        profile_id: str = "",
+        *,
+        external_env: dict[str, str] | None = None,
+    ) -> dict:
         profile = self.profile(profile_id)
         argv = profile.get("run_argv")
         if not argv:
             raise RuntimeError(f"Profile is not runnable: {profile.get('id')}")
-        process_env, env_meta = self.resolve_environment(profile)
+        process_env, env_meta = self.resolve_environment(
+            profile,
+            external_env=external_env,
+        )
         result = self.processes.start(
             list(argv),
             process_id,
@@ -599,13 +622,18 @@ class ProjectRuntimeService:
         mode: str,
         job_id: str,
         profile_id: str = "",
+        *,
+        external_env: dict[str, str] | None = None,
     ) -> dict:
         job_id = str(job_id or "").strip()
         if not job_id:
             raise ValueError("JOB_ID_REQUIRED")
         argv, profile = self._runtime_job_target(mode, profile_id)
         if profile is not None:
-            process_env, env_meta = self.resolve_environment(profile)
+            process_env, env_meta = self.resolve_environment(
+                profile,
+                external_env=external_env,
+            )
             redact_values = self._redaction_values(profile, process_env)
             profile_name = str(profile.get("id") or profile.get("project") or "")
         else:
@@ -636,11 +664,33 @@ class ProjectRuntimeService:
             "environment": env_meta,
         }
 
-    def start_test_job(self, job_id: str, profile_id: str = "") -> dict:
-        return self._start_runtime_job("test", job_id, profile_id)
+    def start_test_job(
+        self,
+        job_id: str,
+        profile_id: str = "",
+        *,
+        external_env: dict[str, str] | None = None,
+    ) -> dict:
+        return self._start_runtime_job(
+            "test",
+            job_id,
+            profile_id,
+            external_env=external_env,
+        )
 
-    def start_build_job(self, job_id: str, profile_id: str = "") -> dict:
-        return self._start_runtime_job("build", job_id, profile_id)
+    def start_build_job(
+        self,
+        job_id: str,
+        profile_id: str = "",
+        *,
+        external_env: dict[str, str] | None = None,
+    ) -> dict:
+        return self._start_runtime_job(
+            "build",
+            job_id,
+            profile_id,
+            external_env=external_env,
+        )
 
     def test_job_result(self, job_id: str) -> dict:
         result = self.processes.job_result(job_id)
@@ -697,7 +747,13 @@ class ProjectRuntimeService:
             max_bytes=max_bytes,
         )
 
-    def smart_test(self, profile_id: str = "", timeout: int = 600) -> dict:
+    def smart_test(
+        self,
+        profile_id: str = "",
+        timeout: int = 600,
+        *,
+        external_env: dict[str, str] | None = None,
+    ) -> dict:
         started_at = time.monotonic()
         profiles = self.profiles()
         selected = self.profile(profile_id, profiles=profiles) if profile_id else None
@@ -714,7 +770,10 @@ class ProjectRuntimeService:
                     commands.append(("workspace", list(workspace_profile["workspace_test_argv"]), workspace_profile))
         results = []
         for identifier, argv, command_profile in commands:
-            process_env, env_meta = self.resolve_environment(command_profile)
+            process_env, env_meta = self.resolve_environment(
+                command_profile,
+                external_env=external_env,
+            )
             result = self.processes.run(
                 argv,
                 timeout=timeout,
@@ -741,7 +800,10 @@ class ProjectRuntimeService:
         if not target.get("run_argv"):
             raise RuntimeError("No tests or runnable smoke profile detected")
         process_id = f"SMOKE{int(time.time() * 1000) % 1000000}"
-        smoke_env, smoke_env_meta = self.resolve_environment(target)
+        smoke_env, smoke_env_meta = self.resolve_environment(
+            target,
+            external_env=external_env,
+        )
         started = self.processes.start(
             list(target["run_argv"]),
             process_id,
@@ -807,9 +869,18 @@ class ProjectRuntimeService:
             time.sleep(0.35)
         return {"ok": False, "error": "HTTP_STARTUP_TIMEOUT", "last": last, "urls": urls}
 
-    def swagger_evidence(self, process_id: str, profile_id: str = "", url: str = "",
-                         timeout: float = 45.0, screenshot: bool = True, start_if_needed: bool = True,
-                         keep_running: bool = False) -> dict:
+    def swagger_evidence(
+        self,
+        process_id: str,
+        profile_id: str = "",
+        url: str = "",
+        timeout: float = 45.0,
+        screenshot: bool = True,
+        start_if_needed: bool = True,
+        keep_running: bool = False,
+        *,
+        external_env: dict[str, str] | None = None,
+    ) -> dict:
         profile = self.profile(profile_id)
         started_process = None
         candidates = [url] if url else list(profile.get("swagger_candidates") or [])
@@ -818,7 +889,10 @@ class ProjectRuntimeService:
         if not candidates:
             raise RuntimeError("No Swagger/OpenAPI URL detected; pass url explicitly")
         if start_if_needed and profile.get("run_argv"):
-            process_env, _env_meta = self.resolve_environment(profile)
+            process_env, _env_meta = self.resolve_environment(
+                profile,
+                external_env=external_env,
+            )
             started_process = self.processes.start(
                 list(profile["run_argv"]),
                 process_id,
@@ -944,10 +1018,20 @@ class ProjectRuntimeService:
             "duration_ms": int((time.monotonic() - started_at) * 1000),
         }
 
-    def test_with_evidence(self, profile_id: str = "", timeout: int = 600,
-                           title: str = "test-evidence") -> dict:
+    def test_with_evidence(
+        self,
+        profile_id: str = "",
+        timeout: int = 600,
+        title: str = "test-evidence",
+        *,
+        external_env: dict[str, str] | None = None,
+    ) -> dict:
         started_at = time.monotonic()
-        test = self.smart_test(profile_id, timeout)
+        test = self.smart_test(
+            profile_id,
+            timeout,
+            external_env=external_env,
+        )
         evidence = self.evidence(title)
         return {
             "passed": bool(test.get("passed")),

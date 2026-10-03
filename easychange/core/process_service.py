@@ -5,6 +5,7 @@ import os
 
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ class RunningProcess:
     stdout_path: Path
     stderr_path: Path
     redact_values: tuple[str, ...] = ()
+    pump_threads: tuple[threading.Thread, ...] = ()
 
 
 def _redact(text: str, values) -> str:
@@ -34,6 +36,74 @@ def _redact(text: str, values) -> str:
         if secret:
             output = output.replace(secret, "[REDACTED]")
     return output
+
+
+def _redact_bytes(value: bytes, secrets: tuple[bytes, ...]) -> bytes:
+    output = bytes(value or b"")
+    for secret in secrets:
+        if secret:
+            output = output.replace(secret, b"[REDACTED]")
+    return output
+
+
+def _stream_redacted(source, target_path: Path, values) -> None:
+    """Copy a pipe to disk while ensuring secret byte sequences never hit disk."""
+    secrets = tuple(
+        sorted(
+            {
+                str(value).encode("utf-8")
+                for value in (values or ())
+                if str(value)
+            },
+            key=len,
+            reverse=True,
+        )
+    )
+    keep = max((len(secret) for secret in secrets), default=1) - 1
+    pending = b""
+    try:
+        with target_path.open("wb") as target:
+            while True:
+                chunk = source.read(4096)
+                if not chunk:
+                    break
+                pending += chunk
+                while len(pending) > keep:
+                    safe_limit = len(pending) - keep
+                    match_start = None
+                    match_secret = None
+                    for secret in secrets:
+                        start = pending.find(secret)
+                        if start >= 0 and start < safe_limit:
+                            if (
+                                match_start is None
+                                or start < match_start
+                                or (start == match_start and len(secret) > len(match_secret or b""))
+                            ):
+                                match_start = start
+                                match_secret = secret
+                    if match_start is not None and match_secret is not None:
+                        target.write(pending[:match_start])
+                        target.write(b"[REDACTED]")
+                        pending = pending[match_start + len(match_secret):]
+                        continue
+                    target.write(pending[:safe_limit])
+                    pending = pending[safe_limit:]
+            if pending:
+                target.write(_redact_bytes(pending, secrets))
+            target.flush()
+            os.fsync(target.fileno())
+    finally:
+        try:
+            source.close()
+        except Exception:
+            pass
+
+
+def _join_pumps(item: RunningProcess, timeout: float = 3.0) -> None:
+    for thread in item.pump_threads or ():
+        if thread.is_alive():
+            thread.join(timeout=max(0.05, float(timeout)))
 
 
 def _diagnostics(stdout: str, stderr: str, limit: int = 12000) -> str:
@@ -164,6 +234,7 @@ class ProcessService:
         code = item.process.poll()
         if code is None:
             return current
+        _join_pumps(item)
         stdout, stdout_size, stdout_hash = self._tail_file(item.stdout_path, 32000 if code == 0 else 64000)
         stderr, stderr_size, stderr_hash = self._tail_file(item.stderr_path, 32000 if code == 0 else 64000)
         stdout = _redact(stdout, item.redact_values)
@@ -654,22 +725,63 @@ class ProcessService:
         started = time.monotonic()
 
         try:
-            with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
-                completed = subprocess.run(
+            secure_values = tuple(str(value) for value in (redact_values or ()) if str(value))
+            if secure_values:
+                proc = subprocess.Popen(
                     argv,
                     cwd=self.cwd,
                     stdin=subprocess.DEVNULL,
-                    stdout=stdout_file,
-                    stderr=stderr_file,
-                    timeout=timeout,
-                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     shell=False,
                     env=env,
+                    bufsize=0,
                 )
+                assert proc.stdout is not None and proc.stderr is not None
+                pumps = (
+                    threading.Thread(
+                        target=_stream_redacted,
+                        args=(proc.stdout, stdout_path, secure_values),
+                        daemon=True,
+                        name=f"easychange-redact-out-{proc.pid}",
+                    ),
+                    threading.Thread(
+                        target=_stream_redacted,
+                        args=(proc.stderr, stderr_path, secure_values),
+                        daemon=True,
+                        name=f"easychange-redact-err-{proc.pid}",
+                    ),
+                )
+                for thread in pumps:
+                    thread.start()
+                try:
+                    returncode = proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                    for thread in pumps:
+                        thread.join(timeout=3)
+                    raise
+                for thread in pumps:
+                    thread.join(timeout=3)
+            else:
+                with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+                    completed = subprocess.run(
+                        argv,
+                        cwd=self.cwd,
+                        stdin=subprocess.DEVNULL,
+                        stdout=stdout_file,
+                        stderr=stderr_file,
+                        timeout=timeout,
+                        check=False,
+                        shell=False,
+                        env=env,
+                    )
+                returncode = completed.returncode
 
             stdout_size = stdout_path.stat().st_size if stdout_path.exists() else 0
             stderr_size = stderr_path.stat().st_size if stderr_path.exists() else 0
-            tail_limit = 4000 if completed.returncode == 0 else 12000
+            tail_limit = 4000 if returncode == 0 else 12000
 
             def tail(path: Path, limit: int) -> str:
                 try:
@@ -702,7 +814,7 @@ class ProcessService:
             diagnostics_text = _redact("\n".join(diagnostics[-200:])[-12000:], redact_values)
             self.last_execution = {
                 "argv": argv,
-                "returncode": completed.returncode,
+                "returncode": returncode,
                 "stdout": stdout,
                 "stderr": stderr,
                 "diagnostics": diagnostics_text,
@@ -738,23 +850,55 @@ class ProcessService:
         if existing is not None and existing.process.poll() is None:
             raise RuntimeError(f"Process already running: {process_id}")
         stdout_path, stderr_path = self.root / f"{process_id}.out", self.root / f"{process_id}.err"
-        stdout_file, stderr_file = stdout_path.open("wb"), stderr_path.open("wb")
-        try:
+        secure_values = tuple(str(value) for value in (redact_values or ()) if str(value))
+        pump_threads: tuple[threading.Thread, ...] = ()
+        if secure_values:
             proc = subprocess.Popen(
-                argv, cwd=self.cwd, stdin=subprocess.DEVNULL,
-                stdout=stdout_file, stderr=stderr_file, shell=False,
+                argv,
+                cwd=self.cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
                 env=env,
+                bufsize=0,
             )
-        finally:
-            stdout_file.close()
-            stderr_file.close()
+            assert proc.stdout is not None and proc.stderr is not None
+            pump_threads = (
+                threading.Thread(
+                    target=_stream_redacted,
+                    args=(proc.stdout, stdout_path, secure_values),
+                    daemon=True,
+                    name=f"easychange-redact-out-{process_id}",
+                ),
+                threading.Thread(
+                    target=_stream_redacted,
+                    args=(proc.stderr, stderr_path, secure_values),
+                    daemon=True,
+                    name=f"easychange-redact-err-{process_id}",
+                ),
+            )
+            for thread in pump_threads:
+                thread.start()
+        else:
+            stdout_file, stderr_file = stdout_path.open("wb"), stderr_path.open("wb")
+            try:
+                proc = subprocess.Popen(
+                    argv, cwd=self.cwd, stdin=subprocess.DEVNULL,
+                    stdout=stdout_file, stderr=stderr_file, shell=False,
+                    env=env,
+                )
+            finally:
+                stdout_file.close()
+                stderr_file.close()
         self._processes[process_id] = RunningProcess(
             process_id,
             argv,
             proc,
             stdout_path,
             stderr_path,
-            tuple(str(value) for value in (redact_values or ()) if str(value)),
+            secure_values,
+            pump_threads,
         )
         return {"process_id": process_id, "pid": proc.pid, "state": "RUNNING", "argv": argv}
 
@@ -799,6 +943,7 @@ class ProcessService:
             except subprocess.TimeoutExpired:
                 item.process.kill()
                 item.process.wait(timeout=3)
+        _join_pumps(item)
         result = {"process_id": process_id, "state": "STOPPED", "returncode": item.process.returncode}
         self._prune_finished()
         return result
