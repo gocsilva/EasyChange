@@ -25,10 +25,26 @@ class MaintenanceService:
     MAX_RESULTS = 128
     MAX_JOBS = 128
     MAX_EVIDENCE_DIRS = 20
+    DEFAULT_MAX_STATE_BYTES = 256 * 1024 * 1024
+    DEFAULT_MAX_EVIDENCE_BYTES = 128 * 1024 * 1024
+
+    @staticmethod
+    def _byte_budget(env_name: str, default: int) -> int:
+        try:
+            value = int(os.environ.get(env_name) or default)
+        except (TypeError, ValueError):
+            value = default
+        return max(1024 * 1024, min(16 * 1024 * 1024 * 1024, value))
 
     def __init__(self, workspace_root: Path) -> None:
         self.workspace_root = Path(workspace_root).resolve()
         self.easy_root = self.workspace_root / ".easychange"
+        self.max_state_bytes = self._byte_budget(
+            "EASYCHANGE_MAX_STATE_BYTES", self.DEFAULT_MAX_STATE_BYTES
+        )
+        self.max_evidence_bytes = self._byte_budget(
+            "EASYCHANGE_MAX_EVIDENCE_BYTES", self.DEFAULT_MAX_EVIDENCE_BYTES
+        )
 
     def _assert_easychange_owned(self, path: Path) -> Path:
         # Use lexical absolute paths, never resolve symlinks. A .easychange
@@ -153,6 +169,154 @@ class MaintenanceService:
         report["categories"][category] = report["categories"].get(category, 0) + size
         if len(report["removed"]) < 100:
             report["removed"].append(str(target))
+
+    @staticmethod
+    def _mtime(path: Path) -> float:
+        try:
+            return float(path.stat().st_mtime)
+        except OSError:
+            return 0.0
+
+    def _evidence_dirs(self) -> list[Path]:
+        root = self.easy_root / "evidence"
+        try:
+            return [path for path in root.iterdir() if path.is_dir() and not path.is_symlink()]
+        except OSError:
+            return []
+
+    def _pressure_candidates(
+        self,
+        *,
+        active_process_ids: set[str],
+        referenced_blobs: set[str],
+    ) -> list[tuple[float, Path, str]]:
+        """Return disposable EasyChange-owned entries, oldest first.
+
+        Journal/session/config/locks and referenced blobs are intentionally absent.
+        """
+        candidates: list[tuple[float, Path, str]] = []
+
+        results_root = self.easy_root / "results"
+        try:
+            for path in results_root.glob("Q*.json.zlib"):
+                candidates.append((self._mtime(path), path, "results_pressure"))
+        except OSError:
+            pass
+
+        for path in self._evidence_dirs():
+            candidates.append((self._mtime(path), path, "evidence_pressure"))
+
+        try:
+            for path in self.easy_root.rglob("*.tmp"):
+                candidates.append((self._mtime(path), path, "temp_pressure"))
+        except OSError:
+            pass
+
+        jobs_root = self.easy_root / "jobs"
+        try:
+            for path in jobs_root.glob("*.json"):
+                state = ""
+                try:
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(value, dict):
+                        state = str(value.get("state") or "").upper()
+                except (OSError, json.JSONDecodeError):
+                    state = "CORRUPT"
+                if state == "RUNNING" or path.stem in active_process_ids:
+                    continue
+                candidates.append((self._mtime(path), path, "jobs_pressure"))
+        except OSError:
+            pass
+
+        process_root = self.easy_root / "processes"
+        try:
+            for path in process_root.glob("*.*"):
+                if path.suffix.lower() not in {".out", ".err"}:
+                    continue
+                if path.stem in active_process_ids:
+                    continue
+                candidates.append((self._mtime(path), path, "process_logs_pressure"))
+        except OSError:
+            pass
+
+        blob_root = self.easy_root / "blobs"
+        try:
+            for path in blob_root.glob("*.zlib"):
+                if path.stem not in referenced_blobs:
+                    candidates.append((self._mtime(path), path, "orphan_blobs_pressure"))
+        except OSError:
+            pass
+
+        # A path can appear in a TTL category and a pressure category only
+        # before deletion; de-duplicate lexically here.
+        unique: dict[str, tuple[float, Path, str]] = {}
+        for item in candidates:
+            key = os.path.normcase(os.path.abspath(item[1]))
+            unique.setdefault(key, item)
+        return sorted(unique.values(), key=lambda item: (item[0], str(item[1]).casefold()))
+
+    def _enforce_disk_budgets(
+        self,
+        report: dict,
+        *,
+        active_process_ids: set[str],
+        referenced_blobs: set[str],
+        dry_run: bool,
+    ) -> None:
+        evidence_before = sum(self._path_size(path) for path in self._evidence_dirs())
+        projected_evidence = evidence_before
+        evidence_removed: set[str] = set()
+
+        for path in sorted(self._evidence_dirs(), key=lambda item: (self._mtime(item), str(item))):
+            if projected_evidence <= self.max_evidence_bytes:
+                break
+            size = self._path_size(path)
+            self._remove(path, report, "evidence_budget", dry_run=dry_run)
+            projected_evidence = max(0, projected_evidence - size)
+            evidence_removed.add(os.path.normcase(os.path.abspath(path)))
+
+        state_before = int(self.stats().get("total_bytes") or 0)
+        # In dry-run, prior TTL/LRU removals are still present physically. Use
+        # reclaimed_bytes to model the projected size instead of deleting.
+        projected_state = (
+            max(0, state_before - int(report.get("reclaimed_bytes") or 0))
+            if dry_run
+            else state_before
+        )
+
+        for _mtime, path, category in self._pressure_candidates(
+            active_process_ids=active_process_ids,
+            referenced_blobs=referenced_blobs,
+        ):
+            if projected_state <= self.max_state_bytes:
+                break
+            key = os.path.normcase(os.path.abspath(path))
+            if key in evidence_removed:
+                continue
+            if not path.exists() and not path.is_symlink():
+                continue
+            size = self._path_size(path)
+            self._remove(path, report, category, dry_run=dry_run)
+            projected_state = max(0, projected_state - size)
+
+        actual_after = int(self.stats().get("total_bytes") or 0)
+        if dry_run:
+            projected_after = projected_state
+        else:
+            projected_after = actual_after
+        report["disk_budget"] = {
+            "state_max_bytes": self.max_state_bytes,
+            "evidence_max_bytes": self.max_evidence_bytes,
+            "state_before_bytes": state_before,
+            "state_after_bytes": actual_after,
+            "state_projected_after_bytes": projected_after,
+            "evidence_before_bytes": evidence_before,
+            "evidence_projected_after_bytes": projected_evidence,
+            "over_budget": projected_after > self.max_state_bytes,
+            "essential_state_pressure_bytes": max(
+                0, projected_after - self.max_state_bytes
+            ),
+        }
 
     def automatic_cleanup(
         self,
@@ -305,6 +469,13 @@ class MaintenanceService:
             for path in blobs:
                 if path.stem not in referenced_blobs:
                     self._remove(path, report, "orphan_blobs", dry_run=dry_run)
+
+        self._enforce_disk_budgets(
+            report,
+            active_process_ids=active_process_ids,
+            referenced_blobs=referenced_blobs,
+            dry_run=dry_run,
+        )
 
         report["before"] = before
         report["after"] = before if dry_run else self.stats(include_side_temps=scan_workspace_temps)

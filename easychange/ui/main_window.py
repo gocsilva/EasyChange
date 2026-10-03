@@ -232,7 +232,22 @@ class MainWindow(QMainWindow):
         report = None
         try:
             old_service.close()
-            report = MaintenanceService(workspace_path).purge_all()
+            workspace_report = MaintenanceService(workspace_path).purge_all()
+            runtime_report = old_service.processes.purge_durable_state()
+            report = {
+                "mode": "full",
+                "removed_files": int(workspace_report.get("removed_files") or 0)
+                + int(runtime_report.get("removed_files") or 0),
+                "reclaimed_bytes": int(workspace_report.get("reclaimed_bytes") or 0)
+                + int(runtime_report.get("reclaimed_bytes") or 0),
+                "workspace": workspace_report,
+                "external_runtime": runtime_report,
+            }
+            if not runtime_report.get("ok", False):
+                raise RuntimeError(
+                    "EXTERNAL_RUNTIME_CLEANUP_FAILED:"
+                    + str(runtime_report.get("error") or "unknown")
+                )
             new_service = CommandService(Workspace.open(workspace_path))
             new_service.machine = False
             new_service.output = previous_output

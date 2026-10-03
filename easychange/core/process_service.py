@@ -50,6 +50,23 @@ def _diagnostics(stdout: str, stderr: str, limit: int = 12000) -> str:
 
 
 class ProcessService:
+    JOB_TTL_SECONDS = 24 * 60 * 60
+    LOG_TTL_SECONDS = 6 * 60 * 60
+    SCRIPT_TTL_SECONDS = 7 * 24 * 60 * 60
+    MAX_DURABLE_JOBS = 128
+    DEFAULT_MAX_RUNTIME_BYTES = 256 * 1024 * 1024
+
+    @staticmethod
+    def _runtime_budget() -> int:
+        try:
+            value = int(
+                os.environ.get("EASYCHANGE_MAX_RUNTIME_BYTES")
+                or ProcessService.DEFAULT_MAX_RUNTIME_BYTES
+            )
+        except (TypeError, ValueError):
+            value = ProcessService.DEFAULT_MAX_RUNTIME_BYTES
+        return max(1024 * 1024, min(16 * 1024 * 1024 * 1024, value))
+
     def __init__(self, cwd: Path) -> None:
         self.cwd = Path(cwd).resolve()
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "EasyChange" / "Workspaces"
@@ -69,6 +86,7 @@ class ProcessService:
         self.root.mkdir(parents=True, exist_ok=True)
         self.jobs_root = self.workspace_state_root / "jobs"
         self.jobs_root.mkdir(parents=True, exist_ok=True)
+        self.max_runtime_bytes = self._runtime_budget()
         self._migrate_legacy_jobs()
         self._processes: dict[str, RunningProcess] = {}
         self.last_execution: dict | None = None
@@ -352,15 +370,263 @@ class ProcessService:
                         path.unlink(missing_ok=True)
                     except OSError:
                         pass
-    def maintenance(self, keep_finished: int = 8) -> dict:
-        before = len(self._processes)
-        self._prune_finished(keep=max(0, int(keep_finished)))
-        running = sum(1 for item in self._processes.values() if item.process.poll() is None)
+    @staticmethod
+    def _file_size(path: Path) -> int:
+        try:
+            return int(path.stat().st_size) if path.is_file() else 0
+        except OSError:
+            return 0
+
+    def storage_stats(self) -> dict:
+        total = 0
+        files = 0
+        try:
+            items = list(self.workspace_state_root.rglob("*"))
+        except OSError:
+            items = []
+        for path in items:
+            if not path.is_file() or path.is_symlink():
+                continue
+            total += self._file_size(path)
+            files += 1
         return {
-            "tracked_before": before,
+            "root": str(self.workspace_state_root),
+            "bytes": total,
+            "files": files,
+            "max_bytes": self.max_runtime_bytes,
+            "over_budget": total > self.max_runtime_bytes,
+        }
+
+    def _safe_external_unlink(self, path: Path) -> int:
+        candidate = Path(os.path.abspath(path))
+        root = Path(os.path.abspath(self.workspace_state_root))
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"REFUSING_NON_EASYCHANGE_RUNTIME_PATH:{candidate}") from exc
+        size = self._file_size(candidate)
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError:
+            return 0
+        return size
+
+    def _durable_job_state(self, path: Path) -> str:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            return str(value.get("state") or "").upper() if isinstance(value, dict) else ""
+        except (OSError, json.JSONDecodeError):
+            return "CORRUPT"
+
+    def maintenance(self, keep_finished: int = 8) -> dict:
+        before_count = len(self._processes)
+        self._prune_finished(keep=max(0, int(keep_finished)))
+        active = {
+            process_id
+            for process_id, item in self._processes.items()
+            if item.process.poll() is None
+        }
+        running = len(active)
+        before_storage = self.storage_stats()
+        now = time.time()
+        removed_files = 0
+        reclaimed_bytes = 0
+
+        # Terminal job manifests are bounded by age/count. A RUNNING manifest is
+        # never removed merely because the Python process map was lost.
+        try:
+            jobs = sorted(
+                self.jobs_root.glob("*.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            jobs = []
+        terminal_position = 0
+        for path in jobs:
+            state = self._durable_job_state(path)
+            if state == "RUNNING" or path.stem in active:
+                continue
+            try:
+                age = now - path.stat().st_mtime
+            except OSError:
+                age = self.JOB_TTL_SECONDS + 1
+            if terminal_position >= self.MAX_DURABLE_JOBS or age > self.JOB_TTL_SECONDS:
+                for target in (
+                    path,
+                    self.root / f"{path.stem}.out",
+                    self.root / f"{path.stem}.err",
+                ):
+                    size = self._safe_external_unlink(target)
+                    if size:
+                        removed_files += 1
+                        reclaimed_bytes += size
+            terminal_position += 1
+
+        # Orphan/inactive log files have a shorter TTL.
+        try:
+            logs = [
+                path for path in self.root.glob("*.*")
+                if path.suffix.lower() in {".out", ".err"}
+            ]
+        except OSError:
+            logs = []
+        for path in logs:
+            if path.stem in active:
+                continue
+            job_manifest = self.jobs_root / f"{path.stem}.json"
+            if job_manifest.exists() and self._durable_job_state(job_manifest) == "RUNNING":
+                continue
+            try:
+                age = now - path.stat().st_mtime
+            except OSError:
+                age = self.LOG_TTL_SECONDS + 1
+            if age > self.LOG_TTL_SECONDS:
+                size = self._safe_external_unlink(path)
+                if size:
+                    removed_files += 1
+                    reclaimed_bytes += size
+
+        # Generated EF scripts are EasyChange-owned, external to the repo, and
+        # disposable after their retention window.
+        script_root = self.workspace_state_root / "ef-scripts"
+        try:
+            scripts = [path for path in script_root.glob("*.sql") if path.is_file()]
+        except OSError:
+            scripts = []
+        for path in scripts:
+            try:
+                age = now - path.stat().st_mtime
+            except OSError:
+                age = self.SCRIPT_TTL_SECONDS + 1
+            if age > self.SCRIPT_TTL_SECONDS:
+                size = self._safe_external_unlink(path)
+                if size:
+                    removed_files += 1
+                    reclaimed_bytes += size
+
+        # Byte-pressure cleanup: only terminal jobs and inactive logs, oldest
+        # first. Running jobs/processes are preserved even if the quota remains
+        # exceeded.
+        current = self.storage_stats()["bytes"]
+        candidates: list[tuple[float, list[Path]]] = []
+        try:
+            jobs = list(self.jobs_root.glob("*.json"))
+        except OSError:
+            jobs = []
+        grouped_stems: set[str] = set()
+        for path in jobs:
+            if self._durable_job_state(path) == "RUNNING" or path.stem in active:
+                continue
+            grouped_stems.add(path.stem)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            candidates.append((
+                mtime,
+                [
+                    path,
+                    self.root / f"{path.stem}.out",
+                    self.root / f"{path.stem}.err",
+                ],
+            ))
+        try:
+            logs = list(self.root.glob("*.*"))
+        except OSError:
+            logs = []
+        for path in logs:
+            if path.suffix.lower() not in {".out", ".err"}:
+                continue
+            if path.stem in grouped_stems or path.stem in active:
+                continue
+            manifest = self.jobs_root / f"{path.stem}.json"
+            if manifest.exists() and self._durable_job_state(manifest) == "RUNNING":
+                continue
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            candidates.append((mtime, [path]))
+
+        try:
+            scripts = [
+                path for path in (self.workspace_state_root / "ef-scripts").glob("*.sql")
+                if path.is_file()
+            ]
+        except OSError:
+            scripts = []
+        for path in scripts:
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            candidates.append((mtime, [path]))
+
+        for _mtime, group in sorted(candidates, key=lambda item: item[0]):
+            if current <= self.max_runtime_bytes:
+                break
+            for path in group:
+                size = self._safe_external_unlink(path)
+                if size:
+                    current = max(0, current - size)
+                    removed_files += 1
+                    reclaimed_bytes += size
+
+        after_storage = self.storage_stats()
+        return {
+            "tracked_before": before_count,
             "tracked_after": len(self._processes),
             "running": running,
             "finished_retained": len(self._processes) - running,
+            "disk_before_bytes": before_storage["bytes"],
+            "disk_after_bytes": after_storage["bytes"],
+            "disk_max_bytes": self.max_runtime_bytes,
+            "disk_over_budget": after_storage["bytes"] > self.max_runtime_bytes,
+            "disk_reclaimed_bytes": reclaimed_bytes,
+            "disk_removed_files": removed_files,
+        }
+
+    def purge_durable_state(self) -> dict:
+        """Remove only this workspace's external EasyChange runtime state."""
+        if any(item.process.poll() is None for item in self._processes.values()):
+            raise RuntimeError("CANNOT_PURGE_RUNNING_EASYCHANGE_PROCESSES")
+        root = Path(os.path.abspath(self.workspace_state_root))
+        base = Path(
+            os.path.abspath(
+                Path(os.environ.get("LOCALAPPDATA") or Path.home())
+                / "EasyChange"
+                / "Workspaces"
+            )
+        )
+        try:
+            root.relative_to(base)
+        except ValueError as exc:
+            raise ValueError(f"REFUSING_NON_EASYCHANGE_RUNTIME_ROOT:{root}") from exc
+
+        before = self.storage_stats()
+        file_count = 0
+        if root.exists():
+            try:
+                file_count = sum(1 for path in root.rglob("*") if path.is_file())
+            except OSError:
+                file_count = 0
+            try:
+                import shutil
+                shutil.rmtree(root)
+            except OSError as exc:
+                return {
+                    "ok": False,
+                    "root": str(root),
+                    "removed_files": 0,
+                    "reclaimed_bytes": 0,
+                    "error": str(exc)[:300],
+                }
+        return {
+            "ok": True,
+            "root": str(root),
+            "removed_files": file_count,
+            "reclaimed_bytes": int(before.get("bytes") or 0),
         }
 
     def active_process_ids(self) -> set[str]:

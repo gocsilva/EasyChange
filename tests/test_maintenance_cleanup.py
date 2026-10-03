@@ -158,6 +158,7 @@ def test_health_and_maintenance_command_publish_storage_and_memory_bounds(tmp_pa
 
 def test_human_cleanup_button_removes_easychange_data_and_preserves_project(tmp_path, monkeypatch):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
     import pytest
     pytest.importorskip("PySide6")
     pytest.importorskip("qrcode")
@@ -177,6 +178,8 @@ def test_human_cleanup_button_removes_easychange_data_and_preserves_project(tmp_
 
     junk = tmp_path / ".easychange" / "manual-junk.bin"
     junk.write_bytes(b"x" * 1024)
+    external_junk = window.service.processes.workspace_state_root / "manual-junk.bin"
+    external_junk.write_bytes(b"external-junk")
     side_temp = tmp_path / ".main.py.easychange-999.tmp"
     side_temp.write_text("junk", encoding="utf-8")
 
@@ -197,6 +200,7 @@ def test_human_cleanup_button_removes_easychange_data_and_preserves_project(tmp_
     assert source.read_text(encoding="utf-8") == "print('project stays')\n"
     assert git_keep.exists()
     assert not junk.exists()
+    assert not external_junk.exists()
     assert not side_temp.exists()
     assert (tmp_path / ".easychange" / "session.json").exists()
     assert window.cleanup_easychange_button.isVisible()
@@ -206,3 +210,101 @@ def test_human_cleanup_button_removes_easychange_data_and_preserves_project(tmp_
     assert not window.cleanup_easychange_button.isVisible()
     window.close()
     app.processEvents()
+
+
+def test_evidence_byte_budget_prunes_oldest_without_touching_project_or_referenced_blobs(tmp_path, monkeypatch):
+    monkeypatch.setenv("EASYCHANGE_MAX_EVIDENCE_BYTES", str(1024 * 1024))
+    monkeypatch.setenv("EASYCHANGE_MAX_STATE_BYTES", str(4 * 1024 * 1024))
+
+    source = tmp_path / "Program.cs"
+    source.write_text("class Program {}", encoding="utf-8")
+
+    easy = tmp_path / ".easychange"
+    evidence_root = easy / "evidence"
+    old_dir = evidence_root / "old"
+    new_dir = evidence_root / "new"
+    old_dir.mkdir(parents=True)
+    new_dir.mkdir(parents=True)
+    (old_dir / "blob.bin").write_bytes(b"a" * (700 * 1024))
+    (new_dir / "blob.bin").write_bytes(b"b" * (700 * 1024))
+    now = time.time()
+    os.utime(old_dir, (now - 100, now - 100))
+    os.utime(new_dir, (now - 10, now - 10))
+
+    referenced_digest = "c" * 64
+    blobs = easy / "blobs"
+    blobs.mkdir(parents=True)
+    referenced = blobs / f"{referenced_digest}.zlib"
+    referenced.write_bytes(b"required-undo-snapshot")
+
+    service = MaintenanceService(tmp_path)
+    report = service.automatic_cleanup(
+        referenced_blobs={referenced_digest},
+        active_process_ids=set(),
+        now=now,
+    )
+
+    assert not old_dir.exists()
+    assert new_dir.exists()
+    assert referenced.exists()
+    assert source.read_text(encoding="utf-8") == "class Program {}"
+    assert report["disk_budget"]["evidence_projected_after_bytes"] <= 1024 * 1024
+    assert report["disk_budget"]["over_budget"] is False
+
+
+def test_external_runtime_byte_budget_prunes_terminal_lru_but_preserves_running(tmp_path, monkeypatch):
+    from easychange.core.process_service import ProcessService
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    monkeypatch.setenv("EASYCHANGE_MAX_RUNTIME_BYTES", str(1024 * 1024))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+
+    # RUNNING state is preserved even when it alone exceeds the quota.
+    active_job = service.jobs_root / "JACTIVE.json"
+    active_job.write_text(json.dumps({"state": "RUNNING"}), encoding="utf-8")
+    active_log = service.root / "JACTIVE.out"
+    active_log.write_bytes(b"r" * (1100 * 1024))
+
+    terminal_job = service.jobs_root / "JOLD.json"
+    terminal_job.write_text(json.dumps({"state": "SUCCEEDED"}), encoding="utf-8")
+    terminal_log = service.root / "JOLD.out"
+    terminal_log.write_bytes(b"x" * (700 * 1024))
+
+    now = time.time()
+    for path in (active_job, active_log):
+        os.utime(path, (now, now))
+    for path in (terminal_job, terminal_log):
+        os.utime(path, (now - 60, now - 60))
+
+    report = service.maintenance(keep_finished=8)
+
+    assert active_job.exists()
+    assert active_log.exists()
+    assert not terminal_job.exists()
+    assert not terminal_log.exists()
+    assert report["disk_reclaimed_bytes"] >= 700 * 1024
+    assert report["disk_over_budget"] is True  # active state is intentionally fail-safe preserved
+
+
+def test_external_runtime_purge_is_scoped_to_easychange_workspace(tmp_path, monkeypatch):
+    from easychange.core.process_service import ProcessService
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    important = workspace / "important.txt"
+    important.write_text("keep", encoding="utf-8")
+
+    service = ProcessService(workspace)
+    junk = service.workspace_state_root / "ef-scripts" / "junk.sql"
+    junk.parent.mkdir(parents=True, exist_ok=True)
+    junk.write_text("SELECT 1;", encoding="utf-8")
+    external_root = service.workspace_state_root
+
+    report = service.purge_durable_state()
+
+    assert report["ok"] is True
+    assert not external_root.exists()
+    assert important.read_text(encoding="utf-8") == "keep"
