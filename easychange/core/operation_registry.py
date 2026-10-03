@@ -15,8 +15,8 @@ TEXT_MUTATION_COMMANDS = frozenset({
 })
 STRUCTURED_CONTINUE_SAFE_TYPES = frozenset({
     "read", "search", "locate", "study", "definition", "references",
-    "discover_many", "read_regions", "read_many", "runtime_profiles",
-    "process_logs", "db_connections", "db_schema", *STRUCTURED_RECOVERY_TYPES,
+    "discover_many", "read_regions", "read_many", "runtime_profiles", "runtime_environment",
+    "git_diff", "process_logs", "db_connections", "db_schema", *STRUCTURED_RECOVERY_TYPES,
 })
 _OPERATION_FAMILIES = {
     **{name: "mutation" for name in STRUCTURED_MUTATION_TYPES},
@@ -25,7 +25,8 @@ _OPERATION_FAMILIES = {
     "read": "read", "read_many": "read", "read_regions": "read",
     "search": "discovery", "locate": "discovery", "study": "discovery",
     "definition": "discovery", "references": "discovery", "discover_many": "discovery",
-    "runtime_profiles": "runtime", "runtime_configure": "runtime", "run_project": "runtime",
+    "runtime_profiles": "runtime", "runtime_configure": "runtime", "runtime_environment": "runtime",
+    "run_project": "runtime", "git_diff": "git",
     "test_smart": "runtime", "test_evidence": "runtime", "swagger_evidence": "runtime",
     "evidence": "runtime", "process_logs": "runtime", "stop_process": "runtime",
     "db_connections": "database", "db_configure": "database", "db_schema": "database",

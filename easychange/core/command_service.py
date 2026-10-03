@@ -1290,10 +1290,42 @@ class CommandService:
                     })
                 elif kind == "runtime_configure":
                     result = Result(True, kind, data=self.runtime.configure_profile(
-                        str(item.get("profile_id") or ""), kind=str(item.get("kind") or "custom"),
-                        run_argv=item.get("run_argv"), test_argv=item.get("test_argv"),
+                        str(item.get("profile_id") or ""),
+                        kind=str(item.get("kind") or "custom"),
+                        run_argv=item.get("run_argv"),
+                        test_argv=item.get("test_argv"),
                         urls=item.get("urls") if isinstance(item.get("urls"), list) else None,
+                        env=item.get("env") if isinstance(item.get("env"), dict) else None,
+                        env_refs=item.get("env_refs") if isinstance(item.get("env_refs"), dict) else None,
+                        inherit_env=bool(item.get("inherit_env", True)),
+                        env_allowlist=(
+                            item.get("env_allowlist")
+                            if isinstance(item.get("env_allowlist"), list)
+                            else None
+                        ),
                     ))
+                elif kind == "runtime_environment":
+                    result = Result(
+                        True,
+                        kind,
+                        data=self.runtime.environment_status(str(item.get("profile") or "")),
+                    )
+                elif kind == "git_diff":
+                    result = Result(
+                        True,
+                        kind,
+                        data=self.git.diff_refs(
+                            base_ref=str(item.get("base_ref") or "") or None,
+                            head_ref=str(item.get("head_ref") or "") or None,
+                            path=str(item.get("path") or "") or None,
+                            name_only=bool(item.get("name_only", False)),
+                            name_status=bool(item.get("name_status", False)),
+                            unified_lines=max(0, min(100, int(item.get("unified_lines") or 3))),
+                            cursor=max(0, int(item.get("cursor") or 0)),
+                            max_bytes=max(256, min(2 * 1024 * 1024, int(item.get("max_bytes") or 65536))),
+                            max_items=max(1, min(5000, int(item.get("max_items") or 500))),
+                        ),
+                    )
                 elif kind == "run_project":
                     profile = str(item.get("profile") or "")
                     process_id = self.ids.next("P")

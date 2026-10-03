@@ -24,6 +24,16 @@ class RunningProcess:
     process: subprocess.Popen
     stdout_path: Path
     stderr_path: Path
+    redact_values: tuple[str, ...] = ()
+
+
+def _redact(text: str, values) -> str:
+    output = str(text or "")
+    for value in values or ():
+        secret = str(value or "")
+        if secret:
+            output = output.replace(secret, "[REDACTED]")
+    return output
 
 
 def _diagnostics(stdout: str, stderr: str, limit: int = 12000) -> str:
@@ -41,13 +51,36 @@ def _diagnostics(stdout: str, stderr: str, limit: int = 12000) -> str:
 
 class ProcessService:
     def __init__(self, cwd: Path) -> None:
-        self.cwd = cwd
-        self.root = cwd / ".easychange" / "processes"
+        self.cwd = Path(cwd).resolve()
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "EasyChange" / "Workspaces"
+        workspace_hash = hashlib.sha256(
+            str(self.cwd).casefold().encode("utf-8", errors="replace")
+        ).hexdigest()[:20]
+        self.workspace_state_root = base / workspace_hash
+        self.root = self.workspace_state_root / "processes"
         self.root.mkdir(parents=True, exist_ok=True)
-        self.jobs_root = cwd / ".easychange" / "jobs"
+        self.jobs_root = self.workspace_state_root / "jobs"
         self.jobs_root.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_jobs()
         self._processes: dict[str, RunningProcess] = {}
         self.last_execution: dict | None = None
+
+    def _migrate_legacy_jobs(self) -> None:
+        legacy = self.cwd / ".easychange" / "jobs"
+        if not legacy.is_dir():
+            return
+        try:
+            candidates = list(legacy.glob("*.json"))
+        except OSError:
+            return
+        for source in candidates[:1024]:
+            target = self.jobs_root / source.name
+            if target.exists():
+                continue
+            try:
+                target.write_bytes(source.read_bytes())
+            except OSError:
+                continue
 
     def _job_path(self, job_id: str) -> Path:
         safe = "".join(ch for ch in str(job_id) if ch.isalnum() or ch in "_-")
@@ -107,6 +140,8 @@ class ProcessService:
             return current
         stdout, stdout_size, stdout_hash = self._tail_file(item.stdout_path, 32000 if code == 0 else 64000)
         stderr, stderr_size, stderr_hash = self._tail_file(item.stderr_path, 32000 if code == 0 else 64000)
+        stdout = _redact(stdout, item.redact_values)
+        stderr = _redact(stderr, item.redact_values)
         state = "CANCELLED" if cancelled else ("SUCCEEDED" if code == 0 else "FAILED")
         finished_at = time.time()
         started_at = float(current.get("started_at") or finished_at)
@@ -126,13 +161,20 @@ class ProcessService:
         self._write_job(job_id, result)
         return result
 
-    def job_start(self, argv: list[str], job_id: str) -> dict:
+    def job_start(
+        self,
+        argv: list[str],
+        job_id: str,
+        *,
+        env: dict[str, str] | None = None,
+        redact_values: list[str] | tuple[str, ...] | None = None,
+    ) -> dict:
         previous = self._read_job(job_id)
         if previous is not None:
             if previous.get("argv") != argv:
                 raise RuntimeError("JOB_ID_CONFLICT")
             return self.job_status(job_id)
-        started = self.start(argv, job_id)
+        started = self.start(argv, job_id, env=env, redact_values=redact_values)
         record = {
             "job_id": job_id,
             "process_id": job_id,
@@ -240,7 +282,14 @@ class ProcessService:
             if item.process.poll() is None
         }
 
-    def run(self, argv: list[str], timeout: int = 300) -> dict:
+    def run(
+        self,
+        argv: list[str],
+        timeout: int = 300,
+        *,
+        env: dict[str, str] | None = None,
+        redact_values: list[str] | tuple[str, ...] | None = None,
+    ) -> dict:
         """Run a command without buffering unbounded stdout/stderr in RAM."""
         if not argv:
             raise ValueError("Command is empty")
@@ -261,6 +310,7 @@ class ProcessService:
                     timeout=timeout,
                     check=False,
                     shell=False,
+                    env=env,
                 )
 
             stdout_size = stdout_path.stat().st_size if stdout_path.exists() else 0
@@ -293,14 +343,15 @@ class ProcessService:
                 except OSError:
                     continue
 
-            stdout = tail(stdout_path, tail_limit)
-            stderr = tail(stderr_path, tail_limit)
+            stdout = _redact(tail(stdout_path, tail_limit), redact_values)
+            stderr = _redact(tail(stderr_path, tail_limit), redact_values)
+            diagnostics_text = _redact("\n".join(diagnostics[-200:])[-12000:], redact_values)
             self.last_execution = {
                 "argv": argv,
                 "returncode": completed.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
-                "diagnostics": "\n".join(diagnostics[-200:])[-12000:],
+                "diagnostics": diagnostics_text,
                 "stdout_chars": stdout_size,
                 "stderr_chars": stderr_size,
                 "stdout_bytes": stdout_size,
@@ -318,7 +369,14 @@ class ProcessService:
                 except OSError:
                     pass
 
-    def start(self, argv: list[str], process_id: str) -> dict:
+    def start(
+        self,
+        argv: list[str],
+        process_id: str,
+        *,
+        env: dict[str, str] | None = None,
+        redact_values: list[str] | tuple[str, ...] | None = None,
+    ) -> dict:
         if not argv:
             raise ValueError("Command is empty")
         self._prune_finished()
@@ -331,11 +389,19 @@ class ProcessService:
             proc = subprocess.Popen(
                 argv, cwd=self.cwd, stdin=subprocess.DEVNULL,
                 stdout=stdout_file, stderr=stderr_file, shell=False,
+                env=env,
             )
         finally:
             stdout_file.close()
             stderr_file.close()
-        self._processes[process_id] = RunningProcess(process_id, argv, proc, stdout_path, stderr_path)
+        self._processes[process_id] = RunningProcess(
+            process_id,
+            argv,
+            proc,
+            stdout_path,
+            stderr_path,
+            tuple(str(value) for value in (redact_values or ()) if str(value)),
+        )
         return {"process_id": process_id, "pid": proc.pid, "state": "RUNNING", "argv": argv}
 
     def list(self) -> list[dict]:
@@ -411,6 +477,8 @@ class ProcessService:
                 return "", 0
         stdout, stdout_size = tail(item.stdout_path)
         stderr, stderr_size = tail(item.stderr_path)
+        stdout = _redact(stdout, item.redact_values)
+        stderr = _redact(stderr, item.redact_values)
         running = item.process.poll() is None
         return {
             "process_id": process_id, "state": "RUNNING" if running else "EXITED",

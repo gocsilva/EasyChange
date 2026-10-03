@@ -19,6 +19,9 @@ from .process_service import ProcessService
 from .workspace import Workspace
 
 _SKIP = {".git", ".easychange", "bin", "obj", "node_modules", ".venv", "venv", "dist", "build"}
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SENSITIVE_ENV_RE = re.compile(r"(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|CONNECTION_?STRING)", re.I)
+_ENV_REF_PREFIXES = {"PROCESS_ENV", "REMOTE_ENV", "ENV", "MCP_HOST_ENV"}
 
 
 def _rel(root: Path, path: Path) -> str:
@@ -51,6 +54,126 @@ class ProjectRuntimeService:
             raise ValueError("Invalid runtime argv item")
         return result
 
+    @staticmethod
+    def _env_values(value) -> dict[str, str]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict) or len(value) > 64:
+            raise ValueError("Runtime env must be an object with at most 64 entries")
+        result: dict[str, str] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "").strip()
+            if not _ENV_NAME_RE.fullmatch(key):
+                raise ValueError(f"INVALID_ENV_NAME:{key}")
+            if _SENSITIVE_ENV_RE.search(key):
+                raise ValueError(f"SECRET_ENV_VALUE_NOT_ALLOWED_USE_ENV_REF:{key}")
+            text = str(raw_value)
+            if len(text) > 4096:
+                raise ValueError(f"ENV_VALUE_TOO_LONG:{key}")
+            result[key] = text
+        return result
+
+    @staticmethod
+    def _env_refs(value) -> dict[str, str]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict) or len(value) > 64:
+            raise ValueError("Runtime env_refs must be an object with at most 64 entries")
+        result: dict[str, str] = {}
+        for raw_key, raw_ref in value.items():
+            key = str(raw_key or "").strip()
+            if not _ENV_NAME_RE.fullmatch(key):
+                raise ValueError(f"INVALID_ENV_NAME:{key}")
+            ref = str(raw_ref or "").strip()
+            if ":" not in ref:
+                raise ValueError(f"INVALID_ENV_REF:{key}")
+            prefix, source = ref.split(":", 1)
+            prefix = prefix.strip().upper()
+            source = source.strip()
+            if prefix not in _ENV_REF_PREFIXES or not _ENV_NAME_RE.fullmatch(source):
+                raise ValueError(f"INVALID_ENV_REF:{key}")
+            result[key] = f"{prefix}:{source}"
+        return result
+
+    @staticmethod
+    def _env_allowlist(value) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list) or len(value) > 128:
+            raise ValueError("Runtime env_allowlist must be a list with at most 128 entries")
+        result = []
+        for raw in value:
+            key = str(raw or "").strip()
+            if not _ENV_NAME_RE.fullmatch(key):
+                raise ValueError(f"INVALID_ENV_ALLOWLIST_NAME:{key}")
+            if key not in result:
+                result.append(key)
+        return result
+
+    def resolve_environment(
+        self,
+        profile: dict[str, Any],
+        *,
+        external_env: dict[str, str] | None = None,
+        require_all: bool = True,
+    ) -> tuple[dict[str, str], dict[str, Any]]:
+        inherit_env = bool(profile.get("inherit_env", True))
+        allowlist = self._env_allowlist(profile.get("env_allowlist"))
+        values = self._env_values(profile.get("env"))
+        refs = self._env_refs(profile.get("env_refs"))
+
+        env: dict[str, str] = dict(os.environ) if inherit_env else {}
+        for key in allowlist:
+            if key in os.environ:
+                env[key] = os.environ[key]
+        env.update(values)
+
+        resolved = list(values)
+        unresolved: list[str] = []
+        for key, ref in refs.items():
+            prefix, source = ref.split(":", 1)
+            if prefix in {"PROCESS_ENV", "REMOTE_ENV", "ENV"}:
+                source_value = os.environ.get(source)
+            else:
+                source_value = (external_env or {}).get(source)
+            if source_value is None:
+                unresolved.append(ref)
+                continue
+            env[key] = str(source_value)
+            if key not in resolved:
+                resolved.append(key)
+
+        if require_all and unresolved:
+            raise RuntimeError("RUNTIME_ENV_REF_UNRESOLVED:" + ",".join(unresolved))
+        metadata = {
+            "inherit_env": inherit_env,
+            "env_allowlist": allowlist,
+            "resolved_env_keys": sorted(resolved),
+            "unresolved_env_refs": list(unresolved),
+            "secret_values_returned": False,
+        }
+        return env, metadata
+
+    @staticmethod
+    def _redaction_values(profile: dict[str, Any], resolved_env: dict[str, str]) -> list[str]:
+        refs = profile.get("env_refs") if isinstance(profile.get("env_refs"), dict) else {}
+        values = []
+        for key in refs:
+            value = resolved_env.get(str(key))
+            if value and value not in values:
+                values.append(value)
+        return values
+
+    def environment_status(self, profile_id: str = "") -> dict[str, Any]:
+        profile = self.profile(profile_id)
+        _env, metadata = self.resolve_environment(profile, require_all=False)
+        return {
+            "profile_id": profile.get("id"),
+            **metadata,
+            "env_keys": sorted((profile.get("env") or {}).keys()),
+            "env_refs": dict(profile.get("env_refs") or {}),
+        }
+
     def _configured_profiles(self) -> list[dict[str, Any]]:
         if not self.config_path.exists():
             return []
@@ -68,9 +191,12 @@ class ProjectRuntimeService:
             try:
                 run_argv = self._argv(row.get("run_argv"))
                 test_argv = self._argv(row.get("test_argv"))
+                env_values = self._env_values(row.get("env"))
+                env_refs = self._env_refs(row.get("env_refs"))
+                env_allowlist = self._env_allowlist(row.get("env_allowlist"))
             except ValueError:
                 continue
-            output.append({
+            profile_row = {
                 "id": str(row["id"]).strip(),
                 "ecosystem": str(row.get("ecosystem") or "custom"),
                 "kind": str(row.get("kind") or "custom"),
@@ -81,18 +207,42 @@ class ProjectRuntimeService:
                 "urls": [str(item) for item in (row.get("urls") or []) if str(item).startswith(("http://", "https://"))][:16],
                 "swagger_candidates": [str(item) for item in (row.get("swagger_candidates") or []) if str(item).startswith(("http://", "https://"))][:32],
                 "configured": True,
-            })
+                "env": env_values,
+                "env_refs": env_refs,
+                "inherit_env": bool(row.get("inherit_env", True)),
+                "env_allowlist": env_allowlist,
+            }
+            try:
+                _resolved, env_meta = self.resolve_environment(profile_row, require_all=False)
+            except Exception:
+                env_meta = {"resolved_env_keys": sorted(env_values), "unresolved_env_refs": list(env_refs.values())}
+            profile_row["resolved_env_keys"] = env_meta.get("resolved_env_keys", [])
+            profile_row["unresolved_env_refs"] = env_meta.get("unresolved_env_refs", [])
+            output.append(profile_row)
         return output
 
-    def configure_profile(self, profile_id: str, *, kind: str = "custom",
-                          run_argv: list[str] | None = None, test_argv: list[str] | None = None,
-                          urls: list[str] | None = None) -> dict:
+    def configure_profile(
+        self,
+        profile_id: str,
+        *,
+        kind: str = "custom",
+        run_argv: list[str] | None = None,
+        test_argv: list[str] | None = None,
+        urls: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        env_refs: dict[str, str] | None = None,
+        inherit_env: bool = True,
+        env_allowlist: list[str] | None = None,
+    ) -> dict:
         profile_id = str(profile_id or "").strip()
         if not profile_id:
             raise ValueError("PROFILE_ID_REQUIRED")
         run = self._argv(run_argv)
         test = self._argv(test_argv)
         safe_urls = [str(item) for item in (urls or []) if str(item).startswith(("http://", "https://"))][:16]
+        env_values = self._env_values(env)
+        safe_refs = self._env_refs(env_refs)
+        safe_allowlist = self._env_allowlist(env_allowlist)
         existing = self._configured_profiles()
         row = {
             "id": profile_id, "ecosystem": "custom", "kind": str(kind or "custom"),
@@ -100,6 +250,10 @@ class ProjectRuntimeService:
             "run_argv": run, "test_argv": test, "urls": safe_urls,
             "swagger_candidates": self._swagger_candidates(safe_urls),
             "configured": True,
+            "env": env_values,
+            "env_refs": safe_refs,
+            "inherit_env": bool(inherit_env),
+            "env_allowlist": safe_allowlist,
         }
         by_id = {item["id"]: item for item in existing}
         by_id[profile_id] = row
@@ -108,7 +262,9 @@ class ProjectRuntimeService:
             json.dumps({"profiles": list(by_id.values())}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        return {"profile": row, "config": ".easychange/runtime_profiles.json"}
+        _resolved, env_meta = self.resolve_environment(row, require_all=False)
+        public_row = {**row, **env_meta}
+        return {"profile": public_row, "config": ".easychange/runtime_profiles.json"}
 
     def profiles(self) -> list[dict[str, Any]]:
         profiles: list[dict[str, Any]] = self._configured_profiles()
@@ -318,8 +474,14 @@ class ProjectRuntimeService:
         argv = profile.get("run_argv")
         if not argv:
             raise RuntimeError(f"Profile is not runnable: {profile.get('id')}")
-        result = self.processes.start(list(argv), process_id)
-        return {**result, "profile": profile}
+        process_env, env_meta = self.resolve_environment(profile)
+        result = self.processes.start(
+            list(argv),
+            process_id,
+            env=process_env,
+            redact_values=self._redaction_values(profile, process_env),
+        )
+        return {**result, "profile": profile, "environment": env_meta}
 
     @staticmethod
     def _test_summary(results: list[dict]) -> dict:
@@ -375,19 +537,25 @@ class ProjectRuntimeService:
         selected = self.profile(profile_id, profiles=profiles) if profile_id else None
         commands = []
         if selected and selected.get("test_argv"):
-            commands.append((selected["id"], list(selected["test_argv"])))
+            commands.append((selected["id"], list(selected["test_argv"]), selected))
         elif not profile_id:
             for item in profiles:
                 if item.get("test_argv"):
-                    commands.append((item["id"], list(item["test_argv"])))
+                    commands.append((item["id"], list(item["test_argv"]), item))
             if not commands:
-                workspace_test = next((item.get("workspace_test_argv") for item in profiles if item.get("workspace_test_argv")), None)
-                if workspace_test:
-                    commands.append(("workspace", list(workspace_test)))
+                workspace_profile = next((item for item in profiles if item.get("workspace_test_argv")), None)
+                if workspace_profile:
+                    commands.append(("workspace", list(workspace_profile["workspace_test_argv"]), workspace_profile))
         results = []
-        for identifier, argv in commands:
-            result = self.processes.run(argv, timeout=timeout)
-            results.append({"profile": identifier, **result})
+        for identifier, argv, command_profile in commands:
+            process_env, env_meta = self.resolve_environment(command_profile)
+            result = self.processes.run(
+                argv,
+                timeout=timeout,
+                env=process_env,
+                redact_values=self._redaction_values(command_profile, process_env),
+            )
+            results.append({"profile": identifier, "environment": env_meta, **result})
             if result.get("returncode"):
                 break
         if commands:
@@ -407,7 +575,13 @@ class ProjectRuntimeService:
         if not target.get("run_argv"):
             raise RuntimeError("No tests or runnable smoke profile detected")
         process_id = f"SMOKE{int(time.time() * 1000) % 1000000}"
-        started = self.processes.start(list(target["run_argv"]), process_id)
+        smoke_env, smoke_env_meta = self.resolve_environment(target)
+        started = self.processes.start(
+            list(target["run_argv"]),
+            process_id,
+            env=smoke_env,
+            redact_values=self._redaction_values(target, smoke_env),
+        )
         time.sleep(min(3.0, max(0.5, timeout / 10)))
         status = next((item for item in self.processes.list() if item["process_id"] == process_id), {})
         logs = self.processes.logs(process_id, limit=12000)
@@ -427,6 +601,7 @@ class ProjectRuntimeService:
             "mode": "startup-smoke",
             "profile": target,
             "process": started,
+            "environment": smoke_env_meta,
             "status": status,
             "logs": logs,
             "duration_ms": int((time.monotonic() - started_at) * 1000),
@@ -477,7 +652,13 @@ class ProjectRuntimeService:
         if not candidates:
             raise RuntimeError("No Swagger/OpenAPI URL detected; pass url explicitly")
         if start_if_needed and profile.get("run_argv"):
-            started_process = self.processes.start(list(profile["run_argv"]), process_id)
+            process_env, _env_meta = self.resolve_environment(profile)
+            started_process = self.processes.start(
+                list(profile["run_argv"]),
+                process_id,
+                env=process_env,
+                redact_values=self._redaction_values(profile, process_env),
+            )
 
         probe = self.wait_for_http(candidates, timeout=timeout)
         if not probe.get("ok") and not probe.get("status"):
