@@ -1,6 +1,7 @@
 from __future__ import annotations
 from .runtime_service import ProjectRuntimeService
 from .database_service import DatabaseService
+from .command_metadata import COMMAND_NAMES, command_schema
 from .ef_migration_service import EfMigrationService
 from concurrent.futures import ThreadPoolExecutor
 from .safe_edit import SafeEditError, plan_file_mutations, text_hash
@@ -1290,6 +1291,16 @@ class CommandService:
                         if cursor:
                             args += ["--cursor", cursor]
                         result = self.execute_tokens("read-many", args, raw="EC1 read-many", persist=sub_persist)
+                elif kind == "command_schema":
+                    command_name = str(item.get("command") or "").strip()
+                    if not command_name:
+                        result = Result(False, kind, error="COMMAND_REQUIRED",
+                                        code="INVALID_STRUCTURED_PAYLOAD")
+                    else:
+                        try:
+                            result = Result(True, kind, data=command_schema(command_name))
+                        except LookupError as exc:
+                            result = Result(False, kind, error=str(exc), code="UNKNOWN_COMMAND")
                 elif kind == "runtime_profiles":
                     profiles = self.runtime.profiles()
                     ecosystems: dict[str, int] = {}
@@ -1746,17 +1757,17 @@ class CommandService:
             # Preserve read-after-write semantics while allowing mutation-only
             # batches to index each changed file once at commit.
             self._flush_transaction_index()
+        if name == "command-schema":
+            _require(args, 1, "command")
+            if len(args) != 1:
+                raise ValueError("command-schema requires exactly one command")
+            return {"schema": command_schema(args[0])}
+        if name == "help" and args:
+            if len(args) != 1:
+                raise ValueError("help accepts at most one command")
+            return {"schema": command_schema(args[0])}
         if name in {"help", "capabilities"}:
-            return {"commands": ["state", "workspace", "pwd", "files", "tree", "next", "prev", "read", "head", "tail", "context", "goto",
-                    "search", "find", "index", "symbols", "symbol", "definition", "references", "implementations", "outline", "file-summary",
-                    "locate", "study", "discover-many", "read-many", "validate", "edit-result",
-                    "runtime-profile", "run-project", "test-smart", "test-evidence",
-                    "swagger-evidence", "evidence", "process-logs",
-                    "db-connections", "db-schema", "db-query",
-                    "new", "mkdir", "write", "append", "insert", "replace", "replace-line", "replace-range", "delete", "rename", "move", "stat", "hash", "exists",
-                    "rename-symbol", "create-class", "create-interface", "create-test", "format", "fix-imports", "organize-imports",
-                    "journal", "undo", "redo", "begin", "commit", "rollback", "snapshot", "lock", "unlock", "locks", "watch", "batch", "macro", "alias", "complete", "history", "repeat", "clear",
-                    "status", "health", "maintenance", "diff", "branch", "log", "build", "test", "run", "processes", "stop", "errors", "next-error", "previous-error", "remote", "remote-guide", "remote-profile", "prepare-hid", "set", "machine", "human", "quit"],
+            return {"commands": list(COMMAND_NAMES),
                     "capabilities": {"workspace": True, "git": "GIT" in self.workspace.adapters,
                     "build_test": self.workspace.adapters, "index": True, "symbols": True,
                     "ai_machine": {"optical_protocol": "EC2", "qr_slots": 16, "chunked_results": True,
@@ -2214,11 +2225,22 @@ class CommandService:
             return {"file": metadata, "preview": content["lines"], "symbols": self.symbol_service.symbols(path)}
         if name == "complete":
             prefix = args[0] if args else ":"
+            exact = str(prefix or "").lstrip(":").strip().casefold()
+            if exact in self._commands():
+                return {
+                    "candidates": [":" + exact],
+                    "schema": command_schema(exact),
+                }
             if prefix.startswith(":open ") or prefix.startswith(":read "):
                 part = prefix.split(maxsplit=1)[1]
                 candidates = [item["path"] for item in self.indexer.files(limit=1000) if item["path"].startswith(part)]
             else:
-                candidates = [":" + command for command in self._commands() if (":" + command).startswith(prefix)]
+                normalized_prefix = prefix if prefix.startswith(":") else ":" + prefix
+                candidates = [
+                    ":" + command
+                    for command in self._commands()
+                    if (":" + command).startswith(normalized_prefix)
+                ]
             return {"candidates": candidates[:50]}
         if name == "alias":
             _require(args, 2, "alias and target command")
