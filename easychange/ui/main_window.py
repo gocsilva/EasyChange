@@ -63,6 +63,43 @@ class MainWindow(QMainWindow):
             self._populate_tree()
         self.editor = CodeEditor(); self.editor.setPlaceholderText("Open a file with :open <path> or select it in FILES")
 
+        self.human_text_panel = QWidget()
+        self.human_text_panel.setObjectName("humanTextPanel")
+        human_text_layout = QVBoxLayout(self.human_text_panel)
+        human_text_layout.setContentsMargins(0, 0, 0, 0)
+        human_text_header = QHBoxLayout()
+        self.human_text_title = QLabel("TEXTO PARA CHATGPT / MCP")
+        self.human_text_title.setToolTip(
+            "Cole aqui textos grandes. O ChatGPT lê o conteúdo salvo via EasyChange/EC2/QR."
+        )
+        self.human_text_status = QLabel("Carregando…")
+        self.human_text_status.setObjectName("humanTextStatus")
+        self.human_text_save_button = QPushButton("Salvar agora")
+        self.human_text_save_button.setObjectName("humanTextSaveButton")
+        self.human_text_clear_button = QPushButton("Limpar texto")
+        self.human_text_clear_button.setObjectName("humanTextClearButton")
+        human_text_header.addWidget(self.human_text_title)
+        human_text_header.addWidget(self.human_text_status, 1)
+        human_text_header.addWidget(self.human_text_save_button)
+        human_text_header.addWidget(self.human_text_clear_button)
+        self.human_text_editor = QPlainTextEdit()
+        self.human_text_editor.setObjectName("humanTextEditor")
+        self.human_text_editor.setPlaceholderText(
+            "Cole aqui textos grandes para o ChatGPT/MCP ler via QR. "
+            "O conteúdo é salvo fora do projeto Git e fica associado a este workspace."
+        )
+        human_text_layout.addLayout(human_text_header)
+        human_text_layout.addWidget(self.human_text_editor, 1)
+        self._human_text_loading = False
+        self._human_text_dirty = False
+        self._human_text_save_timer = QTimer(self)
+        self._human_text_save_timer.setSingleShot(True)
+        self._human_text_save_timer.setInterval(1200)
+        self._human_text_save_timer.timeout.connect(self._autosave_human_text)
+        self.human_text_editor.textChanged.connect(self._schedule_human_text_save)
+        self.human_text_save_button.clicked.connect(self.save_human_text)
+        self.human_text_clear_button.clicked.connect(self.clear_human_text)
+
         self.output = QPlainTextEdit(); self.output.setReadOnly(True)
         self.output.setMaximumHeight(330 if self._machine else 190)
         self.output.setObjectName("machineResultRegion")
@@ -103,10 +140,17 @@ class MainWindow(QMainWindow):
         self.split.addWidget(self.editor)
         self.split.setStretchFactor(1, 1)
 
+        self.workspace_split = QSplitter(Qt.Orientation.Vertical)
+        self.workspace_split.setObjectName("humanWorkspaceSplit")
+        self.workspace_split.addWidget(self.split)
+        self.workspace_split.addWidget(self.human_text_panel)
+        self.workspace_split.setStretchFactor(0, 3)
+        self.workspace_split.setStretchFactor(1, 2)
+
         self.command = QLineEdit(); self.command.setPlaceholderText("COMMAND > :remote-guide | Ctrl+K | Enter")
         self.command.setMaxLength(65535)
         self.command.installEventFilter(self)
-        layout.addLayout(header_row); layout.addWidget(self.split, 1); layout.addWidget(self.result_panel); layout.addWidget(self.command)
+        layout.addLayout(header_row); layout.addWidget(self.workspace_split, 1); layout.addWidget(self.result_panel); layout.addWidget(self.command)
         self.setCentralWidget(central)
         self.command.returnPressed.connect(self.execute_command)
         self.tree.itemActivated.connect(self.open_selected)
@@ -131,6 +175,7 @@ class MainWindow(QMainWindow):
         self._add_shortcut("F7", lambda: self._run_command(":errors"))
         self._add_shortcut("F8", lambda: self._run_command(":next-error"))
         self._add_shortcut("Shift+F8", lambda: self._run_command(":previous-error"))
+        self._load_human_text()
         self._apply_machine_style()
         self._refresh_header()
         self._run_command(":remote")
@@ -176,6 +221,7 @@ class MainWindow(QMainWindow):
                     if self.editor.document().isModified():
                         return
 
+            self._flush_human_text()
             new_workspace = Workspace.open(selected_path)
             old_service = self.service
             new_service = CommandService(new_workspace)
@@ -193,6 +239,7 @@ class MainWindow(QMainWindow):
             self.tree.clear()
             if not self._machine:
                 self._populate_tree()
+            self._load_human_text()
             self.setWindowTitle(f"EasyChange — {new_workspace.name}")
             self._refresh_header()
             self._run_command(":remote")
@@ -214,7 +261,7 @@ class MainWindow(QMainWindow):
                 "Isso removerá somente os dados criados pelo EasyChange neste projeto:\n\n"
                 f"{workspace_path}\n\n"
                 "Serão removidos histórico/undo, índice, jobs, resultados, evidências, caches, "
-                "configurações internas do EasyChange e temporários próprios.\n\n"
+                "o Bloco de Texto MCP, configurações internas do EasyChange e temporários próprios.\n\n"
                 "O código-fonte, a pasta .git e outros arquivos do projeto NÃO serão apagados.\n\n"
                 "Deseja continuar?"
             ),
@@ -274,6 +321,7 @@ class MainWindow(QMainWindow):
 
             self.tree.clear()
             self._populate_tree()
+            self._load_human_text()
             self._apply_machine_style()
             self._refresh_header()
 
@@ -307,6 +355,87 @@ class MainWindow(QMainWindow):
         finally:
             self.focus_command()
 
+    @staticmethod
+    def _human_text_status_text(meta: dict, *, prefix: str = "Salvo") -> str:
+        size = int(meta.get("bytes") or 0)
+        lines = int(meta.get("lines") or 0)
+        digest = str(meta.get("sha256") or "")[:12]
+        return f"{prefix} • {size / 1024:.1f} KiB • {lines} linhas • SHA {digest}"
+
+    def _load_human_text(self) -> None:
+        self._human_text_save_timer.stop()
+        self._human_text_loading = True
+        try:
+            text = self.service.human_text.load()
+            self.human_text_editor.setPlainText(text)
+            self.human_text_editor.document().setModified(False)
+            self._human_text_dirty = False
+            self.human_text_status.setText(
+                self._human_text_status_text(self.service.human_text.info())
+            )
+        except Exception as exc:
+            self.human_text_editor.clear()
+            self._human_text_dirty = False
+            self.human_text_status.setText(f"Erro ao carregar: {str(exc)[:180]}")
+        finally:
+            self._human_text_loading = False
+
+    def _schedule_human_text_save(self) -> None:
+        if self._human_text_loading:
+            return
+        self._human_text_dirty = True
+        self.human_text_status.setText("Alterado • salvamento automático em 1,2 s")
+        self._human_text_save_timer.start()
+
+    def _autosave_human_text(self) -> None:
+        self.save_human_text(show_error=False)
+
+    def save_human_text(self, checked=False, *, show_error: bool = True) -> None:
+        del checked
+        if self._human_text_loading:
+            return
+        try:
+            meta = self.service.human_text.save(self.human_text_editor.toPlainText())
+            self._human_text_dirty = False
+            self.human_text_editor.document().setModified(False)
+            self.human_text_status.setText(self._human_text_status_text(meta))
+        except Exception as exc:
+            self._human_text_dirty = True
+            self.human_text_status.setText(f"Falha ao salvar: {str(exc)[:180]}")
+            if show_error:
+                QMessageBox.critical(self, "Falha ao salvar Bloco de Texto MCP", str(exc))
+
+    def _flush_human_text(self) -> None:
+        self._human_text_save_timer.stop()
+        if self._human_text_dirty:
+            self.save_human_text(show_error=False)
+
+    def clear_human_text(self, checked=False) -> None:
+        del checked
+        answer = QMessageBox.question(
+            self,
+            "Limpar Bloco de Texto MCP",
+            "Apagar todo o texto armazenado para este projeto?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._human_text_save_timer.stop()
+        self._human_text_loading = True
+        try:
+            meta = self.service.human_text.clear()
+            self.human_text_editor.clear()
+            self.human_text_editor.document().setModified(False)
+            self._human_text_dirty = False
+            self.human_text_status.setText(
+                self._human_text_status_text(meta, prefix="Vazio")
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Falha ao limpar Bloco de Texto MCP", str(exc))
+        finally:
+            self._human_text_loading = False
+
     def _populate_tree(self) -> None:
         self.tree.clear()
         for item in self.service.files.list_files():
@@ -326,6 +455,7 @@ class MainWindow(QMainWindow):
         self.tree.setVisible(not self._machine)
         self.select_workspace_button.setVisible(not self._machine)
         self.cleanup_easychange_button.setVisible(not self._machine)
+        self.human_text_panel.setVisible(not self._machine)
         self.output.setMaximumHeight(330 if self._machine else 190)
         if not self._machine:
             self._set_optical_burst(False)
@@ -517,6 +647,7 @@ class MainWindow(QMainWindow):
         self.output.appendPlainText("SAVEALL: 1 active file")
 
     def closeEvent(self, event) -> None:
+        self._flush_human_text()
         self.service.close()
         super().closeEvent(event)
 

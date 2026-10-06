@@ -15,7 +15,7 @@ TEXT_MUTATION_COMMANDS = frozenset({
 })
 STRUCTURED_CONTINUE_SAFE_TYPES = frozenset({
     "read", "search", "locate", "study", "definition", "references",
-    "discover_many", "read_regions", "read_many", "command_schema",
+    "discover_many", "read_regions", "read_many", "human_text_info", "human_text_read", "command_schema",
     "secret_broker_public", "secret_broker_status",
     "runtime_profiles", "runtime_environment",
     "git_diff", "process_logs", "test_job_result", "test_job_logs", "build_job_result", "build_job_logs",
@@ -27,6 +27,7 @@ _OPERATION_FAMILIES = {
     **{name: "recovery" for name in STRUCTURED_RECOVERY_TYPES},
     **{name: "job" for name in STRUCTURED_JOB_TYPES},
     "read": "read", "read_many": "read", "read_regions": "read",
+    "human_text_info": "read", "human_text_read": "read",
     "search": "discovery", "locate": "discovery", "study": "discovery",
     "definition": "discovery", "references": "discovery", "discover_many": "discovery",
     "command_schema": "metadata",

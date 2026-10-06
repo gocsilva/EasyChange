@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from .command_parser import CommandParser
 from .file_service import ExternalChangeError, FileService
 from .git_service import GitService
+from .human_text_service import HumanTextService
 from .indexer import Indexer
 from .ids import IdFactory
 from .journal import Journal
@@ -65,6 +66,7 @@ class CommandService:
         self.files = FileService(workspace, self.state_store.data.get("file_hashes", {}))
         self.git = GitService(workspace)
         self.processes = ProcessService(workspace.root_path)
+        self.human_text = HumanTextService(self.processes.workspace_state_root)
         self.secret_broker = SecretBroker()
         self.runtime = ProjectRuntimeService(
             workspace,
@@ -1355,6 +1357,16 @@ class CommandService:
                             kind,
                             data=self.secret_broker.import_envelope(**required),
                         )
+                elif kind == "human_text_info":
+                    result = Result(True, kind, data=self.human_text.info())
+                elif kind == "human_text_read":
+                    result = Result(True, kind, data=self.human_text.read(
+                        cursor=max(0, int(item.get("cursor") or 0)),
+                        max_bytes=max(
+                            512,
+                            min(256 * 1024, int(item.get("max_bytes") or 16384)),
+                        ),
+                    ))
                 elif kind == "runtime_profiles":
                     profiles = self.runtime.profiles()
                     ecosystems: dict[str, int] = {}
