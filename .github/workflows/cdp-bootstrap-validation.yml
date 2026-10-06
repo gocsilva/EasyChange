@@ -6,14 +6,23 @@ on:
       - fix/easychange-cdp-bootstrap
 
 jobs:
-  compile:
+  compile-browser:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m py_compile easychange/core/browser_service.py easychange/core/command_service.py
+      - run: python -m py_compile easychange/core/browser_service.py
+
+  compile-command:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m py_compile easychange/core/command_service.py
 
   contract:
     runs-on: ubuntu-latest
