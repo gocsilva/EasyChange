@@ -1134,15 +1134,22 @@ class CommandService:
                 )
             except Exception as exc:
                 error = self._scrub_browser_secret_values(str(exc), secret_sources)
+                diagnostic = self._scrub_browser_secret_values(
+                    getattr(exc, "diagnostic", {}) or {},
+                    secret_sources,
+                )
+                data = {
+                    "secret_refs_used": used_secret_refs,
+                    "secret_values_returned": False,
+                }
+                if isinstance(diagnostic, dict) and diagnostic:
+                    data["browser_diagnostic"] = diagnostic
                 return Result(
                     False,
                     kind or "browser",
                     error=error,
                     code=str(getattr(exc, "code", "") or type(exc).__name__),
-                    data={
-                        "secret_refs_used": used_secret_refs,
-                        "secret_values_returned": False,
-                    },
+                    data=data,
                     command_id=self.ids.next("C"),
                 )
     def _execute_structured(
