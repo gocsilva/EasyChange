@@ -712,24 +712,85 @@ class ProjectRuntimeService:
             "passed": bool(result.get("returncode") == 0),
         }
 
-    def build_job_result(self, job_id: str) -> dict:
+    def build_job_result(
+        self,
+        job_id: str,
+        *,
+        retry_owned_lock: bool = False,
+    ) -> dict:
         result = self.processes.job_result(job_id)
         terminal = bool(result.get("terminal"))
-        return {
+        passed = bool(result.get("returncode") == 0) if terminal else None
+        combined = "\n".join([
+            str(result.get("stdout") or ""),
+            str(result.get("stderr") or ""),
+            str(result.get("diagnostics") or ""),
+        ])
+        lock = (
+            self.processes.diagnose_file_locks(result)
+            if terminal and passed is False
+            else {
+                "detected": False,
+                "codes": [],
+                "files": [],
+                "blockers": [],
+                "owned_blockers": [],
+                "foreign_blockers": [],
+                "safe_auto_stop": False,
+                "unresolved_blocker": False,
+            }
+        )
+        response = {
             **result,
             "finished": terminal,
-            "passed": bool(result.get("returncode") == 0) if terminal else None,
+            "passed": passed,
             "return_code": result.get("returncode"),
             "build_errors_count": len(
                 re.findall(
-                    r"(?im)^.*error\s+[A-Z]{2,}\d+\s*:",
-                    "\n".join([
-                        str(result.get("stdout") or ""),
-                        str(result.get("stderr") or ""),
-                        str(result.get("diagnostics") or ""),
-                    ]),
+                    r"(?im)^.*\berror\s+[A-Z]{2,}\d+\s*:",
+                    combined,
                 )
             ) if terminal else 0,
+            "file_lock": lock,
+            "retry_started": False,
+        }
+        if not (retry_owned_lock and terminal and passed is False and lock.get("detected")):
+            return response
+
+        if not lock.get("safe_auto_stop"):
+            return {
+                **response,
+                "retry_reason": (
+                    "FOREIGN_OR_UNRESOLVED_BLOCKER"
+                    if lock.get("foreign_blockers") or lock.get("unresolved_blocker")
+                    else "NO_OWNED_BLOCKER"
+                ),
+            }
+
+        stopped = self.processes.stop_owned_blockers(lock)
+        if not stopped.get("safe"):
+            return {
+                **response,
+                "owned_blocker_stop": stopped,
+                "retry_reason": "OWNED_BLOCKER_STOP_FAILED",
+            }
+
+        metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        profile_id = str(metadata.get("profile_id") or "")
+        retry_job_id = f"{job_id}_R1"
+        retry = self._start_runtime_job(
+            "build",
+            retry_job_id,
+            profile_id,
+            external_env=None,
+        )
+        return {
+            **response,
+            "owned_blocker_stop": stopped,
+            "retry_started": True,
+            "retry_job_id": retry_job_id,
+            "retry_job": retry,
+            "retry_reason": "OWNED_BLOCKER_STOPPED",
         }
 
     def runtime_job_logs(

@@ -947,6 +947,113 @@ class ProcessService:
             if item.process.poll() is None
         }
 
+    def diagnose_file_locks(self, result: dict | str) -> dict:
+        if isinstance(result, dict):
+            text = "\n".join([
+                str(result.get("stdout") or ""),
+                str(result.get("stderr") or ""),
+                str(result.get("diagnostics") or ""),
+            ])
+        else:
+            text = str(result or "")
+        codes = sorted(set(re.findall(r"\bMSB302[17]\b", text, re.IGNORECASE)))
+        if not codes:
+            return {
+                "detected": False,
+                "codes": [],
+                "files": [],
+                "blockers": [],
+                "owned_blockers": [],
+                "foreign_blockers": [],
+                "safe_auto_stop": False,
+                "unresolved_blocker": False,
+            }
+
+        blocker_pairs: list[tuple[str, int]] = []
+        patterns = [
+            r'''(?i)(?:locked by|bloqueado por)\s*:\s*["']?([^"'\r\n()]+?)\s*\((\d+)\)''',
+            r'''(?i)["']([^"'\r\n]+?)\s*\((\d+)\)["']''',
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                pair = (match.group(1).strip(), int(match.group(2)))
+                if pair not in blocker_pairs:
+                    blocker_pairs.append(pair)
+
+        owned_by_pid = {
+            int(item.process.pid): process_id
+            for process_id, item in self._processes.items()
+            if item.process is not None
+        }
+        blockers = []
+        for name, pid in blocker_pairs:
+            owned_process_id = owned_by_pid.get(pid)
+            blockers.append({
+                "process_name": name,
+                "pid": pid,
+                "owned_by_easychange": owned_process_id is not None,
+                "owned_process_id": owned_process_id,
+                "safe_to_stop": owned_process_id is not None,
+            })
+
+        files = []
+        for pattern in (
+            r'''(?i)(?:copy file|copying file|copiar o arquivo)\s+["']([^"']+)["']''',
+            r'''(?i)(?:access the file|acessar o arquivo)\s+["']([^"']+)["']''',
+        ):
+            for match in re.finditer(pattern, text):
+                value = match.group(1).strip()
+                if value and value not in files:
+                    files.append(value)
+
+        owned = [item for item in blockers if item["owned_by_easychange"]]
+        foreign = [item for item in blockers if not item["owned_by_easychange"]]
+        return {
+            "detected": True,
+            "codes": [code.upper() for code in codes],
+            "files": files[:20],
+            "blockers": blockers,
+            "owned_blockers": owned,
+            "foreign_blockers": foreign,
+            "safe_auto_stop": bool(owned) and not foreign and len(owned) == len(blockers),
+            "unresolved_blocker": not bool(blockers),
+        }
+
+    def stop_owned_blockers(self, diagnosis: dict) -> dict:
+        stopped = []
+        skipped = []
+        seen = set()
+        for blocker in diagnosis.get("blockers") or []:
+            process_id = blocker.get("owned_process_id")
+            if not blocker.get("owned_by_easychange") or not process_id:
+                skipped.append({
+                    "pid": blocker.get("pid"),
+                    "process_name": blocker.get("process_name"),
+                    "reason": "NOT_OWNED_BY_EASYCHANGE",
+                })
+                continue
+            if process_id in seen:
+                continue
+            seen.add(process_id)
+            try:
+                outcome = self.stop(str(process_id))
+                stopped.append({
+                    "process_id": process_id,
+                    "pid": blocker.get("pid"),
+                    "state": outcome.get("state"),
+                })
+            except Exception as exc:
+                skipped.append({
+                    "process_id": process_id,
+                    "pid": blocker.get("pid"),
+                    "reason": f"{type(exc).__name__}:{str(exc)[:300]}",
+                })
+        return {
+            "stopped": stopped,
+            "skipped": skipped,
+            "safe": bool(stopped) and not skipped,
+        }
+
     def run(
         self,
         argv: list[str],

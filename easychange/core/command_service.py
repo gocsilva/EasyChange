@@ -1554,13 +1554,25 @@ class CommandService:
                     if not job_id:
                         result = Result(False, kind, error="JOB_ID_REQUIRED", code="INVALID_JOB_ID")
                     else:
-                        data = self.runtime.build_job_result(job_id)
+                        data = self.runtime.build_job_result(
+                            job_id,
+                            retry_owned_lock=bool(item.get("retry_owned_lock", False)),
+                        )
+                        retry_started = bool(data.get("retry_started"))
                         result = Result(
-                            data.get("passed") is not False,
+                            data.get("passed") is not False or retry_started,
                             kind,
                             data=data,
-                            error="Build job failed" if data.get("passed") is False else None,
-                            code="BUILD_FAILED" if data.get("passed") is False else None,
+                            error=(
+                                "Build job failed"
+                                if data.get("passed") is False and not retry_started
+                                else None
+                            ),
+                            code=(
+                                "BUILD_FAILED"
+                                if data.get("passed") is False and not retry_started
+                                else None
+                            ),
                         )
                 elif kind == "build_job_logs":
                     job_id = str(item.get("job_id") or "")
