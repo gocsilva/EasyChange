@@ -68,9 +68,9 @@ class MainWindow(QMainWindow):
         human_text_layout = QVBoxLayout(self.human_text_panel)
         human_text_layout.setContentsMargins(0, 0, 0, 0)
         human_text_header = QHBoxLayout()
-        self.human_text_title = QLabel("TEXTO PARA CHATGPT / MCP")
+        self.human_text_title = QLabel("TEXTO PARA AGENTE / MCP")
         self.human_text_title.setToolTip(
-            "Cole aqui textos grandes. O ChatGPT lê o conteúdo salvo via EasyChange/EC2/QR."
+            "Cole aqui textos grandes. Agentes externos podem ler o conteúdo salvo via EasyChange/EC2/QR."
         )
         self.human_text_status = QLabel("Carregando…")
         self.human_text_status.setObjectName("humanTextStatus")
@@ -85,7 +85,7 @@ class MainWindow(QMainWindow):
         self.human_text_editor = QPlainTextEdit()
         self.human_text_editor.setObjectName("humanTextEditor")
         self.human_text_editor.setPlaceholderText(
-            "Cole aqui textos grandes para o ChatGPT/MCP ler via QR. "
+            "Cole aqui textos grandes para agentes MCP/IA lerem via QR. "
             "O conteúdo é salvo fora do projeto Git e fica associado a este workspace."
         )
         human_text_layout.addLayout(human_text_header)
