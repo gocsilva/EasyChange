@@ -1123,14 +1123,8 @@ class ProjectRuntimeService:
         return candidates
 
     def _browser_screenshot(self, url: str, target: Path) -> Path | None:
-        browser = next(iter(self._browser_candidates()), None)
-        if not browser:
-            return None
-        argv = [browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
-                "--window-size=1440,1200", f"--screenshot={target}", url]
-        try:
-            completed = subprocess.run(argv, cwd=self.workspace.root_path, capture_output=True,
-                                       timeout=30, check=False, shell=False)
-            return target if completed.returncode == 0 and target.exists() else None
-        except (OSError, subprocess.TimeoutExpired):
+            del url, target
+            # Browser evidence must come from BrowserService attached to the
+            # already-running human browser. RuntimeService never launches
+            # Edge/Chrome/headless or creates a profile as an evidence shortcut.
             return None

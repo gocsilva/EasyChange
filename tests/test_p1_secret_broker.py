@@ -100,6 +100,69 @@ def test_secret_broker_authenticated_envelope_never_returns_plaintext():
         broker.import_envelope(**envelope)
 
 
+def test_browser_operation_uses_secret_ref_and_scrubs_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    service = CommandService(Workspace.open(tmp_path))
+    secret = "BROWSER-SECRET-TOKEN-123456"
+    source = "BROWSER_TEST_TOKEN"
+    try:
+        public = _primary(service._execute_structured({
+            "op": "operation",
+            "type": "secret_broker_public",
+        }))
+        _primary(service._execute_structured({
+            "op": "operation",
+            "type": "secret_broker_import",
+            **_envelope(public, source, secret),
+        }))
+
+        captured = {}
+
+        def fake_cdp_call(
+            session_id,
+            method,
+            params,
+            *,
+            channel="page",
+            timeout=10.0,
+            include_events=True,
+        ):
+            captured["session_id"] = session_id
+            captured["method"] = method
+            captured["params"] = params
+            captured["channel"] = channel
+            assert params["headers"]["Authorization"] == "Bearer " + secret
+            return {
+                "schema": "easychange.browser-cdp/1",
+                "result": {
+                    "echo": secret,
+                    "authorization": "Bearer " + secret,
+                },
+                "events": [],
+            }
+
+        monkeypatch.setattr(service.browser, "cdp_call", fake_cdp_call)
+        result = service._execute_browser_operation({
+            "type": "browser_cdp_call",
+            "session_id": "S1",
+            "method": "Network.setExtraHTTPHeaders",
+            "channel": "page",
+            "params": {
+                "headers": {
+                    "Authorization": "Bearer secret://BROWSER_TEST_TOKEN",
+                }
+            },
+        })
+
+        assert result.ok is True
+        payload = json.dumps(result.to_dict(), ensure_ascii=False)
+        assert secret not in payload
+        assert result.data["secret_refs_used"] == [source]
+        assert result.data["secret_values_returned"] is False
+        assert captured["method"] == "Network.setExtraHTTPHeaders"
+        assert captured["channel"] == "page"
+    finally:
+        service.close()
 def test_mcp_host_env_reaches_runtime_only_through_encrypted_broker(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
     secret = "SENTINEL-NEVER-PERSIST-987654321"

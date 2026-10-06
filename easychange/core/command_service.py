@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .safe_edit import SafeEditError, plan_file_mutations, text_hash
 from .result_store import DurableResultStore
 from .secret_broker import SecretBroker
+from .browser_service import BrowserService
 
 import shlex
 import time
@@ -39,6 +40,7 @@ from .symbol_service import SymbolService
 from .workspace import Workspace
 from .watcher import WorkspaceWatcher
 from ..remote.agent_profile import REMOTE_PROFILE, remote_guide_markdown
+from .. import __version__
 
 
 @dataclass
@@ -66,6 +68,7 @@ class CommandService:
         self.files = FileService(workspace, self.state_store.data.get("file_hashes", {}))
         self.git = GitService(workspace)
         self.processes = ProcessService(workspace.root_path)
+        self.browser = BrowserService(self.processes)
         self.human_text = HumanTextService(self.processes.workspace_state_root)
         self.secret_broker = SecretBroker()
         self.runtime = ProjectRuntimeService(
@@ -943,6 +946,205 @@ class CommandService:
             "merge_overlaps": bool(merge_overlaps),
         }
 
+    def _resolve_browser_secret_refs(self, value):
+            sources = self.secret_broker.values()
+            used: set[str] = set()
+            template_pattern = re.compile(r"\$\{SECRET:([A-Za-z_][A-Za-z0-9_]*)\}")
+            uri_pattern = re.compile(r"secret://([A-Za-z_][A-Za-z0-9_]*)")
+
+            def resolve_name(name: str) -> str:
+                if name not in sources:
+                    raise KeyError(f"SECRET_REF_NOT_FOUND:{name}")
+                used.add(name)
+                return sources[name]
+
+            def visit(item):
+                if isinstance(item, dict):
+                    if set(item) == {"$secret_ref"}:
+                        return resolve_name(str(item.get("$secret_ref") or ""))
+                    return {key: visit(child) for key, child in item.items()}
+                if isinstance(item, list):
+                    return [visit(child) for child in item]
+                if isinstance(item, str):
+                    output = template_pattern.sub(
+                        lambda match: resolve_name(match.group(1)),
+                        item,
+                    )
+                    output = uri_pattern.sub(
+                        lambda match: resolve_name(match.group(1)),
+                        output,
+                    )
+                    return output
+                return item
+
+            return visit(value), sorted(used), sources
+
+    @staticmethod
+    def _scrub_browser_secret_values(value, sources: dict[str, str]):
+        secret_values = [
+            str(secret)
+            for secret in sources.values()
+            if isinstance(secret, str) and secret
+        ]
+        if isinstance(value, str):
+            output = value
+            for secret in secret_values:
+                output = output.replace(secret, "[REDACTED]")
+            return output
+        if isinstance(value, list):
+            return [
+                CommandService._scrub_browser_secret_values(item, sources)
+                for item in value
+            ]
+        if isinstance(value, dict):
+            return {
+                key: CommandService._scrub_browser_secret_values(item, sources)
+                for key, item in value.items()
+            }
+        return value
+    def _execute_browser_operation(self, item: dict) -> Result:
+            kind = str(item.get("type") or "").casefold()
+            secret_sources: dict[str, str] = {}
+            used_secret_refs: list[str] = []
+            try:
+                item, used_secret_refs, secret_sources = self._resolve_browser_secret_refs(item)
+                kind = str(item.get("type") or "").casefold()
+                session_id = str(item.get("session_id") or "default")
+                timeout = max(0.1, min(120.0, float(item.get("timeout") or 10.0)))
+
+                if kind == "browser_open":
+                    data = self.browser.start(
+                        session_id,
+                        url=str(item.get("url") or "about:blank"),
+                        headless=False,
+                        visible=bool(item.get("visible", True)),
+                        timeout=min(15.0, timeout),
+                        browser_path=str(item.get("browser_path") or ""),
+                    )
+                elif kind == "browser_attach":
+                    data = self.browser.attach(
+                        session_id,
+                        port=max(0, int(item.get("port") or 0)),
+                        target_id=str(item.get("target_id") or ""),
+                        url_contains=str(item.get("url_contains") or ""),
+                        timeout=min(15.0, timeout),
+                    )
+                elif kind == "browser_detach":
+                    data = self.browser.stop(session_id)
+                elif kind == "browser_state":
+                    data = self.browser.state(session_id)
+                elif kind == "browser_snapshot":
+                    data = self.browser.snapshot(
+                        session_id,
+                        max_elements=max(1, min(200, int(item.get("max_elements") or 80))),
+                        max_text_blocks=max(0, min(100, int(item.get("max_text_blocks") or 40))),
+                    )
+                elif kind == "browser_dom":
+                    data = self.browser.dom(
+                        session_id,
+                        cursor=max(0, int(item.get("cursor") or 0)),
+                        max_bytes=max(1024, min(1024 * 1024, int(item.get("max_bytes") or 65536))),
+                    )
+                elif kind == "browser_visual":
+                    data = self.browser.visual(
+                        session_id,
+                        quality=max(20, min(90, int(item.get("quality") or 55))),
+                        full_page=bool(item.get("full_page", False)),
+                        max_bytes=max(32768, min(2 * 1024 * 1024, int(item.get("max_bytes") or 262144))),
+                    )
+                elif kind == "browser_actions":
+                    actions = item.get("actions")
+                    if not isinstance(actions, list):
+                        raise ValueError("BROWSER_ACTIONS_REQUIRED")
+                    data = self.browser.execute_actions(
+                        session_id,
+                        actions,
+                        continue_on_error=bool(item.get("continue_on_error", False)),
+                        default_timeout=timeout,
+                    )
+                elif kind == "browser_tabs":
+                    data = self.browser.tabs(session_id)
+                elif kind == "browser_show":
+                    data = self.browser.show(session_id)
+                elif kind == "browser_hide":
+                    data = self.browser.hide(session_id)
+                elif kind == "browser_navigate":
+                    data = self.browser.navigate(
+                        session_id, str(item.get("url") or ""), timeout
+                    )
+                elif kind == "browser_evaluate":
+                    data = self.browser.evaluate(
+                        session_id, str(item.get("script") or ""), timeout
+                    )
+                elif kind == "browser_cdp_call":
+                    data = self.browser.cdp_call(
+                        session_id,
+                        str(item.get("method") or ""),
+                        item.get("params") if isinstance(item.get("params"), dict) else {},
+                        channel=str(item.get("channel") or "page"),
+                        timeout=timeout,
+                        include_events=bool(item.get("include_events", True)),
+                    )
+                elif kind == "browser_cdp_batch":
+                    calls = item.get("calls")
+                    if not isinstance(calls, list):
+                        raise ValueError("CDP_BATCH_CALLS_REQUIRED")
+                    data = self.browser.cdp_batch(
+                        session_id,
+                        calls,
+                        continue_on_error=bool(item.get("continue_on_error", False)),
+                        timeout=timeout,
+                    )
+                elif kind == "browser_cdp_events":
+                    data = self.browser.cdp_events(
+                        session_id,
+                        channel=str(item.get("channel") or "page"),
+                        limit=max(0, min(512, int(item.get("limit") or 100))),
+                        pump=bool(item.get("pump", True)),
+                    )
+                elif kind == "swagger_browser_operations":
+                    data = self.browser.swagger_operations(
+                        session_id,
+                        limit=max(1, min(2000, int(item.get("limit") or 500))),
+                    )
+                elif kind == "swagger_browser_execute":
+                    data = self.browser.swagger_execute(
+                        session_id,
+                        method=str(item.get("method") or ""),
+                        path=str(item.get("path") or ""),
+                        parameters=item.get("parameters") if isinstance(item.get("parameters"), dict) else {},
+                        body=item.get("body"),
+                        timeout=timeout,
+                    )
+                else:
+                    raise ValueError(f"UNSUPPORTED_BROWSER_OPERATION:{kind}")
+
+                data = self._scrub_browser_secret_values(data, secret_sources)
+                if isinstance(data, dict):
+                    data = {
+                        **data,
+                        "secret_refs_used": used_secret_refs,
+                        "secret_values_returned": False,
+                    }
+                return Result(
+                    True,
+                    kind,
+                    data=data,
+                    command_id=self.ids.next("C"),
+                )
+            except Exception as exc:
+                error = self._scrub_browser_secret_values(str(exc), secret_sources)
+                return Result(
+                    False,
+                    kind or "browser",
+                    error=error,
+                    code=str(getattr(exc, "code", "") or type(exc).__name__),
+                    data={
+                        "secret_refs_used": used_secret_refs,
+                        "secret_values_returned": False,
+                    },
+                    command_id=self.ids.next("C"),
+                )
     def _execute_structured(
         self,
         payload: dict,
@@ -1046,6 +1248,23 @@ class CommandService:
                     return Result(False, query_kind, error="RESULT_NOT_FOUND", code="RESULT_NOT_FOUND")
                 return Result(True, query_kind, data=data, command_id=self.ids.next("C"),
                               duration_ms=int((time.monotonic() - started) * 1000))
+
+        # Browser operations use the same sequenced structured/result-store
+        # contract as all other EasyChange tools. BrowserService reuses an existing
+        # Edge/Chrome session first and may open an already-installed Edge/Chrome
+        # without installing software or creating a disposable browser profile.
+        if len(operations) == 1 and isinstance(operations[0], dict):
+            browser_item = operations[0]
+            browser_kind = str(browser_item.get("type") or "").casefold()
+            if browser_kind in {
+                "browser_open", "browser_attach", "browser_detach", "browser_state",
+                "browser_snapshot", "browser_dom", "browser_visual",
+                "browser_actions", "browser_tabs", "browser_show", "browser_hide",
+                "browser_navigate", "browser_evaluate",
+                "browser_cdp_call", "browser_cdp_batch", "browser_cdp_events",
+                "swagger_browser_operations", "swagger_browser_execute",
+            }:
+                return self._execute_browser_operation(browser_item)
 
         # Structured argv execution always uses the durable job executor. Fast
         # commands can finish inside wait_ms; long commands return a small job
@@ -1944,6 +2163,76 @@ class CommandService:
         self.state_store.data["ec_results"] = dict(list(compact_journal.items())[-128:])
         self.state_store.save()
 
+    def _capability_manifest(self) -> dict:
+        structured = structured_capabilities()
+        supported_operations = sorted(structured.get("operations") or {})
+        feature_flags = {
+            "durable_results": True,
+            "durable_result_chunks": True,
+            "durable_jobs": True,
+            "selective_optical_chunks": True,
+            "compressed_long_commands": True,
+            "structured_payloads": True,
+            "read_many_cursor": True,
+            "git_diff_cursor": True,
+            "runtime_env_refs": True,
+            "secret_broker": True,
+            "human_text_buffer": True,
+            "ef_migrations": True,
+            "database_aliases": True,
+            "maintenance_cleanup": True,
+            "browser_attach_existing": True,
+            "browser_dom_paging": True,
+            "browser_visual_qr": True,
+            "swagger_browser_control": True,
+            "browser_launch_allowed": False,
+            "browser_profile_creation_allowed": False,
+        }
+        fingerprint_source = {
+            "core_version": __version__,
+            "protocol_version": "EC2",
+            "structured_protocol_version": "easychange.structured/2",
+            "job_protocol_version": "easychange.jobs/2",
+            "secret_protocol_version": "easychange.secret/1",
+            "db_protocol_version": "easychange.db/1",
+            "supported_operations": supported_operations,
+            "feature_flags": feature_flags,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                fingerprint_source,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return {
+            "capability_version": 2,
+            "core_version": __version__,
+            "protocol_version": "EC2",
+            "structured_protocol_version": "easychange.structured/2",
+            "job_protocol_version": "easychange.jobs/2",
+            "secret_protocol_version": "easychange.secret/1",
+            "db_protocol_version": "easychange.db/1",
+            "supported_operations": supported_operations,
+            "unsupported_operations": [],
+            "feature_flags": feature_flags,
+            "max_payload": {
+                "decoded_command_bytes": 262144,
+                "structured_operations": int(structured.get("max_operations") or 64),
+                "read_many_files": 64,
+                "read_regions": 64,
+                "discover_terms": 32,
+            },
+            "max_result": {
+                "durable_results": 128,
+                "durable_ttl_seconds": 1800,
+                "logical_chunk_bytes_max": 4096,
+            },
+            "long_text_support": True,
+            "structured_payload_support": True,
+            "capabilities_sha256": digest,
+        }
+
     def _dispatch(self, name: str, args: list[str]) -> dict:
         if name in {
             "files", "tree", "projects", "next", "prev",
@@ -1963,7 +2252,11 @@ class CommandService:
                 raise ValueError("help accepts at most one command")
             return {"schema": command_schema(args[0])}
         if name in {"help", "capabilities"}:
+            manifest = self._capability_manifest()
+            if name == "capabilities" and "--compact" in args:
+                return {"capability_manifest": manifest}
             return {"commands": list(COMMAND_NAMES),
+                    "capability_manifest": manifest,
                     "capabilities": {"workspace": True, "git": "GIT" in self.workspace.adapters,
                     "build_test": self.workspace.adapters, "index": True, "symbols": True,
                     "ai_machine": {"optical_protocol": "EC2", "qr_slots": 16, "chunked_results": True,
@@ -2013,6 +2306,7 @@ class CommandService:
                 "process_count": len(processes),
                 "active_processes": active_processes,
                 "durable_results": True,
+                "capability_manifest": self._capability_manifest(),
                 "structured_operations": structured_capabilities(),
                 "maintenance": self.maintenance_report(),
                 "degraded_reasons": degraded_reasons,

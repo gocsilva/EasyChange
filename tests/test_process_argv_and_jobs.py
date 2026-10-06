@@ -148,3 +148,80 @@ def test_job_cancel_is_terminal_and_idempotent_for_attached_job(tmp_path, monkey
     again = service.job_status("JCANCEL01")
     assert again["state"] == "CANCELLED"
     assert again["terminal"] is True
+
+
+def test_job_tail_returns_only_new_bytes_and_preserves_cursor(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+
+    service.job_start(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import time;"
+                "print('FIRST', flush=True);"
+                "time.sleep(0.25);"
+                "print('SECOND', flush=True)"
+            ),
+        ],
+        "JTAIL01",
+    )
+
+    deadline = time.time() + 5
+    first = None
+    while time.time() < deadline:
+        page = service.job_tail("JTAIL01", cursor=0, max_bytes=4096)
+        if "FIRST" in page["text"]:
+            first = page
+            break
+        time.sleep(0.02)
+    assert first is not None
+    cursor = first["next_cursor"] or first["total_bytes"]
+    assert first["state"] in {"RUNNING", "SUCCEEDED"}
+
+    deadline = time.time() + 5
+    second = None
+    while time.time() < deadline:
+        page = service.job_tail("JTAIL01", cursor=cursor, max_bytes=4096)
+        if "SECOND" in page["text"]:
+            second = page
+            break
+        time.sleep(0.02)
+    assert second is not None
+    assert "FIRST" not in second["text"]
+    assert "SECOND" in second["text"]
+    assert second["cursor"] == cursor
+
+    end_cursor = second["next_cursor"] or second["total_bytes"]
+    empty = service.job_tail("JTAIL01", cursor=end_cursor, max_bytes=4096)
+    assert empty["text"] == ""
+    assert empty["returned_bytes"] == 0
+
+
+def test_job_tail_redacts_secret_from_incremental_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+    secret = "TOP-SECRET-JOB-TAIL"
+
+    service.job_start(
+        [sys.executable, "-c", f"print({secret!r})"],
+        "JTAILSEC1",
+        redact_values=[secret],
+    )
+
+    deadline = time.time() + 5
+    page = None
+    while time.time() < deadline:
+        page = service.job_tail("JTAILSEC1", cursor=0, max_bytes=4096)
+        if page["terminal"] or page["text"]:
+            break
+        time.sleep(0.02)
+
+    assert page is not None
+    assert secret not in page["text"]
+    assert "[REDACTED]" in page["text"]

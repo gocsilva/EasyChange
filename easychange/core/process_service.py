@@ -640,6 +640,37 @@ class ProcessService:
             "terminal": bool(current and current.get("state") != "RUNNING"),
         }
 
+    def job_tail(
+        self,
+        job_id: str,
+        *,
+        stream: str = "stdout",
+        cursor: int = 0,
+        max_bytes: int = 16384,
+    ) -> dict:
+        """Return only log bytes not yet consumed by the caller."""
+        page = self.job_logs(
+            job_id,
+            stream=stream,
+            cursor=cursor,
+            max_bytes=max_bytes,
+        )
+        try:
+            status = self.job_status(job_id)
+        except LookupError:
+            status = {}
+        return {
+            **page,
+            "state": str(status.get("state") or ""),
+            "pid": status.get("pid"),
+            "terminal": bool(
+                status.get("terminal")
+                if "terminal" in status
+                else page.get("terminal")
+            ),
+            "heartbeat_at": status.get("heartbeat_at"),
+        }
+
     def job_cancel(self, job_id: str) -> dict:
         item = self._processes.get(job_id)
         if item is None:
@@ -1071,6 +1102,7 @@ class ProcessService:
         stdout_path = self.root / f"{stamp}.out"
         stderr_path = self.root / f"{stamp}.err"
         started = time.monotonic()
+        preserve_output = False
 
         try:
             secure_values = tuple(str(value) for value in (redact_values or ()) if str(value))
@@ -1160,6 +1192,11 @@ class ProcessService:
             stdout = _redact(tail(stdout_path, tail_limit), redact_values)
             stderr = _redact(tail(stderr_path, tail_limit), redact_values)
             diagnostics_text = _redact("\n".join(diagnostics[-200:])[-12000:], redact_values)
+            output_truncated = (
+                stdout_size > len(stdout.encode("utf-8", errors="replace"))
+                or stderr_size > len(stderr.encode("utf-8", errors="replace"))
+            )
+            preserve_output = bool(output_truncated)
             self.last_execution = {
                 "argv": requested_argv,
                 "requested_argv": requested_argv,
@@ -1173,19 +1210,24 @@ class ProcessService:
                 "stderr_chars": stderr_size,
                 "stdout_bytes": stdout_size,
                 "stderr_bytes": stderr_size,
-                "output_truncated": stdout_size > len(stdout.encode("utf-8", errors="replace"))
-                                    or stderr_size > len(stderr.encode("utf-8", errors="replace")),
+                "output_truncated": output_truncated,
+                "output_available": preserve_output,
+                "output_id": stamp if preserve_output else None,
+                "output_cursor": 0 if preserve_output else None,
                 "duration_ms": int((time.monotonic() - started) * 1000),
-                "capture_backend": "tempfile-tail",
+                "capture_backend": (
+                    "tempfile-paged" if preserve_output else "tempfile-tail"
+                ),
             }
             return self.last_execution
         finally:
             self._cleanup_paths(cleanup_paths)
-            for path in (stdout_path, stderr_path):
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            if not preserve_output:
+                for path in (stdout_path, stderr_path):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
     def start(
         self,
@@ -1313,6 +1355,52 @@ class ProcessService:
         result = {"process_id": process_id, "state": "STOPPED", "returncode": item.process.returncode}
         self._prune_finished()
         return result
+
+    def run_output(
+        self,
+        output_id: str,
+        *,
+        stream: str = "stdout",
+        cursor: int = 0,
+        max_bytes: int = 16384,
+    ) -> dict:
+        """Page complete output retained by a truncated synchronous run()."""
+        safe = "".join(
+            ch for ch in str(output_id or "")
+            if ch.isalnum() or ch in "_-"
+        )
+        if not safe or safe != str(output_id):
+            raise ValueError("INVALID_RUN_OUTPUT_ID")
+        stream = str(stream or "stdout").casefold()
+        if stream not in {"stdout", "stderr"}:
+            raise ValueError("RUN_OUTPUT_STREAM_MUST_BE_STDOUT_OR_STDERR")
+        path = self.root / f"{safe}.{('out' if stream == 'stdout' else 'err')}"
+        if not path.exists():
+            raise LookupError(f"Run output not found: {output_id}")
+        cursor = max(0, int(cursor or 0))
+        page_bytes = max(256, min(1024 * 1024, int(max_bytes or 16384)))
+        try:
+            with path.open("rb") as handle:
+                total = handle.seek(0, 2)
+                start = min(cursor, total)
+                handle.seek(start)
+                raw = handle.read(page_bytes)
+        except OSError as exc:
+            raise LookupError(f"Run output not found: {output_id}") from exc
+        next_cursor = start + len(raw)
+        complete = next_cursor >= total
+        return {
+            "output_id": safe,
+            "stream": stream,
+            "cursor": start,
+            "next_cursor": None if complete else next_cursor,
+            "returned_bytes": len(raw),
+            "total_bytes": total,
+            "remaining_bytes": max(0, total - next_cursor),
+            "complete": complete,
+            "text": raw.decode("utf-8", errors="replace"),
+            "durable_file": True,
+        }
 
     def logs(self, process_id: str, limit: int = 12000) -> dict:
         item = self._processes.get(process_id)
