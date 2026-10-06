@@ -126,3 +126,49 @@ def test_adaptive_chunk_sizing_reduces_small_payload_chunk_count():
     assert adaptive_chunk_chars(3000) == 220
     assert adaptive_chunk_chars(8000) == 180
     assert len(adaptive) <= len(fixed)
+
+
+def test_structured_primary_duplication_is_compacted_on_wire_and_restored():
+    import json
+    from easychange.remote.optical_protocol import (
+        decode_result_chunks,
+        encode_result_chunks,
+        _compact_transport_value,
+    )
+
+    child = {
+        "ok": True,
+        "command": "discover_many",
+        "data": {"payload": "X" * 6000, "items": list(range(40))},
+        "error": None,
+        "code": None,
+        "command_id": "C1",
+        "duration_ms": 1,
+        "sequence": None,
+    }
+    result = {
+        "ok": True,
+        "command": "structured",
+        "data": {
+            "schema": "easychange.structured/2",
+            "operation": "operation",
+            "results": [child],
+            "primary": child,
+            "count": 1,
+        },
+        "error": None,
+        "code": None,
+        "command_id": "C2",
+        "duration_ms": 2,
+        "sequence": "QCOMPACT1",
+    }
+
+    compact = _compact_transport_value(result)
+    full_bytes = len(json.dumps(result, separators=(",", ":")).encode("utf-8"))
+    compact_bytes = len(json.dumps(compact, separators=(",", ":")).encode("utf-8"))
+    assert compact["data"]["primary"] == {"$ec_ref": "results[0]"}
+    assert compact_bytes < full_bytes * 0.65
+
+    chunks = encode_result_chunks(result)
+    restored = decode_result_chunks(chunks)
+    assert restored == result

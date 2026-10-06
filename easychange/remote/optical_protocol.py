@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import hashlib
 import json
 import zlib
@@ -16,6 +17,44 @@ def _result_value(result: Any) -> dict[str, Any]:
     value = result.to_dict() if hasattr(result, "to_dict") else dict(result)
     if not isinstance(value, dict):
         raise ValueError("optical result object required")
+    return value
+
+
+def _compact_transport_value(value: dict[str, Any]) -> dict[str, Any]:
+    """Remove reversible structured-response duplication only on the wire."""
+    compact = copy.deepcopy(value)
+    data = compact.get("data")
+    if not isinstance(data, dict):
+        return compact
+    results = data.get("results")
+    primary = data.get("primary")
+    if (
+        isinstance(results, list)
+        and len(results) == 1
+        and isinstance(results[0], dict)
+        and isinstance(primary, dict)
+        and primary == results[0]
+    ):
+        data["primary"] = {"$ec_ref": "results[0]"}
+        data["transport_compacted"] = True
+    return compact
+
+
+def _expand_transport_value(value: dict[str, Any]) -> dict[str, Any]:
+    data = value.get("data")
+    if not isinstance(data, dict):
+        return value
+    primary = data.get("primary")
+    results = data.get("results")
+    if (
+        isinstance(primary, dict)
+        and primary.get("$ec_ref") == "results[0]"
+        and isinstance(results, list)
+        and len(results) >= 1
+        and isinstance(results[0], dict)
+    ):
+        data["primary"] = copy.deepcopy(results[0])
+        data.pop("transport_compacted", None)
     return value
 
 
@@ -39,7 +78,8 @@ def adaptive_chunk_chars(token_chars: int) -> int:
 def encode_result_chunks(result: Any, *, chunk_chars: int | None = None) -> list[str]:
     """Encode a complete command result into bounded QR-friendly EC2 packets."""
     value = _result_value(result)
-    raw, _compressed, token = _encode_raw(value)
+    wire_value = _compact_transport_value(value)
+    raw, _compressed, token = _encode_raw(wire_value)
     size = adaptive_chunk_chars(len(token)) if chunk_chars is None else int(chunk_chars)
     if size < 120:
         raise ValueError("chunk_chars must be >= 120")
@@ -67,7 +107,8 @@ def encode_result_chunks(result: Any, *, chunk_chars: int | None = None) -> list
 def encode_result_header(result: Any, *, chunk_count: int | None = None) -> str:
     """Small status-first QR that can be read before the full EC2 payload."""
     value = _result_value(result)
-    raw, _compressed, token = _encode_raw(value)
+    wire_value = _compact_transport_value(value)
+    raw, _compressed, token = _encode_raw(wire_value)
     data = value.get("data") if isinstance(value.get("data"), dict) else {}
     receipt = data.get("mutation_receipt") if isinstance(data.get("mutation_receipt"), dict) else {}
     if chunk_count is None:
@@ -124,4 +165,4 @@ def decode_result_chunks(payloads: list[str]) -> dict[str, Any]:
     value = json.loads(raw.decode("utf-8"))
     if not isinstance(value, dict):
         raise ValueError("optical result object required")
-    return value
+    return _expand_transport_value(value)
