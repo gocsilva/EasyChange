@@ -724,7 +724,9 @@ def test_process_run_uses_bounded_tempfile_capture(service):
         "-c",
         "import sys; print('x' * 200000); print('ERROR CS9999: bounded capture', file=sys.stderr)",
     ])
-    assert result["capture_backend"] == "tempfile-tail"
+    assert result["capture_backend"] == "tempfile-paged"
+    assert result["output_available"] is True
+    assert result["output_id"]
     assert result["stdout_chars"] >= 200000
     assert len(result["stdout"]) <= 4000
     assert "CS9999" in result["diagnostics"]

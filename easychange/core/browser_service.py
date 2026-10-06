@@ -520,6 +520,16 @@ class BrowserService:
                 text,
                 flags=re.I,
             )
+            text = re.sub(
+                r"(?i)\bBearer\s+[A-Za-z0-9._~+\-/=]+",
+                "Bearer [REDACTED]",
+                text,
+            )
+            text = re.sub(
+                r"(?i)\b(token|password|api[_-]?key|authorization|cookie)\s*=\s*[^\s;]+",
+                lambda match: f"{match.group(1)}=[REDACTED]",
+                text,
+            )
             return text[-4000:]
         except Exception:
             return ""
@@ -716,7 +726,7 @@ class BrowserService:
                     ):
                         raise BrowserError("CDP_ENDPOINT_IS_NOT_EDGE_OR_CHROME")
                     browser_ws = str(
-                        version.get("webSocketDebuggerUrl")
+                        (version.get("webSocketDebuggerUrl") or "")
                         if isinstance(version, dict)
                         else ""
                     )
@@ -1348,9 +1358,14 @@ return {url:location.href,title:document.title,scrollX:window.scrollX,scrollY:wi
             return value
         import re
         text = re.sub(
-            r"(?i)(password|passwd|pwd|secret|token|api[_-]?key|authorization)(\s*[:=]\s*)[^\s,;]+",
+            r"(?i)(authorization)(\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+",
             r"\1\2[REDACTED]",
             value,
+        )
+        text = re.sub(
+            r"(?i)(password|passwd|pwd|secret|token|api[_-]?key)(\s*[:=]\s*)[^\s,;]+",
+            r"\1\2[REDACTED]",
+            text,
         )
         return re.sub(
             r"(?i)bearer\s+[A-Za-z0-9._~+/-]{12,}",
