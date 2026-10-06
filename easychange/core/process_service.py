@@ -5,6 +5,7 @@ import os
 
 import re
 import subprocess
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -25,8 +26,14 @@ class RunningProcess:
     process: subprocess.Popen
     stdout_path: Path
     stderr_path: Path
+    exec_argv: list[str] | None = None
     redact_values: tuple[str, ...] = ()
     pump_threads: tuple[threading.Thread, ...] = ()
+    cleanup_paths: tuple[Path, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.exec_argv is None:
+            self.exec_argv = list(self.argv)
 
 
 def _redact(text: str, values) -> str:
@@ -125,6 +132,7 @@ class ProcessService:
     SCRIPT_TTL_SECONDS = 7 * 24 * 60 * 60
     MAX_DURABLE_JOBS = 128
     DEFAULT_MAX_RUNTIME_BYTES = 256 * 1024 * 1024
+    JOB_HEARTBEAT_INTERVAL_SECONDS = 5
 
     @staticmethod
     def _runtime_budget() -> int:
@@ -160,6 +168,159 @@ class ProcessService:
         self._migrate_legacy_jobs()
         self._processes: dict[str, RunningProcess] = {}
         self.last_execution: dict | None = None
+        self._reconcile_durable_jobs()
+
+    @staticmethod
+    def _pid_alive(pid: int | None) -> bool:
+        try:
+            value = int(pid or 0)
+        except (TypeError, ValueError):
+            return False
+        if value <= 0:
+            return False
+        if os.name == "nt":
+            try:
+                completed = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {value}", "/FO", "CSV", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return False
+            output = (completed.stdout or "").strip()
+            if not output or output.casefold().startswith("info:"):
+                return False
+            return f'"{value}"' in output or f',{value},' in output
+        try:
+            os.kill(value, 0)
+            return True
+        except (OSError, PermissionError):
+            return False
+
+    @staticmethod
+    def _normalize_argv(argv: list[str]) -> list[str]:
+        requested = [str(item) for item in (argv or [])]
+        if not requested or not requested[0]:
+            raise ValueError("Command is empty")
+        executable = requested[0]
+        suffix = Path(executable.strip('"')).suffix.casefold()
+
+        if os.name == "nt" and suffix in {".cmd", ".bat"}:
+            comspec = os.environ.get("COMSPEC") or "cmd.exe"
+            return [comspec, "/d", "/s", "/c", "call", *requested]
+
+        if os.name == "nt" and suffix == ".ps1":
+            shell = shutil.which("pwsh") or shutil.which("powershell") or "powershell.exe"
+            return [
+                shell,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                *requested,
+            ]
+
+        return requested
+
+    def _prepare_launch(
+        self,
+        argv: list[str],
+        env: dict[str, str] | None = None,
+    ) -> tuple[list[str], list[str], dict[str, str] | None, tuple[Path, ...]]:
+        requested = [str(item) for item in (argv or [])]
+        if not requested or not requested[0]:
+            raise ValueError("Command is empty")
+        if any("\x00" in item for item in requested):
+            raise ValueError("Command arguments cannot contain NUL")
+
+        suffix = Path(requested[0].strip('"')).suffix.casefold()
+        if os.name == "nt" and suffix in {".cmd", ".bat"}:
+            # cmd.exe has a second parsing phase and subprocess.list2cmdline
+            # does not quote metacharacters such as '&' unless whitespace is
+            # present. Keep user arguments entirely out of the command line:
+            # a tiny external wrapper expands them from child-only environment
+            # variables using delayed expansion after metachar parsing.
+            token = hashlib.sha256(
+                f"{time.time_ns()}:{requested[0]}".encode("utf-8", errors="replace")
+            ).hexdigest()[:16].upper()
+            wrapper = self.root / f".cmd-wrapper-{token}.cmd"
+            prefix = f"EASYCHANGE_CMD_{token}_"
+            launch_env = dict(os.environ if env is None else env)
+            target_key = prefix + "TARGET"
+            launch_env[target_key] = requested[0]
+            arg_refs: list[str] = []
+            for index, value in enumerate(requested[1:], start=1):
+                key = prefix + f"ARG_{index}"
+                launch_env[key] = value
+                arg_refs.append(f'"!{key}!"')
+            wrapper_text = (
+                "@echo off\r\n"
+                "setlocal EnableExtensions EnableDelayedExpansion\r\n"
+                + f'call "!{target_key}!"'
+                + ((" " + " ".join(arg_refs)) if arg_refs else "")
+                + "\r\n"
+                + "exit /b !errorlevel!\r\n"
+            )
+            wrapper.write_bytes(wrapper_text.encode("ascii"))
+            comspec = os.environ.get("COMSPEC") or "cmd.exe"
+            effective = [comspec, "/d", "/s", "/c", "call", str(wrapper)]
+            return requested, effective, launch_env, (wrapper,)
+
+        effective = self._normalize_argv(requested)
+        return requested, effective, env, ()
+
+    @staticmethod
+    def _cleanup_paths(paths: tuple[Path, ...] | list[Path] | None) -> None:
+        for path in paths or ():
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _mark_job_orphaned(self, current: dict, *, reason: str) -> dict:
+        now = time.time()
+        updated = {
+            **current,
+            "state": "ORPHANED",
+            "finished_at": now,
+            "heartbeat_at": current.get("heartbeat_at") or current.get("started_at"),
+            "orphaned_at": now,
+            "orphan_reason": reason,
+            "pid_alive": False,
+            "terminal": True,
+        }
+        started = float(updated.get("started_at") or now)
+        updated["duration_ms"] = int(max(0.0, now - started) * 1000)
+        return self._write_job(str(updated["job_id"]), updated)
+
+    def _reconcile_durable_jobs(self) -> dict:
+        reconciled = 0
+        orphaned = 0
+        running = 0
+        try:
+            manifests = list(self.jobs_root.glob("*.json"))
+        except OSError:
+            manifests = []
+        for path in manifests[:2048]:
+            current = self._read_job(path.stem)
+            if not current or str(current.get("state") or "").upper() != "RUNNING":
+                continue
+            if self._pid_alive(current.get("pid")):
+                running += 1
+                continue
+            self._mark_job_orphaned(current, reason="PROCESS_NOT_ALIVE")
+            reconciled += 1
+            orphaned += 1
+        return {
+            "checked": len(manifests),
+            "reconciled": reconciled,
+            "orphaned": orphaned,
+            "running_unattached": running,
+        }
 
     def _migrate_legacy_jobs(self) -> None:
         legacy = self.cwd / ".easychange" / "jobs"
@@ -239,12 +400,16 @@ class ProcessService:
         stderr, stderr_size, stderr_hash = self._tail_file(item.stderr_path, 32000 if code == 0 else 64000)
         stdout = _redact(stdout, item.redact_values)
         stderr = _redact(stderr, item.redact_values)
+        persisted_state = str(current.get("state") or "").upper()
+        cancelled = bool(cancelled or persisted_state == "CANCELLED")
         state = "CANCELLED" if cancelled else ("SUCCEEDED" if code == 0 else "FAILED")
         finished_at = time.time()
         started_at = float(current.get("started_at") or finished_at)
         result = {
             **current, "job_id": job_id, "process_id": item.process_id, "pid": item.process.pid,
-            "argv": item.argv, "state": state, "returncode": code, "finished_at": finished_at,
+            "argv": item.argv, "requested_argv": item.argv, "exec_argv": item.exec_argv,
+            "state": state, "returncode": code, "finished_at": finished_at,
+            "pid_alive": False,
             "duration_ms": int(max(0.0, finished_at - started_at) * 1000),
             "stdout": stdout, "stderr": stderr, "stdout_chars": stdout_size, "stderr_chars": stderr_size,
             "stdout_bytes": stdout_size, "stderr_bytes": stderr_size,
@@ -256,6 +421,7 @@ class ProcessService:
             "terminal": True,
         }
         self._write_job(job_id, result)
+        self._cleanup_paths(item.cleanup_paths)
         return result
 
     def job_start(
@@ -267,23 +433,60 @@ class ProcessService:
         redact_values: list[str] | tuple[str, ...] | None = None,
         metadata: dict | None = None,
     ) -> dict:
+        requested_argv = [str(item) for item in (argv or [])]
+        if not requested_argv or not requested_argv[0]:
+            raise ValueError("Command is empty")
         previous = self._read_job(job_id)
         if previous is not None:
-            if previous.get("argv") != argv:
+            previous_requested = previous.get("argv") or previous.get("requested_argv")
+            if previous_requested != requested_argv:
                 raise RuntimeError("JOB_ID_CONFLICT")
             return self.job_status(job_id)
-        started = self.start(argv, job_id, env=env, redact_values=redact_values)
-        record = {
+
+        now = time.time()
+        queued = {
             "job_id": job_id,
             "process_id": job_id,
-            "pid": started["pid"],
-            "argv": list(argv),
-            "state": "RUNNING",
-            "created_at": time.time(),
-            "started_at": time.time(),
+            "pid": None,
+            "argv": requested_argv,
+            "requested_argv": requested_argv,
+            "exec_argv": None,
+            "state": "QUEUED",
+            "created_at": now,
+            "started_at": None,
+            "heartbeat_at": now,
             "finished_at": None,
             "returncode": None,
             "metadata": dict(metadata or {}),
+            "terminal": False,
+        }
+        self._write_job(job_id, queued)
+        try:
+            started = self.start(
+                requested_argv,
+                job_id,
+                env=env,
+                redact_values=redact_values,
+            )
+        except Exception as exc:
+            failed = {
+                **queued,
+                "state": "FAILED",
+                "finished_at": time.time(),
+                "terminal": True,
+                "start_error": f"{type(exc).__name__}:{str(exc)[:500]}",
+            }
+            self._write_job(job_id, failed)
+            raise
+
+        started_at = time.time()
+        record = {
+            **queued,
+            "pid": started["pid"],
+            "exec_argv": list(started.get("exec_argv") or requested_argv),
+            "state": "RUNNING",
+            "started_at": started_at,
+            "heartbeat_at": started_at,
         }
         return self._write_job(job_id, record)
 
@@ -293,20 +496,56 @@ class ProcessService:
         if item is not None:
             code = item.process.poll()
             if code is None:
+                now = time.time()
                 if current is None:
-                    current = {"job_id": job_id, "process_id": job_id, "pid": item.process.pid,
-                               "argv": item.argv, "state": "RUNNING", "started_at": time.time()}
-                    self._write_job(job_id, current)
+                    current = {
+                        "job_id": job_id,
+                        "process_id": job_id,
+                        "pid": item.process.pid,
+                        "argv": item.argv,
+                        "requested_argv": item.argv,
+                        "exec_argv": item.exec_argv,
+                        "state": "RUNNING",
+                        "started_at": now,
+                        "heartbeat_at": now,
+                    }
+                if now - float(current.get("heartbeat_at") or 0.0) >= self.JOB_HEARTBEAT_INTERVAL_SECONDS:
+                    current = self._write_job(job_id, {**current, "heartbeat_at": now})
                 snapshot = {k: v for k, v in current.items() if k not in {"stdout", "stderr"}}
-                started = float(snapshot.get("started_at") or time.time())
-                snapshot["duration_ms"] = int(max(0.0, time.time() - started) * 1000)
+                started = float(snapshot.get("started_at") or now)
+                snapshot["duration_ms"] = int(max(0.0, now - started) * 1000)
                 snapshot["terminal"] = False
+                snapshot["attached"] = True
+                snapshot["pid_alive"] = True
                 return snapshot
             current = self._finalize_job(job_id, item)
+
         if current is None:
             raise LookupError(f"Job not found: {job_id}")
+
+        state = str(current.get("state") or "").upper()
+        if state == "QUEUED":
+            # QUEUED can only survive a restart/crash between manifest and process start.
+            current = self._mark_job_orphaned(
+                current,
+                reason="QUEUED_WITHOUT_ATTACHED_PROCESS",
+            )
+            state = "ORPHANED"
+        elif state == "RUNNING" and item is None:
+            if not self._pid_alive(current.get("pid")):
+                current = self._mark_job_orphaned(
+                    current,
+                    reason="RUNNING_PID_NOT_ALIVE",
+                )
+                state = "ORPHANED"
+
         snapshot = {k: v for k, v in current.items() if k not in {"stdout", "stderr"}}
-        snapshot.setdefault("terminal", snapshot.get("state") != "RUNNING")
+        snapshot.setdefault("terminal", state not in {"QUEUED", "RUNNING"})
+        snapshot["attached"] = item is not None
+        snapshot.setdefault(
+            "pid_alive",
+            self._pid_alive(snapshot.get("pid")) if state == "RUNNING" else False,
+        )
         return snapshot
 
     def job_result(self, job_id: str) -> dict:
@@ -316,11 +555,11 @@ class ProcessService:
         current = self._read_job(job_id)
         if current is None:
             raise LookupError(f"Job not found: {job_id}")
-        if current.get("state") == "RUNNING":
-            started = float(current.get("started_at") or time.time())
-            return {"job_id": job_id, "state": "RUNNING", "pid": current.get("pid"),
-                    "started_at": current.get("started_at"),
-                    "duration_ms": int(max(0.0, time.time() - started) * 1000), "terminal": False}
+        if current.get("state") in {"QUEUED", "RUNNING"}:
+            status = self.job_status(job_id)
+            if status.get("state") in {"QUEUED", "RUNNING"}:
+                return status
+            current = self._read_job(job_id) or status
         result = dict(current)
         result.setdefault("terminal", True)
         return result
@@ -435,6 +674,7 @@ class ProcessService:
                 continue
             # Durable jobs keep their external log files for cursor-based retrieval.
             # Non-job processes can still release their transient files immediately.
+            self._cleanup_paths(item.cleanup_paths)
             if not self._job_path(process_id).exists():
                 for path in (item.stdout_path, item.stderr_path):
                     try:
@@ -716,8 +956,9 @@ class ProcessService:
         redact_values: list[str] | tuple[str, ...] | None = None,
     ) -> dict:
         """Run a command without buffering unbounded stdout/stderr in RAM."""
-        if not argv:
-            raise ValueError("Command is empty")
+        requested_argv, exec_argv, launch_env, cleanup_paths = self._prepare_launch(
+            argv, env=env
+        )
 
         stamp = f"run-{time.time_ns()}"
         stdout_path = self.root / f"{stamp}.out"
@@ -728,13 +969,13 @@ class ProcessService:
             secure_values = tuple(str(value) for value in (redact_values or ()) if str(value))
             if secure_values:
                 proc = subprocess.Popen(
-                    argv,
+                    exec_argv,
                     cwd=self.cwd,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     shell=False,
-                    env=env,
+                    env=launch_env,
                     bufsize=0,
                 )
                 assert proc.stdout is not None and proc.stderr is not None
@@ -767,7 +1008,7 @@ class ProcessService:
             else:
                 with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
                     completed = subprocess.run(
-                        argv,
+                        exec_argv,
                         cwd=self.cwd,
                         stdin=subprocess.DEVNULL,
                         stdout=stdout_file,
@@ -775,7 +1016,7 @@ class ProcessService:
                         timeout=timeout,
                         check=False,
                         shell=False,
-                        env=env,
+                        env=launch_env,
                     )
                 returncode = completed.returncode
 
@@ -813,7 +1054,10 @@ class ProcessService:
             stderr = _redact(tail(stderr_path, tail_limit), redact_values)
             diagnostics_text = _redact("\n".join(diagnostics[-200:])[-12000:], redact_values)
             self.last_execution = {
-                "argv": argv,
+                "argv": requested_argv,
+                "requested_argv": requested_argv,
+                "exec_argv": exec_argv,
+                "effective_argv": exec_argv,
                 "returncode": returncode,
                 "stdout": stdout,
                 "stderr": stderr,
@@ -829,6 +1073,7 @@ class ProcessService:
             }
             return self.last_execution
         finally:
+            self._cleanup_paths(cleanup_paths)
             for path in (stdout_path, stderr_path):
                 try:
                     path.unlink(missing_ok=True)
@@ -843,8 +1088,9 @@ class ProcessService:
         env: dict[str, str] | None = None,
         redact_values: list[str] | tuple[str, ...] | None = None,
     ) -> dict:
-        if not argv:
-            raise ValueError("Command is empty")
+        requested_argv, exec_argv, launch_env, cleanup_paths = self._prepare_launch(
+            argv, env=env
+        )
         self._prune_finished()
         existing = self._processes.get(process_id)
         if existing is not None and existing.process.poll() is None:
@@ -854,13 +1100,13 @@ class ProcessService:
         pump_threads: tuple[threading.Thread, ...] = ()
         if secure_values:
             proc = subprocess.Popen(
-                argv,
+                exec_argv,
                 cwd=self.cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 shell=False,
-                env=env,
+                env=launch_env,
                 bufsize=0,
             )
             assert proc.stdout is not None and proc.stderr is not None
@@ -884,23 +1130,33 @@ class ProcessService:
             stdout_file, stderr_file = stdout_path.open("wb"), stderr_path.open("wb")
             try:
                 proc = subprocess.Popen(
-                    argv, cwd=self.cwd, stdin=subprocess.DEVNULL,
+                    exec_argv, cwd=self.cwd, stdin=subprocess.DEVNULL,
                     stdout=stdout_file, stderr=stderr_file, shell=False,
-                    env=env,
+                    env=launch_env,
                 )
             finally:
                 stdout_file.close()
                 stderr_file.close()
         self._processes[process_id] = RunningProcess(
-            process_id,
-            argv,
-            proc,
-            stdout_path,
-            stderr_path,
-            secure_values,
-            pump_threads,
+            process_id=process_id,
+            argv=requested_argv,
+            process=proc,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            exec_argv=exec_argv,
+            redact_values=secure_values,
+            pump_threads=pump_threads,
+            cleanup_paths=cleanup_paths,
         )
-        return {"process_id": process_id, "pid": proc.pid, "state": "RUNNING", "argv": argv}
+        return {
+            "process_id": process_id,
+            "pid": proc.pid,
+            "state": "RUNNING",
+            "argv": requested_argv,
+            "requested_argv": requested_argv,
+            "exec_argv": exec_argv,
+            "effective_argv": exec_argv,
+        }
 
     def list(self) -> list[dict]:
         self._prune_finished()
@@ -915,6 +1171,8 @@ class ProcessService:
                 "state": "RUNNING" if code is None else "EXITED",
                 "returncode": code,
                 "argv": item.argv,
+                "requested_argv": item.argv,
+                "exec_argv": item.exec_argv,
             })
         for path in sorted(self.jobs_root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:128]:
             job_id = path.stem
@@ -944,6 +1202,7 @@ class ProcessService:
                 item.process.kill()
                 item.process.wait(timeout=3)
         _join_pumps(item)
+        self._cleanup_paths(item.cleanup_paths)
         result = {"process_id": process_id, "state": "STOPPED", "returncode": item.process.returncode}
         self._prune_finished()
         return result
