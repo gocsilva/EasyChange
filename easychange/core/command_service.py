@@ -1119,13 +1119,25 @@ class CommandService:
                 else:
                     raise ValueError(f"UNSUPPORTED_BROWSER_OPERATION:{kind}")
 
+                focus = self.browser.restore_easychange_foreground()
                 data = self._scrub_browser_secret_values(data, secret_sources)
                 if isinstance(data, dict):
                     data = {
                         **data,
+                        "easychange_focus": focus,
+                        "command_focus_confirmed": bool(focus.get("command_focus_confirmed")),
                         "secret_refs_used": used_secret_refs,
                         "secret_values_returned": False,
                     }
+                if focus.get("focus_required") and not focus.get("command_focus_confirmed"):
+                    return Result(
+                        False,
+                        kind,
+                        error="EASYCHANGE_FOREGROUND_RESTORE_FAILED",
+                        code="FOCUS_RECOVERY_FAILED",
+                        data=data,
+                        command_id=self.ids.next("C"),
+                    )
                 return Result(
                     True,
                     kind,
@@ -1133,13 +1145,22 @@ class CommandService:
                     command_id=self.ids.next("C"),
                 )
             except Exception as exc:
+                focus = self.browser.restore_easychange_foreground()
                 error = self._scrub_browser_secret_values(str(exc), secret_sources)
+                diagnostics = getattr(exc, "diagnostics", {})
+                diagnostics = self._scrub_browser_secret_values(
+                    diagnostics if isinstance(diagnostics, dict) else {},
+                    secret_sources,
+                )
                 return Result(
                     False,
                     kind or "browser",
                     error=error,
                     code=str(getattr(exc, "code", "") or type(exc).__name__),
                     data={
+                        "easychange_focus": focus,
+                        "command_focus_confirmed": bool(focus.get("command_focus_confirmed")),
+                        "bootstrap": diagnostics,
                         "secret_refs_used": used_secret_refs,
                         "secret_values_returned": False,
                     },

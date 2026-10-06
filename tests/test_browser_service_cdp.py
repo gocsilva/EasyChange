@@ -4,6 +4,7 @@ import easychange.core.browser_service as browser_module
 
 import contextlib
 import http.server
+import io
 import os
 import threading
 from pathlib import Path
@@ -293,3 +294,87 @@ def test_detach_never_closes_human_browser_or_process(tmp_path, monkeypatch):
         for channel in _FakeCdp.instances
         for method, _params in channel.calls
     )
+
+
+def test_candidates_never_return_chromium_and_prefer_edge(tmp_path, monkeypatch):
+    program_files = tmp_path / "Program Files"
+    edge = program_files / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+    chrome = program_files / "Google" / "Chrome" / "Application" / "chrome.exe"
+    edge.parent.mkdir(parents=True)
+    chrome.parent.mkdir(parents=True)
+    edge.write_bytes(b"edge")
+    chrome.write_bytes(b"chrome")
+    monkeypatch.setenv("PROGRAMFILES", str(program_files))
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "Program Files x86"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    monkeypatch.setattr(browser_module.shutil, "which", lambda name: None)
+    values = BrowserService.candidates()
+    assert Path(values[0]).name.casefold() == "msedge.exe"
+    assert "chrome.exe" in [Path(value).name.casefold() for value in values]
+    assert not any("chromium" in value.casefold() for value in values)
+
+
+def test_candidates_use_chrome_when_edge_is_absent(tmp_path, monkeypatch):
+    program_files = tmp_path / "Program Files"
+    chrome = program_files / "Google" / "Chrome" / "Application" / "chrome.exe"
+    chrome.parent.mkdir(parents=True)
+    chrome.write_bytes(b"chrome")
+    monkeypatch.setenv("PROGRAMFILES", str(program_files))
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "Program Files x86"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    monkeypatch.setattr(browser_module.shutil, "which", lambda name: None)
+    values = BrowserService.candidates()
+    assert values and Path(values[0]).name.casefold() == "chrome.exe"
+
+
+def test_cdp_websocket_rejects_non_loopback_before_network_access():
+    with pytest.raises(Exception, match="CDP_NON_LOOPBACK_FORBIDDEN"):
+        browser_module._WebSocket(
+            "ws://192.168.50.10:9222/devtools/page/unsafe",
+            timeout=0.1,
+        )
+
+
+def test_browser_open_without_installed_edge_or_chrome_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    browser = BrowserService(ProcessService(workspace))
+    monkeypatch.setattr(
+        browser,
+        "attach",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            browser_module.BrowserError("CDP_EXISTING_SESSION_NOT_AVAILABLE")
+        ),
+    )
+    monkeypatch.setattr(browser, "candidates", lambda: [])
+    with pytest.raises(FileNotFoundError, match="NO_INSTALLED_EDGE_OR_CHROME_FOUND"):
+        browser.start("S1", timeout=0.5)
+
+
+def test_bootstrap_diagnostics_redact_secrets_and_url_query(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    browser = BrowserService(ProcessService(workspace))
+    class FakeCapture:
+        def tail(self):
+            return "Authorization: Bearer abcdefghijklmnop token=secretvalue password=hunter2 https://host/path?token=bad"
+    safe = browser._safe_capture_tail(FakeCapture())
+    assert "abcdefghijklmnop" not in safe
+    assert "secretvalue" not in safe
+    assert "hunter2" not in safe
+    assert "?token=bad" not in safe
+    assert "[REDACTED]" in safe
+
+
+def test_persistent_profile_is_outside_workspace_and_survives_detach(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    browser = BrowserService(ProcessService(workspace))
+    edge = tmp_path / "msedge.exe"
+    edge.write_bytes(b"edge")
+    profile = browser._persistent_profile_dir(str(edge))
+    assert str(profile).startswith(str(tmp_path / "localapp" / "EasyChange" / "BrowserProfiles"))
+    assert not str(profile).startswith(str(workspace))

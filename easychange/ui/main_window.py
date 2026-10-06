@@ -32,6 +32,7 @@ class MainWindow(QMainWindow):
     def __init__(self, workspace: Workspace, *, machine_mode: bool | None = None, hid_mode: bool = False) -> None:
         super().__init__()
         self.service = CommandService(workspace)
+        self.service.browser.set_focus_window_handle_provider(lambda: int(self.winId()))
         self._machine = self.service.machine if machine_mode is None else machine_mode
         self.service.machine = self._machine
         self._workspace_dialog_open = False
@@ -183,8 +184,14 @@ class MainWindow(QMainWindow):
     def _add_shortcut(self, sequence: str, callback) -> None:
         shortcut = QShortcut(QKeySequence(sequence), self); shortcut.activated.connect(callback)
 
-    def focus_command(self) -> None:
+    def focus_command(self) -> dict:
+        focus = self.service.browser.restore_easychange_foreground()
         self.command.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        QApplication.processEvents()
+        state = self.service.browser.easychange_focus_state()
+        if state.get("focus_required"):
+            focus = {**focus, **state}
+        return focus
 
     def eventFilter(self, watched, event) -> bool:
         if watched is self.command and event.type() == QEvent.Type.FocusOut and self._machine and not self._workspace_dialog_open:
@@ -231,6 +238,7 @@ class MainWindow(QMainWindow):
             new_service.state_store.data["output_mode"] = new_service.output
             new_service._persist_state()
             self.service = new_service
+            self.service.browser.set_focus_window_handle_provider(lambda: int(self.winId()))
             old_service.close()
 
             self._active_path = None
@@ -302,6 +310,7 @@ class MainWindow(QMainWindow):
             new_service.state_store.data["output_mode"] = previous_output
             new_service._persist_state()
             self.service = new_service
+            self.service.browser.set_focus_window_handle_provider(lambda: int(self.winId()))
             self._machine = False
 
             if active_path:
@@ -481,6 +490,12 @@ class MainWindow(QMainWindow):
             self._machine = self.service.machine
             self._apply_machine_style()
         self._refresh_header()
+        focus = self.focus_command()
+        if isinstance(result.data, dict):
+            result.data["easychange_focus"] = focus
+            result.data["command_focus_confirmed"] = bool(
+                focus.get("command_focus_confirmed")
+            )
         self.output.setPlainText(result.render(self.service.output))
         self._update_machine_qr(result)
         if result.ok and (result.data.get("path") or result.data.get("file")) and text.lstrip(":").split(maxsplit=1)[0] in {"open", "read", "context", "goto", "reload"}:

@@ -1104,7 +1104,7 @@ class ProjectRuntimeService:
     @staticmethod
     def _browser_candidates() -> list[str]:
         candidates = []
-        for name in ("msedge", "msedge.exe", "chrome", "chrome.exe", "chromium", "chromium.exe"):
+        for name in ("msedge", "msedge.exe", "chrome", "chrome.exe"):
             found = shutil.which(name)
             if found and found not in candidates:
                 candidates.append(found)
