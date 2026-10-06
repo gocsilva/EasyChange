@@ -489,10 +489,14 @@ class BrowserService:
             "browser_get_version_ok": False,
             "runtime_evaluate_ok": False,
         }
-        version = self._http_json(
-            f"http://127.0.0.1:{int(candidate_port)}/json/version",
-            timeout=max(0.2, min(3.0, float(timeout))),
-        )
+        try:
+            version = self._http_json(
+                f"http://127.0.0.1:{int(candidate_port)}/json/version",
+                timeout=max(0.2, min(3.0, float(timeout))),
+            )
+        except Exception as exc:
+            diagnostic["json_version_error"] = f"{type(exc).__name__}:{str(exc)[:240]}"
+            raise BrowserBootstrapError("CDP_JSON_VERSION_UNAVAILABLE", diagnostic) from exc
         diagnostic["json_version_available"] = True
         product = str(version.get("Browser") if isinstance(version, dict) else "")
         diagnostic["browser_product"] = product
@@ -506,7 +510,11 @@ class BrowserService:
         diagnostic["browser_websocket_available"] = True
 
         diagnostic["stage"] = "json_list"
-        targets = self._targets(candidate_port)
+        try:
+            targets = self._targets(candidate_port)
+        except Exception as exc:
+            diagnostic["json_list_error"] = f"{type(exc).__name__}:{str(exc)[:240]}"
+            raise BrowserBootstrapError("CDP_JSON_LIST_UNAVAILABLE", diagnostic) from exc
         diagnostic["json_list_available"] = True
         if target_id:
             target = next(
@@ -533,22 +541,31 @@ class BrowserService:
         diagnostic["target_id"] = str(target.get("id") or "")
 
         diagnostic["stage"] = "websocket"
-        browser_cdp = _WebSocket(
-            browser_ws, timeout=max(0.5, min(5.0, float(timeout)))
-        )
+        browser_cdp = None
         cdp = None
         try:
-            ws = str(target["webSocketDebuggerUrl"])
-            cdp = _WebSocket(ws, timeout=max(0.5, min(5.0, float(timeout))))
+            try:
+                browser_cdp = _WebSocket(
+                    browser_ws, timeout=max(0.5, min(5.0, float(timeout)))
+                )
+                ws = str(target["webSocketDebuggerUrl"])
+                cdp = _WebSocket(ws, timeout=max(0.5, min(5.0, float(timeout))))
+            except Exception as exc:
+                diagnostic["websocket_error"] = f"{type(exc).__name__}:{str(exc)[:240]}"
+                raise BrowserBootstrapError("CDP_WEBSOCKET_CONNECT_FAILED", diagnostic) from exc
             diagnostic["websocket_connected"] = True
             for domain in ("Page.enable", "Runtime.enable", "DOM.enable"):
                 cdp.call(domain, timeout=max(0.5, min(3.0, float(timeout))))
 
             diagnostic["stage"] = "browser_get_version"
-            verified_version = browser_cdp.call(
-                "Browser.getVersion",
-                timeout=max(0.5, min(3.0, float(timeout))),
-            )
+            try:
+                verified_version = browser_cdp.call(
+                    "Browser.getVersion",
+                    timeout=max(0.5, min(3.0, float(timeout))),
+                )
+            except Exception as exc:
+                diagnostic["browser_get_version_error"] = f"{type(exc).__name__}:{str(exc)[:240]}"
+                raise BrowserBootstrapError("CDP_BROWSER_GET_VERSION_FAILED", diagnostic) from exc
             verified_product = str(
                 verified_version.get("product") if isinstance(verified_version, dict) else ""
             )
@@ -561,11 +578,15 @@ class BrowserService:
             diagnostic["verified_product"] = verified_product or product
 
             diagnostic["stage"] = "runtime_evaluate"
-            runtime = cdp.call(
-                "Runtime.evaluate",
-                {"expression": "document.title", "returnByValue": True},
-                timeout=max(0.5, min(3.0, float(timeout))),
-            )
+            try:
+                runtime = cdp.call(
+                    "Runtime.evaluate",
+                    {"expression": "document.title", "returnByValue": True},
+                    timeout=max(0.5, min(3.0, float(timeout))),
+                )
+            except Exception as exc:
+                diagnostic["runtime_evaluate_error"] = f"{type(exc).__name__}:{str(exc)[:240]}"
+                raise BrowserBootstrapError("CDP_RUNTIME_EVALUATE_FAILED", diagnostic) from exc
             if not isinstance(runtime, dict) or not isinstance(runtime.get("result"), dict):
                 raise BrowserBootstrapError("CDP_RUNTIME_EVALUATE_FAILED", diagnostic)
             diagnostic["runtime_evaluate_ok"] = True
@@ -606,7 +627,8 @@ class BrowserService:
             except Exception:
                 pass
             try:
-                browser_cdp.close()
+                if browser_cdp is not None:
+                    browser_cdp.close()
             except Exception:
                 pass
             self._sessions.pop(key, None)
