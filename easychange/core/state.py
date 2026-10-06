@@ -23,6 +23,22 @@ class MachineSession:
         path.parent.mkdir(parents=True, exist_ok=True)
 
     def save(self) -> None:
+        payload = json.dumps(
+            self.data, ensure_ascii=False, separators=(",", ":")
+        )
         temp = self.path.with_suffix(".tmp")
-        temp.write_text(json.dumps(self.data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        os.replace(temp, self.path)
+        last_error: OSError | None = None
+        for _attempt in range(2):
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with temp.open("w", encoding="utf-8") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp, self.path)
+                return
+            except FileNotFoundError as exc:
+                last_error = exc
+                continue
+        if last_error is not None:
+            raise last_error

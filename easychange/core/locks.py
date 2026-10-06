@@ -27,10 +27,27 @@ class LockManager:
 
     @contextmanager
     def _connect(self):
-        if self.db_path is None: raise RuntimeError("Lock storage is not configured")
-        db = sqlite3.connect(self.db_path, timeout=10)
+        if self.db_path is None:
+            raise RuntimeError("Lock storage is not configured")
+        db = None
+        last_error: Exception | None = None
+        for _attempt in range(2):
+            try:
+                self.db_path.parent.mkdir(parents=True, exist_ok=True)
+                db = sqlite3.connect(self.db_path, timeout=10)
+                break
+            except (FileNotFoundError, sqlite3.OperationalError) as exc:
+                last_error = exc
+                db = None
+        if db is None:
+            assert last_error is not None
+            raise last_error
         try:
             db.execute("PRAGMA busy_timeout=10000")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS locks("
+                "path TEXT PRIMARY KEY, owner TEXT, session TEXT, expires_at REAL)"
+            )
             yield db
             db.commit()
         except BaseException:
