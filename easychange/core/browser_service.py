@@ -29,12 +29,65 @@ class CdpError(BrowserError):
     pass
 
 
+class BrowserBootstrapError(BrowserError):
+    def __init__(self, code: str, diagnostic: dict | None = None) -> None:
+        self.code = str(code or "CDP_BOOTSTRAP_FAILED")
+        self.diagnostic = dict(diagnostic or {})
+        super().__init__(self.code)
+
+
+def _redact_diagnostic_text(value: str, limit: int = 8192) -> str:
+    import re
+    text = str(value or "")
+    text = re.sub(
+        r"(?i)(password|passwd|pwd|secret|token|api[_-]?key|authorization)(\s*[:=]\s*)[^\s,;]+",
+        r"\1\2[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)bearer\s+[A-Za-z0-9._~+/-]{12,}",
+        "Bearer [REDACTED]",
+        text,
+    )
+    return text[-max(256, min(32768, int(limit))):]
+
+
+class _BoundedPipeCapture:
+    def __init__(self, stream, limit: int = 16384) -> None:
+        self.stream = stream
+        self.limit = max(1024, min(65536, int(limit)))
+        self._text = ""
+        self._lock = threading.RLock()
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+
+    def _pump(self) -> None:
+        if self.stream is None:
+            return
+        try:
+            while True:
+                chunk = self.stream.read(2048)
+                if not chunk:
+                    break
+                with self._lock:
+                    self._text = (self._text + str(chunk))[-self.limit:]
+        except Exception:
+            return
+
+    def snapshot(self) -> str:
+        with self._lock:
+            return _redact_diagnostic_text(self._text, self.limit)
+
+
 class _WebSocket:
     def __init__(self, url: str, timeout: float = 5.0) -> None:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in {"ws", "wss"}:
             raise ValueError("CDP_WEBSOCKET_URL_REQUIRED")
         self.host = parsed.hostname or "127.0.0.1"
+        normalized_host = self.host.casefold()
+        if normalized_host not in {"localhost", "::1"} and not normalized_host.startswith("127."):
+            raise CdpError("CDP_NON_LOOPBACK_FORBIDDEN")
         self.port = parsed.port or (443 if parsed.scheme == "wss" else 80)
         self.path = parsed.path or "/"
         if parsed.query:
@@ -219,10 +272,13 @@ class BrowserSession:
     browser_path: str = ""
     profile_dir: Path | None = None
     headless: bool = False
+    launch_mode: str = "attach_existing"
+    persistent_profile: bool = False
+    launch_diagnostic: dict = field(default_factory=dict)
 
 
 class BrowserService:
-    """Attach-only control of an already-running human Edge/Chrome session via localhost CDP."""
+    """Local-only CDP control of already-installed Microsoft Edge or Google Chrome."""
 
     def __init__(self, processes: ProcessService) -> None:
         self.processes = processes
@@ -230,6 +286,12 @@ class BrowserService:
         self.evidence_root = self.root / "evidence"
         self.root.mkdir(parents=True, exist_ok=True)
         self.evidence_root.mkdir(parents=True, exist_ok=True)
+        self.profile_root = (
+            Path(os.environ.get("LOCALAPPDATA") or Path.home())
+            / "EasyChange"
+            / "BrowserProfiles"
+        )
+        self.profile_root.mkdir(parents=True, exist_ok=True)
         self._sessions: dict[str, BrowserSession] = {}
         self._lock = threading.RLock()
 
@@ -267,6 +329,85 @@ class BrowserService:
         return safe
 
     @staticmethod
+    def _browser_kind(browser_path: str) -> str:
+        name = Path(str(browser_path or "")).name.casefold()
+        if name in {"msedge", "msedge.exe"}:
+            return "edge"
+        if name in {"chrome", "chrome.exe"}:
+            return "chrome"
+        raise BrowserBootstrapError("ONLY_INSTALLED_EDGE_OR_CHROME_ALLOWED")
+
+    def _persistent_profile_dir(self, browser_kind: str) -> Path:
+        kind = str(browser_kind or "").casefold()
+        if kind not in {"edge", "chrome"}:
+            raise BrowserBootstrapError("ONLY_INSTALLED_EDGE_OR_CHROME_ALLOWED")
+        return self.profile_root / kind
+
+    @staticmethod
+    def _port_listening(port: int, timeout: float = 0.15) -> bool:
+        try:
+            with socket.create_connection(("127.0.0.1", int(port)), timeout=max(0.05, timeout)):
+                return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _find_free_loopback_port() -> int:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            sock.bind(("127.0.0.1", 0))
+            value = int(sock.getsockname()[1])
+            if not 1 <= value <= 65535:
+                raise BrowserBootstrapError("CDP_PORT_SELECTION_FAILED")
+            return value
+        finally:
+            sock.close()
+
+    @staticmethod
+    def _read_devtools_active_port(profile: Path) -> int | None:
+        marker = Path(profile) / "DevToolsActivePort"
+        try:
+            lines = marker.read_text(encoding="utf-8").splitlines()
+            value = int(lines[0]) if lines else 0
+            return value if 1 <= value <= 65535 else None
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def _persistent_profile_ports(self) -> list[int]:
+        values: list[int] = []
+        for kind in ("edge", "chrome"):
+            value = self._read_devtools_active_port(self._persistent_profile_dir(kind))
+            if value and value not in values:
+                values.append(value)
+        return values
+
+    @staticmethod
+    def _product_matches_kind(product: str, browser_kind: str | None = None) -> bool:
+        normalized = str(product or "").casefold()
+        if browser_kind == "edge":
+            return "edg/" in normalized or "edge/" in normalized
+        if browser_kind == "chrome":
+            return "chrome/" in normalized and "edg/" not in normalized and "edge/" not in normalized
+        return (
+            "edg/" in normalized
+            or "edge/" in normalized
+            or ("chrome/" in normalized and "chromium/" not in normalized)
+        )
+
+    @staticmethod
+    def _launch_args_for_diagnostic(argv: list[str]) -> list[str]:
+        safe: list[str] = []
+        for item in argv:
+            text = str(item)
+            if text.casefold().startswith("--user-data-dir="):
+                safe.append("--user-data-dir=[PERSISTENT_EASYCHANGE_PROFILE]")
+            else:
+                safe.append(_redact_diagnostic_text(text, 1024))
+        return safe
+
+    @staticmethod
     def _http_json(url: str, method: str = "GET", timeout: float = 3.0):
         request = urllib.request.Request(url, method=method)
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -296,14 +437,13 @@ class BrowserService:
             and value.get("webSocketDebuggerUrl")
         ]
 
-    @staticmethod
-    def _candidate_ports(explicit_port: int = 0) -> list[int]:
+    def _candidate_ports(self, explicit_port: int = 0) -> list[int]:
         if explicit_port:
             value = int(explicit_port)
             if not 1 <= value <= 65535:
                 raise ValueError("INVALID_CDP_PORT")
             return [value]
-        configured = []
+        configured: list[int] = []
         for raw in str(os.environ.get("EASYCHANGE_CDP_PORTS") or "").split(","):
             raw = raw.strip()
             if not raw:
@@ -314,8 +454,163 @@ class BrowserService:
                 continue
             if 1 <= value <= 65535 and value not in configured:
                 configured.append(value)
+        discovered = self._persistent_profile_ports()
         defaults = list(range(9222, 9233))
-        return configured + [value for value in defaults if value not in configured]
+        values: list[int] = []
+        for value in [*discovered, *configured, *defaults]:
+            if value not in values:
+                values.append(value)
+        return values
+
+    def _attach_port(
+        self,
+        key: str,
+        candidate_port: int,
+        *,
+        target_id: str = "",
+        url_contains: str = "",
+        timeout: float = 5.0,
+        expected_kind: str | None = None,
+        launch_mode: str = "attach_existing",
+        profile_dir: Path | None = None,
+        pid: int | None = None,
+        browser_path: str = "",
+        launch_diagnostic: dict | None = None,
+    ) -> dict:
+        diagnostic = {
+            "stage": "json_version",
+            "cdp_port_selected": int(candidate_port),
+            "cdp_port_listening": self._port_listening(candidate_port),
+            "json_version_available": False,
+            "browser_websocket_available": False,
+            "json_list_available": False,
+            "target_available": False,
+            "websocket_connected": False,
+            "browser_get_version_ok": False,
+            "runtime_evaluate_ok": False,
+        }
+        version = self._http_json(
+            f"http://127.0.0.1:{int(candidate_port)}/json/version",
+            timeout=max(0.2, min(3.0, float(timeout))),
+        )
+        diagnostic["json_version_available"] = True
+        product = str(version.get("Browser") if isinstance(version, dict) else "")
+        diagnostic["browser_product"] = product
+        if not self._product_matches_kind(product, expected_kind):
+            raise BrowserBootstrapError("CDP_ENDPOINT_IS_NOT_EDGE_OR_CHROME", diagnostic)
+        browser_ws = str(
+            version.get("webSocketDebuggerUrl") if isinstance(version, dict) else ""
+        )
+        if not browser_ws:
+            raise BrowserBootstrapError("CDP_BROWSER_WEBSOCKET_MISSING", diagnostic)
+        diagnostic["browser_websocket_available"] = True
+
+        diagnostic["stage"] = "json_list"
+        targets = self._targets(candidate_port)
+        diagnostic["json_list_available"] = True
+        if target_id:
+            target = next(
+                (item for item in targets if str(item.get("id") or "") == str(target_id)),
+                None,
+            )
+        elif url_contains:
+            target = next(
+                (item for item in targets if url_contains in str(item.get("url") or "")),
+                None,
+            )
+        else:
+            target = next(
+                (
+                    item
+                    for item in targets
+                    if str(item.get("url") or "").startswith(("http://", "https://"))
+                ),
+                None,
+            ) or (targets[0] if targets else None)
+        if target is None:
+            raise BrowserBootstrapError("CDP_PAGE_TARGET_NOT_FOUND", diagnostic)
+        diagnostic["target_available"] = True
+        diagnostic["target_id"] = str(target.get("id") or "")
+
+        diagnostic["stage"] = "websocket"
+        browser_cdp = _WebSocket(
+            browser_ws, timeout=max(0.5, min(5.0, float(timeout)))
+        )
+        cdp = None
+        try:
+            ws = str(target["webSocketDebuggerUrl"])
+            cdp = _WebSocket(ws, timeout=max(0.5, min(5.0, float(timeout))))
+            diagnostic["websocket_connected"] = True
+            for domain in ("Page.enable", "Runtime.enable", "DOM.enable"):
+                cdp.call(domain, timeout=max(0.5, min(3.0, float(timeout))))
+
+            diagnostic["stage"] = "browser_get_version"
+            verified_version = browser_cdp.call(
+                "Browser.getVersion",
+                timeout=max(0.5, min(3.0, float(timeout))),
+            )
+            verified_product = str(
+                verified_version.get("product") if isinstance(verified_version, dict) else ""
+            )
+            if not self._product_matches_kind(verified_product or product, expected_kind):
+                raise BrowserBootstrapError(
+                    "CDP_BROWSER_GET_VERSION_MISMATCH",
+                    {**diagnostic, "verified_product": verified_product},
+                )
+            diagnostic["browser_get_version_ok"] = True
+            diagnostic["verified_product"] = verified_product or product
+
+            diagnostic["stage"] = "runtime_evaluate"
+            runtime = cdp.call(
+                "Runtime.evaluate",
+                {"expression": "document.title", "returnByValue": True},
+                timeout=max(0.5, min(3.0, float(timeout))),
+            )
+            if not isinstance(runtime, dict) or not isinstance(runtime.get("result"), dict):
+                raise BrowserBootstrapError("CDP_RUNTIME_EVALUATE_FAILED", diagnostic)
+            diagnostic["runtime_evaluate_ok"] = True
+            diagnostic["stage"] = "ready"
+
+            session = BrowserSession(
+                session_id=key,
+                port=int(candidate_port),
+                target_id=str(target.get("id") or ""),
+                websocket_url=ws,
+                cdp=cdp,
+                browser_cdp=browser_cdp,
+                attached_at=time.time(),
+                browser_product=verified_product or product,
+                managed_process=False,
+                pid=pid,
+                browser_path=str(browser_path or ""),
+                profile_dir=profile_dir,
+                launch_mode=launch_mode,
+                persistent_profile=bool(profile_dir),
+                launch_diagnostic={
+                    **dict(launch_diagnostic or {}),
+                    **diagnostic,
+                },
+            )
+            self._sessions[key] = session
+            state = self.state(key)
+            if not state.get("cdp_alive"):
+                raise BrowserBootstrapError(
+                    "CDP_SECOND_OPERATION_FAILED",
+                    session.launch_diagnostic,
+                )
+            return state
+        except Exception:
+            try:
+                if cdp is not None:
+                    cdp.close()
+            except Exception:
+                pass
+            try:
+                browser_cdp.close()
+            except Exception:
+                pass
+            self._sessions.pop(key, None)
+            raise
 
     def attach(
         self,
@@ -338,7 +633,8 @@ class BrowserService:
                         elif url_contains and url_contains not in str(state.get("url") or ""):
                             candidate = next(
                                 (
-                                    item for item in (self.tabs(key).get("tabs") or [])
+                                    item
+                                    for item in (self.tabs(key).get("tabs") or [])
                                     if url_contains in str(item.get("url") or "")
                                 ),
                                 None,
@@ -354,207 +650,327 @@ class BrowserService:
                         pass
                     self._sessions.pop(key, None)
 
-            errors: list[str] = []
+            attempts: list[dict] = []
             deadline = time.monotonic() + max(0.5, min(15.0, float(timeout)))
             for candidate_port in self._candidate_ports(int(port or 0)):
-                remaining = max(0.2, deadline - time.monotonic())
+                remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 try:
-                    version = self._http_json(
-                        f"http://127.0.0.1:{candidate_port}/json/version",
-                        timeout=min(1.0, remaining),
-                    )
-                    product = str(version.get("Browser") if isinstance(version, dict) else "")
-                    normalized = product.casefold()
-                    if not any(token in normalized for token in ("chrome", "chromium", "edg")):
-                        raise BrowserError("CDP_ENDPOINT_IS_NOT_EDGE_OR_CHROME")
-                    browser_ws = str(
-                        version.get("webSocketDebuggerUrl")
-                        if isinstance(version, dict)
-                        else ""
-                    )
-                    if not browser_ws:
-                        raise BrowserError("BROWSER_LEVEL_CDP_NOT_AVAILABLE")
-                    targets = self._targets(candidate_port)
-                    if target_id:
-                        target = next(
-                            (item for item in targets if str(item.get("id") or "") == str(target_id)),
-                            None,
-                        )
-                    elif url_contains:
-                        target = next(
-                            (item for item in targets if url_contains in str(item.get("url") or "")),
-                            None,
-                        )
-                    else:
-                        target = next(
-                            (
-                                item
-                                for item in targets
-                                if str(item.get("url") or "").startswith(("http://", "https://"))
-                            ),
-                            None,
-                        ) or (targets[0] if targets else None)
-                    if target is None:
-                        raise BrowserError("BROWSER_EXISTING_PAGE_TARGET_NOT_AVAILABLE")
-                    browser_cdp = _WebSocket(browser_ws, timeout=max(1.0, min(5.0, remaining)))
-                    ws = str(target["webSocketDebuggerUrl"])
-                    cdp = _WebSocket(ws, timeout=max(1.0, min(5.0, remaining)))
-                    try:
-                        for domain in ("Page.enable", "Runtime.enable", "DOM.enable"):
-                            cdp.call(domain, timeout=min(3.0, max(0.5, remaining)))
-                    except Exception:
-                        cdp.close()
-                        browser_cdp.close()
-                        raise
-                    self._sessions[key] = BrowserSession(
-                        session_id=key,
-                        port=int(candidate_port),
-                        target_id=str(target.get("id") or ""),
-                        websocket_url=ws,
-                        cdp=cdp,
-                        browser_cdp=browser_cdp,
-                        attached_at=time.time(),
-                        browser_product=product,
+                    state = self._attach_port(
+                        key,
+                        candidate_port,
+                        target_id=target_id,
+                        url_contains=url_contains,
+                        timeout=min(3.0, max(0.3, remaining)),
                     )
                     return {
-                        **self.state(key),
+                        **state,
                         "reused": False,
                         "attach_only": True,
                         "existing_human_session": True,
                         "browser_launched": False,
                         "profile_created": False,
+                        "persistent_profile": bool(state.get("persistent_profile")),
                         "install_required": False,
                     }
                 except Exception as exc:
-                    errors.append(f"{candidate_port}:{type(exc).__name__}:{str(exc)[:160]}")
-            raise BrowserError(
-                "CDP_EXISTING_SESSION_NOT_AVAILABLE:" + "|".join(errors[-6:])
+                    diagnostic = dict(getattr(exc, "diagnostic", {}) or {})
+                    attempts.append(
+                        {
+                            "port": int(candidate_port),
+                            "code": str(getattr(exc, "code", "") or type(exc).__name__),
+                            "error": str(exc)[:240],
+                            "diagnostic": diagnostic,
+                        }
+                    )
+            raise BrowserBootstrapError(
+                "CDP_EXISTING_SESSION_NOT_AVAILABLE",
+                {
+                    "stage": "attach_existing",
+                    "localhost_only": True,
+                    "ports_checked": [item["port"] for item in attempts],
+                    "attempts": attempts[-12:],
+                },
             )
 
-    def start(
-            self,
-            session_id: str = "default",
-            *,
-            url: str = "about:blank",
-            headless: bool = False,
-            visible: bool = True,
-            width: int = 1440,
-            height: int = 1000,
-            timeout: float = 10.0,
-            browser_path: str = "",
-        ) -> dict:
-            del width, height
-            if headless:
-                raise BrowserError("BROWSER_HEADLESS_FORBIDDEN")
-
-            # First reuse any Edge/Chrome session already exposing CDP.
+    def _launch_browser_attempt(
+        self,
+        *,
+        session_id: str,
+        browser: str,
+        browser_kind: str,
+        profile_mode: str,
+        timeout: float,
+    ) -> dict:
+        key = self._safe_id(session_id)
+        persistent = profile_mode == "persistent"
+        profile = self._persistent_profile_dir(browser_kind) if persistent else None
+        profile_created = False
+        selected_port = 0
+        if persistent:
+            profile_created = not profile.exists()
+            profile.mkdir(parents=True, exist_ok=True)
+            marker = profile / "DevToolsActivePort"
             try:
-                attached = self.attach(session_id, timeout=min(5.0, timeout))
-                if url and url != "about:blank":
-                    self.navigate(session_id, url, timeout)
-                    attached = self.state(session_id)
-                if visible:
-                    try:
-                        self.show(session_id)
-                    except Exception:
-                        pass
-                return {
-                    **attached,
-                    "attach_first": True,
-                    "browser_launched": False,
-                    "profile_created": False,
-                    "install_required": False,
-                }
-            except Exception as attach_exc:
-                attach_error = f"{type(attach_exc).__name__}:{str(attach_exc)[:500]}"
+                marker.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+        else:
+            selected_port = self._find_free_loopback_port()
 
-            installed = self.candidates()
-            requested = str(browser_path or "").strip()
-            if requested:
-                requested_path = Path(requested)
-                allowed = {str(Path(value).resolve()).casefold() for value in installed}
-                if (
-                    not requested_path.is_file()
-                    or str(requested_path.resolve()).casefold() not in allowed
-                ):
-                    raise BrowserError("ONLY_INSTALLED_EDGE_OR_CHROME_ALLOWED")
-                browser = str(requested_path)
-            else:
-                browser = next(iter(installed), "")
-            if not browser:
-                raise FileNotFoundError("NO_INSTALLED_EDGE_OR_CHROME_FOUND")
+        argv = [
+            browser,
+            "--remote-debugging-address=127.0.0.1",
+            f"--remote-debugging-port={0 if persistent else selected_port}",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
+        if persistent:
+            argv.append(f"--user-data-dir={profile}")
 
-            # Use the normal/default profile: never pass --user-data-dir and never
-            # create a disposable EasyChange profile. CDP is loopback-only.
-            port = self._candidate_ports(0)[0]
-            argv = [
-                browser,
-                "--remote-debugging-address=127.0.0.1",
-                f"--remote-debugging-port={port}",
-            ]
-            if url and url != "about:blank":
-                argv.append(str(url))
-            else:
-                argv.append("about:blank")
-            try:
-                process = subprocess.Popen(
-                    argv,
-                    shell=False,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                launched_pid = int(process.pid)
-            except OSError as exc:
-                raise BrowserError(f"INSTALLED_BROWSER_LAUNCH_FAILED:{type(exc).__name__}") from exc
+        diagnostic = {
+            "stage": "launch",
+            "browser": "Edge" if browser_kind == "edge" else "Chrome",
+            "browser_path": str(browser),
+            "profile_mode": profile_mode,
+            "persistent_profile": persistent,
+            "profile_created": profile_created,
+            "default_profile_preserved": True,
+            "browser_process_started": False,
+            "browser_process_exited": False,
+            "browser_process_exit_code": None,
+            "browser_process_pid": None,
+            "cdp_port_selected": int(selected_port),
+            "cdp_port_listening": False,
+            "json_version_available": False,
+            "json_list_available": False,
+            "target_available": False,
+            "launch_args": self._launch_args_for_diagnostic(argv),
+            "localhost_only": True,
+        }
+        try:
+            process = subprocess.Popen(
+                argv,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+        except OSError as exc:
+            diagnostic["launch_error"] = f"{type(exc).__name__}:{str(exc)[:240]}"
+            raise BrowserBootstrapError(
+                "CDP_BROWSER_PROCESS_NOT_STARTED",
+                diagnostic,
+            ) from exc
 
-            deadline = time.monotonic() + max(1.0, min(15.0, float(timeout)))
-            last_error = ""
-            while time.monotonic() < deadline:
+        stdout_capture = _BoundedPipeCapture(process.stdout)
+        stderr_capture = _BoundedPipeCapture(process.stderr)
+        diagnostic["browser_process_started"] = True
+        diagnostic["browser_process_pid"] = int(process.pid)
+        deadline = time.monotonic() + max(1.0, min(20.0, float(timeout)))
+        last_error = ""
+        actual_port = int(selected_port)
+        while time.monotonic() < deadline:
+            return_code = process.poll()
+            if return_code is not None:
+                diagnostic["browser_process_exited"] = True
+                diagnostic["browser_process_exit_code"] = int(return_code)
+            if persistent:
+                marker_port = self._read_devtools_active_port(profile)
+                if marker_port:
+                    actual_port = int(marker_port)
+                    diagnostic["cdp_port_selected"] = actual_port
+
+            if actual_port > 0:
+                diagnostic["cdp_port_listening"] = self._port_listening(actual_port)
                 try:
-                    attached = self.attach(
-                        session_id,
-                        port=port,
-                        timeout=min(2.0, max(0.5, deadline - time.monotonic())),
+                    state = self._attach_port(
+                        key,
+                        actual_port,
+                        timeout=min(3.0, max(0.5, deadline - time.monotonic())),
+                        expected_kind=browser_kind,
+                        launch_mode=(
+                            "installed_browser_persistent_easychange_profile"
+                            if persistent
+                            else "installed_browser_default_profile"
+                        ),
+                        profile_dir=profile,
+                        pid=int(process.pid),
+                        browser_path=browser,
+                        launch_diagnostic=diagnostic,
                     )
-                    session = self._session(session_id)
-                    session.managed_process = False
-                    session.pid = launched_pid
-                    session.browser_path = browser
+                    diagnostic = dict(self._session(key).launch_diagnostic)
+                    diagnostic["stdout_tail"] = stdout_capture.snapshot()
+                    diagnostic["stderr_tail"] = stderr_capture.snapshot()
+                    self._session(key).launch_diagnostic = diagnostic
                     return {
-                        **self.state(session_id),
-                        "attach_first": True,
+                        **state,
                         "browser_launched": True,
-                        "browser_launch_pid": launched_pid,
+                        "browser_launch_pid": int(process.pid),
                         "browser_path": browser,
-                        "profile_created": False,
+                        "profile_created": profile_created,
+                        "persistent_profile": persistent,
                         "default_profile_preserved": True,
+                        "human_profile_reused": not persistent,
                         "install_required": False,
+                        "bootstrap_diagnostic": diagnostic,
                     }
                 except Exception as exc:
-                    last_error = f"{type(exc).__name__}:{str(exc)[:500]}"
-                    time.sleep(0.1)
+                    last_error = str(exc)
+                    if isinstance(exc, BrowserBootstrapError):
+                        diagnostic.update(exc.diagnostic)
 
-            # Modern browser policy may refuse remote debugging on the default
-            # profile. The browser is still open and usable through the existing
-            # F12/DevTools + HID fallback; do not create another profile to force CDP.
+            if (
+                diagnostic["browser_process_exited"]
+                and not diagnostic.get("json_version_available")
+                and time.monotonic() + 0.25 < deadline
+            ):
+                diagnostic["stdout_tail"] = stdout_capture.snapshot()
+                diagnostic["stderr_tail"] = stderr_capture.snapshot()
+                diagnostic["last_error"] = last_error
+                code = (
+                    "CDP_EXISTING_BROWSER_REUSED_WITHOUT_DEBUGGING"
+                    if int(diagnostic.get("browser_process_exit_code") or 0) == 0
+                    else "CDP_BROWSER_PROCESS_EXITED"
+                )
+                raise BrowserBootstrapError(code, diagnostic)
+            time.sleep(0.08)
+
+        diagnostic["stdout_tail"] = stdout_capture.snapshot()
+        diagnostic["stderr_tail"] = stderr_capture.snapshot()
+        diagnostic["last_error"] = last_error
+        diagnostic["browser_process_exit_code"] = process.poll()
+        diagnostic["browser_process_exited"] = process.poll() is not None
+        diagnostic["stage"] = "timeout"
+        raise BrowserBootstrapError("CDP_BOOTSTRAP_TIMEOUT", diagnostic)
+
+    def start(
+        self,
+        session_id: str = "default",
+        *,
+        url: str = "about:blank",
+        headless: bool = False,
+        visible: bool = True,
+        width: int = 1440,
+        height: int = 1000,
+        timeout: float = 10.0,
+        browser_path: str = "",
+    ) -> dict:
+        del width, height
+        if headless:
+            raise BrowserBootstrapError("BROWSER_HEADLESS_FORBIDDEN")
+
+        try:
+            attached = self.attach(session_id, timeout=min(5.0, timeout))
+            if url and url != "about:blank":
+                self.navigate(session_id, url, timeout)
+                attached = self.state(session_id)
+            if not visible:
+                self.hide(session_id)
             return {
-                "session_id": self._safe_id(session_id),
-                "alive": True,
-                "cdp_alive": False,
-                "browser_launched": True,
-                "browser_launch_pid": launched_pid,
-                "browser_path": browser,
+                **attached,
+                "attach_first": True,
+                "browser_launched": False,
                 "profile_created": False,
-                "default_profile_preserved": True,
+                "persistent_profile": bool(attached.get("persistent_profile")),
                 "install_required": False,
-                "launch_mode": "installed_browser_default_profile",
-                "fallback_required": "DEVTOOLS_HID",
-                "attach_error": attach_error,
-                "cdp_error": last_error,
             }
+        except Exception as attach_exc:
+            attach_diagnostic = dict(getattr(attach_exc, "diagnostic", {}) or {})
+
+        installed = self.candidates()
+        requested = str(browser_path or "").strip()
+        if requested:
+            requested_path = Path(requested)
+            allowed = {str(Path(value).resolve()).casefold() for value in installed}
+            if (
+                not requested_path.is_file()
+                or str(requested_path.resolve()).casefold() not in allowed
+            ):
+                raise BrowserBootstrapError("ONLY_INSTALLED_EDGE_OR_CHROME_ALLOWED")
+            browser = str(requested_path)
+        else:
+            browser = next(iter(installed), "")
+        if not browser:
+            raise BrowserBootstrapError("NO_INSTALLED_EDGE_OR_CHROME_FOUND")
+
+        browser_kind = self._browser_kind(browser)
+        attempts: list[dict] = []
+
+        # Edge can still bootstrap the normal profile when there is no competing
+        # single-instance process. Chrome 136+ deliberately refuses remote
+        # debugging for the default user-data directory, so Chrome goes directly
+        # to the durable EasyChange profile.
+        modes = ["default", "persistent"] if browser_kind == "edge" else ["persistent"]
+        for mode in modes:
+            try:
+                opened = self._launch_browser_attempt(
+                    session_id=session_id,
+                    browser=browser,
+                    browser_kind=browser_kind,
+                    profile_mode=mode,
+                    timeout=timeout,
+                )
+                if url and url != "about:blank":
+                    self.navigate(session_id, url, timeout)
+                if not visible:
+                    self.hide(session_id)
+                state = self.state(session_id)
+                session = self._session(session_id)
+                if not state.get("cdp_alive"):
+                    raise BrowserBootstrapError(
+                        "CDP_SECOND_OPERATION_FAILED",
+                        session.launch_diagnostic,
+                    )
+                return {
+                    **state,
+                    "attach_first": True,
+                    "browser_launched": True,
+                    "browser_launch_pid": session.pid,
+                    "browser_path": browser,
+                    "profile_created": bool(opened.get("profile_created")),
+                    "persistent_profile": session.persistent_profile,
+                    "default_profile_preserved": True,
+                    "human_profile_reused": not session.persistent_profile,
+                    "install_required": False,
+                    "bootstrap_diagnostic": dict(session.launch_diagnostic),
+                }
+            except BrowserBootstrapError as exc:
+                attempts.append(
+                    {
+                        "mode": mode,
+                        "code": exc.code,
+                        "diagnostic": dict(exc.diagnostic),
+                    }
+                )
+                try:
+                    stale = self._sessions.pop(self._safe_id(session_id), None)
+                    if stale:
+                        stale.cdp.close()
+                        stale.browser_cdp.close()
+                except Exception:
+                    pass
+
+        raise BrowserBootstrapError(
+            attempts[-1]["code"] if attempts else "CDP_BOOTSTRAP_TIMEOUT",
+            {
+                "stage": "bootstrap_failed",
+                "browser": "Edge" if browser_kind == "edge" else "Chrome",
+                "browser_path": browser,
+                "attach_first_diagnostic": attach_diagnostic,
+                "attempts": attempts,
+                "no_browser_install": True,
+                "no_chromium": True,
+                "localhost_only": True,
+            },
+        )
 
     def _session(self, session_id: str) -> BrowserSession:
         key = self._safe_id(session_id)
@@ -611,47 +1027,54 @@ class BrowserService:
         return str(self._evaluate(session_id, "document.title") or "")
 
     def state(self, session_id: str = "default") -> dict:
-            session = self._session(session_id)
-            cdp_alive = False
-            current_url = None
-            current_title = None
-            cdp_error = None
-            product = session.browser_product
-            try:
-                current_url = self.url(session_id)
-                current_title = self.title(session_id)
-                version = session.browser_cdp.call("Browser.getVersion", timeout=3.0)
-                if isinstance(version, dict):
-                    product = str(version.get("product") or product)
-                cdp_alive = True
-            except Exception as exc:
-                cdp_error = f"{type(exc).__name__}:{str(exc)[:300]}"
-            value = {
-                "session_id": session.session_id,
-                "port": session.port,
-                "target_id": session.target_id,
-                "pid": None,
-                "pid_alive": None,
-                "cdp_alive": cdp_alive,
-                "alive": cdp_alive,
-                "browser": product,
-                "headless": False,
-                "attached_at": session.attached_at,
-                "launch_mode": "attach_existing",
-                "attach_only": True,
-                "managed_process": False,
-                "existing_human_session": True,
-                "cdp_transport": "127.0.0.1",
-                "install_required": False,
-                "browser_launched": False,
-                "profile_created": False,
-            }
-            if cdp_alive:
-                value["url"] = current_url
-                value["title"] = current_title
-            if cdp_error:
-                value["cdp_error"] = cdp_error
-            return value
+        session = self._session(session_id)
+        cdp_alive = False
+        current_url = None
+        current_title = None
+        cdp_error = None
+        product = session.browser_product
+        try:
+            current_url = self.url(session_id)
+            current_title = self.title(session_id)
+            version = session.browser_cdp.call("Browser.getVersion", timeout=3.0)
+            if isinstance(version, dict):
+                product = str(version.get("product") or product)
+            cdp_alive = True
+        except Exception as exc:
+            cdp_error = f"{type(exc).__name__}:{str(exc)[:300]}"
+        value = {
+            "session_id": session.session_id,
+            "port": session.port,
+            "target_id": session.target_id,
+            "pid": session.pid,
+            "pid_alive": (
+                self.processes._pid_alive(session.pid)
+                if session.pid
+                else None
+            ),
+            "cdp_alive": cdp_alive,
+            "alive": cdp_alive,
+            "browser": product,
+            "headless": False,
+            "attached_at": session.attached_at,
+            "launch_mode": session.launch_mode,
+            "attach_only": session.launch_mode == "attach_existing",
+            "managed_process": False,
+            "existing_human_session": session.launch_mode == "attach_existing",
+            "cdp_transport": "127.0.0.1",
+            "install_required": False,
+            "browser_launched": session.launch_mode != "attach_existing",
+            "profile_created": False,
+            "persistent_profile": session.persistent_profile,
+            "profile_mode": "persistent" if session.persistent_profile else "human_or_default",
+            "bootstrap_diagnostic": dict(session.launch_diagnostic),
+        }
+        if cdp_alive:
+            value["url"] = current_url
+            value["title"] = current_title
+        if cdp_error:
+            value["cdp_error"] = cdp_error
+        return value
 
     def _window_info(self, session_id: str) -> dict:
         session = self._session(session_id)
