@@ -1047,6 +1047,99 @@ class CommandService:
                 return Result(True, query_kind, data=data, command_id=self.ids.next("C"),
                               duration_ms=int((time.monotonic() - started) * 1000))
 
+        # Structured argv execution always uses the durable job executor. Fast
+        # commands can finish inside wait_ms; long commands return a small job
+        # receipt and continue without holding the optical session.
+        if len(operations) == 1 and isinstance(operations[0], dict):
+            process_item = operations[0]
+            process_kind = str(process_item.get("type") or "").casefold()
+            if process_kind == "process_exec":
+                try:
+                    argv = process_item.get("argv")
+                    if not isinstance(argv, list) or not 1 <= len(argv) <= 64 or not all(
+                        isinstance(value, str) and value and len(value) <= 4096
+                        for value in argv
+                    ):
+                        return Result(
+                            False, process_kind,
+                            error="ARGV_REQUIRES_1_TO_64_STRINGS",
+                            code="INVALID_STRUCTURED_PAYLOAD",
+                        )
+                    job_id = str(process_item.get("job_id") or "") or self.ids.next("J")
+                    wait_ms = max(0, min(10000, int(process_item.get("wait_ms") or 1200)))
+                    started_job = self.processes.job_start(argv, job_id)
+                    deadline = time.monotonic() + (wait_ms / 1000.0)
+                    status = self.processes.job_status(job_id)
+                    while (
+                        not bool(status.get("terminal"))
+                        and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.02)
+                        status = self.processes.job_status(job_id)
+
+                    terminal = bool(status.get("terminal"))
+                    result_data = (
+                        self.processes.job_result(job_id)
+                        if terminal
+                        else status
+                    )
+                    state = str(result_data.get("state") or "RUNNING").upper()
+                    return_code = result_data.get("returncode")
+                    success = (
+                        return_code == 0 and state == "SUCCEEDED"
+                        if terminal
+                        else None
+                    )
+                    stdout_bytes = int(result_data.get("stdout_bytes") or result_data.get("stdout_chars") or 0)
+                    stderr_bytes = int(result_data.get("stderr_bytes") or result_data.get("stderr_chars") or 0)
+                    data = {
+                        "job_id": job_id,
+                        "pid": result_data.get("pid") or started_job.get("pid"),
+                        "argv": list(argv),
+                        "exec_argv": result_data.get("exec_argv") or started_job.get("exec_argv"),
+                        "transport": {
+                            "execution_channel": "healthy",
+                            "delivery_channel": "not_started",
+                        },
+                        "execution": {
+                            "state": "FINISHED" if terminal else "RUNNING",
+                            "process_state": state,
+                            "success": success,
+                            "return_code": return_code,
+                            "started_at": result_data.get("started_at") or started_job.get("started_at"),
+                            "finished_at": result_data.get("finished_at"),
+                            "duration_ms": result_data.get("duration_ms"),
+                        },
+                        "result": {
+                            "available": terminal,
+                            "bytes": stdout_bytes + stderr_bytes,
+                            "stdout_bytes": stdout_bytes,
+                            "stderr_bytes": stderr_bytes,
+                            "truncated": bool(result_data.get("output_truncated")),
+                            "cursor": 0 if (stdout_bytes or stderr_bytes) else None,
+                            "paged_logs": True,
+                        },
+                        "mutation": {"state": "NOT_APPLICABLE"},
+                        "stdout": result_data.get("stdout", "") if terminal else "",
+                        "stderr": result_data.get("stderr", "") if terminal else "",
+                    }
+                    return Result(
+                        True,
+                        process_kind,
+                        data=data,
+                        command_id=self.ids.next("C"),
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                    )
+                except Exception as exc:
+                    return Result(
+                        False,
+                        process_kind,
+                        error=str(exc),
+                        code=str(getattr(exc, "code", "") or type(exc).__name__),
+                        command_id=self.ids.next("C"),
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                    )
+
         # Long-running build/test/process work is detached from the visual
         # result frame. A small job receipt returns immediately while terminal
         # output remains durable under .easychange/jobs.

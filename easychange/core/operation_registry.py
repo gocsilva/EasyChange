@@ -33,7 +33,7 @@ _OPERATION_FAMILIES = {
     "command_schema": "metadata",
     "secret_broker_public": "secret", "secret_broker_status": "secret", "secret_broker_import": "secret",
     "runtime_profiles": "runtime", "runtime_configure": "runtime", "runtime_environment": "runtime",
-    "run_project": "runtime", "git_diff": "git",
+    "run_project": "runtime", "process_exec": "runtime", "git_diff": "git",
     "test_job_start": "job", "test_job_result": "job", "test_job_logs": "job",
     "build_job_start": "job", "build_job_result": "job", "build_job_logs": "job",
     "test_smart": "runtime", "test_evidence": "runtime", "swagger_evidence": "runtime",
