@@ -1,0 +1,60 @@
+name: cdp-bootstrap-validation
+
+on:
+  push:
+    branches:
+      - fix/easychange-cdp-bootstrap
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m py_compile easychange/core/browser_service.py easychange/core/command_service.py
+
+  contract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - test_no_installed_edge_or_chrome_found
+          - test_edge_is_selected_before_chrome
+          - test_chrome_is_used_when_edge_absent
+          - test_free_port_selection_avoids_occupied_port
+          - test_process_starts_but_endpoint_never_appears_fails
+          - test_single_instance_handoff_is_detected
+          - test_json_version_unavailable_is_specific
+          - test_json_version_without_websocket_fails
+          - test_json_list_without_target_fails
+          - test_websocket_browser_version_runtime_and_second_operation_are_proven
+          - test_attach_existing_session_is_attach_only
+          - test_detach_only_closes_cdp_sockets
+          - test_no_chromium_candidate_or_product_is_accepted
+          - test_persistent_profile_is_not_temporary_and_is_outside_workspace
+          - test_launch_args_are_loopback_only_and_never_headless
+          - test_websocket_rejects_non_loopback_before_connect
+          - test_chrome_bootstrap_uses_persistent_user_data_dir
+          - test_edge_bootstrap_falls_back_from_default_to_persistent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -U pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -q "tests/test_browser_bootstrap.py::${{ matrix.test }}"
+
+  existing-browser-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -U pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -q tests/test_browser_service_cdp.py
