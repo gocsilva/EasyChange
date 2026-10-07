@@ -175,3 +175,63 @@ def test_machine_mode_restore_callback_respects_minimized_window(tmp_path, monke
 
     assert calls == []
     window.close(); app.processEvents()
+
+
+
+def test_burst_header_only_consumes_slot_on_first_page(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    window.show(); app.processEvents()
+    window._optical_payloads = [f"payload-{index}" for index in range(31)]
+    window._optical_header_payload = '{"p":"EC2H","s":"QPLAN","n":31}'
+    window._optical_burst = True
+
+    window._optical_page = 0
+    slots, page_count, start, data_slots, include_header = window._optical_page_plan()
+    assert slots == 16
+    assert page_count == 2
+    assert start == 0
+    assert data_slots == 15
+    assert include_header is True
+
+    window._optical_page = 1
+    slots, page_count, start, data_slots, include_header = window._optical_page_plan()
+    assert slots == 16
+    assert page_count == 2
+    assert start == 15
+    assert data_slots == 16
+    assert include_header is False
+    window.close(); app.processEvents()
+
+
+def test_burst_rotation_dwell_exceeds_two_capture_periods(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    window.show(); app.processEvents()
+
+    window._set_optical_burst(True)
+
+    assert window._optical_timer.interval() == window._OPTICAL_BURST_INTERVAL_MS
+    assert window._optical_timer.interval() >= 500
+    window.close(); app.processEvents()
+
+
+def test_large_burst_page_plan_covers_each_payload_exactly_once_per_cycle(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    window.show(); app.processEvents()
+    window._optical_payloads = [f"payload-{index}" for index in range(80)]
+    window._optical_header_payload = '{"p":"EC2H","s":"QPLAN2","n":80}'
+    window._optical_burst = True
+
+    seen = []
+    window._optical_page = 0
+    _, page_count, _, _, _ = window._optical_page_plan()
+    for page in range(page_count):
+        window._optical_page = page
+        _slots, _count, start, data_slots, include_header = window._optical_page_plan()
+        assert include_header is (page == 0)
+        seen.extend(range(start, min(start + data_slots, len(window._optical_payloads))))
+
+    assert seen == list(range(len(window._optical_payloads)))
+    window.close(); app.processEvents()
