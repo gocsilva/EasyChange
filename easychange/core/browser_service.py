@@ -2350,7 +2350,7 @@ return {html:'<!doctype html>'+String.fromCharCode(10)+root.outerHTML,url:locati
                     "height": max(1, min(30000, int(float(size.get("height") or 1000)))),
                     "scale": 1,
                 }
-            result = session.cdp.call("Page.captureScreenshot", params, timeout=15.0)
+            result = session.cdp.call("Page.captureScreenshot", params, timeout=30.0)
             raw = base64.b64decode(str(result.get("data") or ""))
             attempts.append({"quality": current_quality, "bytes": len(raw)})
             if raw.startswith(b"\xff\xd8") and len(raw) <= max_bytes:
@@ -2360,7 +2360,16 @@ return {html:'<!doctype html>'+String.fromCharCode(10)+root.outerHTML,url:locati
             raise BrowserError("BROWSER_VISUAL_INVALID_JPEG")
         if len(raw) > max_bytes:
             raise BrowserError(f"BROWSER_VISUAL_TOO_LARGE:{len(raw)}>{max_bytes}")
-        return {
+        position = None
+        position_error = None
+        try:
+            position = self.position(session_id)
+        except Exception as exc:
+            # Position is metadata only. A valid CDP screenshot must remain
+            # usable even if Browser.getWindow* is temporarily slow/unavailable.
+            position_error = f"{type(exc).__name__}:{str(exc)[:240]}"
+
+        value = {
             "schema": "easychange.browser-visual/1",
             "session_id": self._safe_id(session_id),
             "mime": "image/jpeg",
@@ -2371,9 +2380,12 @@ return {html:'<!doctype html>'+String.fromCharCode(10)+root.outerHTML,url:locati
             "quality": current_quality,
             "full_page": bool(full_page),
             "attempts": attempts,
-            "position": self.position(session_id),
+            "position": position,
             "qr_transport": "EC2_RESULT_STORE_CHUNKS",
         }
+        if position_error:
+            value["position_error"] = position_error
+        return value
 
     def swagger_operations(self, session_id: str = "default", *, limit: int = 500) -> dict:
         limit = max(1, min(2000, int(limit or 500)))

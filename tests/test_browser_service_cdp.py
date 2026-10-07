@@ -749,3 +749,24 @@ def test_restore_easychange_foreground_requires_stable_confirmation_after_focus_
     assert result["focus_restore_stable_checks"] == 3
     assert result["focus_restore_required_stable_checks"] == 3
     assert user32.set_foreground_calls == [100, 100]
+
+
+@pytest.mark.skipif(not BrowserService.candidates(), reason="Edge/Chrome not installed")
+def test_visual_keeps_screenshot_when_position_metadata_times_out(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    browser = BrowserService(ProcessService(workspace))
+    _attach_fake(browser, monkeypatch)
+
+    def position_timeout(session_id="default"):
+        raise TimeoutError("window metadata timed out")
+
+    monkeypatch.setattr(browser, "position", position_timeout)
+    visual = browser.visual("T1", quality=20, full_page=False, max_bytes=4096)
+
+    assert visual["mime"] == "image/jpeg"
+    assert visual["bytes"] > 0
+    assert visual["position"] is None
+    assert visual["position_error"].startswith("TimeoutError:")
+    assert base64.b64decode(visual["data_b64"]).startswith(b"\xff\xd8")

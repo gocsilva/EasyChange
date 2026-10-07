@@ -1,7 +1,9 @@
 from __future__ import annotations
-from easychange.remote.optical_protocol import encode_result_chunks, encode_result_header
 
+import json
 from pathlib import Path
+
+from easychange.remote.optical_protocol import encode_result_chunks, encode_result_header
 
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPixmap, QShortcut
@@ -14,6 +16,48 @@ from easychange.core.command_service import CommandService
 from easychange.core.maintenance_service import MaintenanceService
 from easychange.core.workspace import Workspace
 from easychange.ui.editor import BasicHighlighter, CodeEditor
+
+
+def _direct_recovery_optical_payloads(result) -> list[str] | None:
+    """Return original EC2 packets for durable optical recovery queries.
+
+    optical_chunk(s) already carry identity/CRC-bearing EC2 packets from the
+    original result. Re-encoding the recovery Result would create a nested EC2
+    envelope that can be larger than the payload being recovered.
+    """
+    if not bool(getattr(result, "ok", False)):
+        return None
+    command = str(getattr(result, "command", "") or "").casefold()
+    data = getattr(result, "data", None)
+    if not isinstance(data, dict):
+        return None
+
+    if command == "optical_chunk":
+        candidates = [data.get("packet")]
+    elif command == "optical_chunks":
+        candidates = data.get("packets")
+        if not isinstance(candidates, list):
+            return None
+    else:
+        return None
+
+    payloads: list[str] = []
+    for packet in candidates:
+        if not isinstance(packet, dict) or packet.get("p") != "EC2":
+            return None
+        if not str(packet.get("s") or ""):
+            return None
+        try:
+            index = int(packet.get("i"))
+            total = int(packet.get("n"))
+        except (TypeError, ValueError):
+            return None
+        if index < 0 or total <= 0 or index >= total:
+            return None
+        payloads.append(
+            json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
+        )
+    return payloads or None
 
 
 class MainWindow(QMainWindow):
@@ -542,9 +586,18 @@ class MainWindow(QMainWindow):
             self._set_optical_burst(False)
             return
         try:
-            self._optical_payloads = encode_result_chunks(result)
-            self._set_optical_burst(len(self._optical_payloads) > self._OPTICAL_BURST_THRESHOLD)
-            if self._optical_burst:
+            direct_payloads = _direct_recovery_optical_payloads(result)
+            if direct_payloads is not None:
+                self._optical_payloads = direct_payloads
+                # Original EC2 packets are already self-identifying. Never add
+                # an EC2H wrapper for recovery queries or they become recursive.
+                self._optical_header_payload = None
+            else:
+                self._optical_payloads = encode_result_chunks(result)
+            self._set_optical_burst(
+                len(self._optical_payloads) > self._OPTICAL_BURST_THRESHOLD
+            )
+            if self._optical_burst and direct_payloads is None:
                 self._optical_header_payload = encode_result_header(
                     result, chunk_count=len(self._optical_payloads)
                 )

@@ -1,3 +1,4 @@
+import json
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -102,3 +103,40 @@ def test_five_chunk_result_enters_single_page_burst_with_redundancy(tmp_path, mo
     assert len(window._optical_payloads) == 5
     assert sum(1 for label in window.machine_qrs if label.pixmap() and not label.pixmap().isNull()) == 16
     window.close()
+
+
+def test_optical_recovery_renders_original_packets_without_nested_envelope(tmp_path):
+    from easychange.core.result import Result
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    packet0 = {
+        "p": "EC2", "v": 2, "s": "QORIGINAL1", "i": 0, "n": 2,
+        "h": "abcd1234", "c": "11223344", "x": "55667788", "d": "AAA",
+    }
+    packet1 = {
+        "p": "EC2", "v": 2, "s": "QORIGINAL1", "i": 1, "n": 2,
+        "h": "abcd1234", "c": "11223344", "x": "99aabbcc", "d": "BBB",
+    }
+    recovery = Result(
+        True,
+        "optical_chunks",
+        {
+            "target_sequence": "QORIGINAL1",
+            "requested": [0, 1],
+            "packets": [packet0, packet1],
+        },
+        sequence="QRECOVERY1",
+    )
+
+    window._update_machine_qr(recovery)
+    app.processEvents()
+
+    assert len(window._optical_payloads) == 2
+    decoded = [json.loads(payload) for payload in window._optical_payloads]
+    assert decoded == [packet0, packet1]
+    assert all(item["s"] == "QORIGINAL1" for item in decoded)
+    assert all(item["s"] != "QRECOVERY1" for item in decoded)
+    assert window._optical_header_payload is None
+    window.close()
+    app.processEvents()
