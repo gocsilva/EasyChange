@@ -1735,3 +1735,74 @@ def test_runtime_service_uses_nested_solution_for_workspace_test(tmp_path):
     assert profile["workspace_test_argv"] == [
         "dotnet", "test", "src/Cambio.sln", "--no-restore"
     ]
+
+
+
+def test_discovery_demand_poll_observes_external_git_change_without_watch_start(tmp_path):
+    import subprocess
+
+    source = tmp_path / "tracked.py"
+    source.write_text("value = 'before'\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tracked.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git", "-c", "user.name=EasyChange Test",
+            "-c", "user.email=test@example.invalid",
+            "commit", "-qm", "initial",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        service.indexer.refresh(force=True)
+        assert service.watcher is None
+
+        source.write_text("value = 'external-demand-refresh'\n", encoding="utf-8")
+        result = service.execute(":search external-demand-refresh")
+
+        assert result.ok is True
+        assert result.data["matches"]
+        assert service.watcher is not None
+        assert service.watcher._thread is None
+        assert service.watcher._last_poll_result["indexed"] >= 1
+    finally:
+        service.close()
+
+
+def test_watcher_poll_if_due_avoids_duplicate_git_status_processes(tmp_path, monkeypatch):
+    import subprocess
+    from easychange.core.indexer import Indexer
+    from easychange.core.watcher import WorkspaceWatcher
+
+    (tmp_path / "tracked.py").write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tracked.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git", "-c", "user.name=EasyChange Test",
+            "-c", "user.email=test@example.invalid",
+            "commit", "-qm", "initial",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    watcher = WorkspaceWatcher(Indexer(tmp_path))
+    calls = []
+    original = watcher._poll_git
+
+    def counted():
+        calls.append(True)
+        return original()
+
+    monkeypatch.setattr(watcher, "_poll_git", counted)
+    first = watcher.poll_if_due(60.0)
+    second = watcher.poll_if_due(60.0)
+
+    assert first["freshness_poll"] is True
+    assert second["freshness_poll"] is False
+    assert second["cached"] is True
+    assert len(calls) == 1
