@@ -378,3 +378,207 @@ def test_persistent_profile_is_outside_workspace_and_survives_detach(tmp_path, m
     profile = browser._persistent_profile_dir(str(edge))
     assert str(profile).startswith(str(tmp_path / "localapp" / "EasyChange" / "BrowserProfiles"))
     assert not str(profile).startswith(str(workspace))
+
+
+class _FakeBrowserProcess:
+    def __init__(self, pid=4242, return_code=None, stdout="", stderr=""):
+        self.pid = pid
+        self._return_code = return_code
+        self.stdout = io.StringIO(stdout)
+        self.stderr = io.StringIO(stderr)
+
+    def poll(self):
+        return self._return_code
+
+
+def _new_browser(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    return BrowserService(ProcessService(workspace))
+
+
+def test_browser_open_process_without_cdp_endpoint_fails_explicitly(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    edge = tmp_path / "msedge.exe"
+    edge.write_bytes(b"edge")
+    monkeypatch.setattr(browser, "attach", lambda *a, **k: (_ for _ in ()).throw(
+        browser_module.BrowserError("CDP_EXISTING_SESSION_NOT_AVAILABLE")
+    ))
+    monkeypatch.setattr(browser, "candidates", lambda: [str(edge)])
+    monkeypatch.setattr(browser, "_active_port", lambda profile: 0)
+    monkeypatch.setattr(
+        browser_module.subprocess,
+        "Popen",
+        lambda *a, **k: _FakeBrowserProcess(return_code=None),
+    )
+    with pytest.raises(browser_module.BrowserBootstrapError) as exc:
+        browser.start("BOOT1", timeout=0.2)
+    assert exc.value.code == "CDP_PORT_NOT_OPEN"
+    diag = exc.value.diagnostics
+    assert diag["browser_process_started"] is True
+    assert diag["cdp_address"] == "127.0.0.1"
+    assert diag["cdp_port_selected"] is None
+    assert diag["json_version_available"] is False
+    assert diag["stage"] == "bootstrap_timeout"
+
+
+def test_browser_open_detects_single_instance_handoff_without_debugging(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    edge = tmp_path / "msedge.exe"
+    edge.write_bytes(b"edge")
+    monkeypatch.setattr(browser, "attach", lambda *a, **k: (_ for _ in ()).throw(
+        browser_module.BrowserError("CDP_EXISTING_SESSION_NOT_AVAILABLE")
+    ))
+    monkeypatch.setattr(browser, "candidates", lambda: [str(edge)])
+    monkeypatch.setattr(browser, "_active_port", lambda profile: 0)
+    monkeypatch.setattr(
+        browser_module.subprocess,
+        "Popen",
+        lambda *a, **k: _FakeBrowserProcess(
+            return_code=0,
+            stderr="forwarded to an existing browser instance",
+        ),
+    )
+    with pytest.raises(browser_module.BrowserBootstrapError) as exc:
+        browser.start("BOOT2", timeout=2)
+    assert exc.value.code == "CDP_EXISTING_BROWSER_REUSED_WITHOUT_DEBUGGING"
+    assert exc.value.diagnostics["browser_process_exited"] is True
+    assert exc.value.diagnostics["return_code"] == 0
+
+
+def test_attach_json_version_without_browser_websocket_fails_specific(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        browser,
+        "_http_json",
+        lambda url, method="GET", timeout=3.0: (
+            {"Browser": "Microsoft Edge/140.0"}
+            if url.endswith("/json/version")
+            else []
+        ),
+    )
+    with pytest.raises(browser_module.BrowserBootstrapError) as exc:
+        browser.attach("A1", port=9333, timeout=0.5)
+    assert exc.value.code == "CDP_BROWSER_WEBSOCKET_MISSING"
+    assert exc.value.diagnostics["attempts"][-1]["stage"] == "json_version"
+
+
+def test_attach_json_list_without_page_target_fails_specific(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+
+    def fake_http(url, method="GET", timeout=3.0):
+        del method, timeout
+        if url.endswith("/json/version"):
+            return {
+                "Browser": "Microsoft Edge/140.0",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/browser/1",
+            }
+        if url.endswith("/json/list"):
+            return []
+        raise AssertionError(url)
+
+    monkeypatch.setattr(browser, "_http_json", fake_http)
+    with pytest.raises(browser_module.BrowserBootstrapError) as exc:
+        browser.attach("A2", port=9333, timeout=0.5)
+    assert exc.value.code == "CDP_PAGE_TARGET_NOT_FOUND"
+    assert exc.value.diagnostics["attempts"][-1]["stage"] == "json_list"
+
+
+def test_attach_rejects_chromium_product_even_on_loopback(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        browser,
+        "_http_json",
+        lambda url, method="GET", timeout=3.0: (
+            {
+                "Browser": "Chromium/140.0",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/browser/1",
+            }
+            if url.endswith("/json/version")
+            else []
+        ),
+    )
+    with pytest.raises(browser_module.BrowserBootstrapError) as exc:
+        browser.attach("A3", port=9333, timeout=0.5)
+    assert exc.value.code == "CDP_ENDPOINT_IS_NOT_EDGE_OR_CHROME"
+
+
+def test_attach_proves_browser_get_version_runtime_and_second_cdp_operation(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    _attach_fake(browser, monkeypatch)
+    page = next(item for item in _FakeCdp.instances if "/devtools/page/" in item.url)
+    root = next(item for item in _FakeCdp.instances if "/devtools/browser/" in item.url)
+    page_methods = [method for method, _ in page.calls]
+    root_methods = [method for method, _ in root.calls]
+    assert "Browser.getVersion" in root_methods
+    assert page_methods.count("Runtime.evaluate") >= 2
+    assert {"Page.enable", "Runtime.enable", "DOM.enable"}.issubset(page_methods)
+    state = browser.state("T1")
+    assert state["cdp_alive"] is True
+    assert state["port"] == 9222
+    assert state["target_id"] == "page-1"
+
+
+def test_independent_attach_rediscovers_persistent_profile_devtools_port(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    edge = tmp_path / "msedge.exe"
+    edge.write_bytes(b"edge")
+    profile = browser._persistent_profile_dir(str(edge))
+    (profile / "DevToolsActivePort").write_text("9333\n/devtools/browser/abc\n", encoding="utf-8")
+
+    def fake_http(url, method="GET", timeout=3.0):
+        del method, timeout
+        if url.endswith("/json/version"):
+            return {
+                "Browser": "Microsoft Edge/140.0",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/browser/existing",
+            }
+        if url.endswith("/json/list"):
+            return [{
+                "id": "page-persistent",
+                "type": "page",
+                "url": "https://localhost/swagger/index.html",
+                "title": "Swagger",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/page-persistent",
+            }]
+        raise AssertionError(url)
+
+    monkeypatch.setattr(browser_module, "_WebSocket", _FakeCdp)
+    monkeypatch.setattr(browser, "_http_json", fake_http)
+    result = browser.attach("REDISCOVER", timeout=1)
+    assert result["cdp_alive"] is True
+    assert result["port"] == 9333
+    assert result["profile_mode"] == "easychange_persistent_nondefault"
+    assert result["discovered_via_devtools_active_port"] is True
+
+
+def test_bootstrap_launch_never_uses_chromium_headless_or_network_binding(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    edge = tmp_path / "msedge.exe"
+    edge.write_bytes(b"edge")
+    monkeypatch.setattr(browser, "attach", lambda *a, **k: (_ for _ in ()).throw(
+        browser_module.BrowserError("CDP_EXISTING_SESSION_NOT_AVAILABLE")
+    ))
+    monkeypatch.setattr(browser, "candidates", lambda: [str(edge)])
+    monkeypatch.setattr(browser, "_active_port", lambda profile: 0)
+    captured = {}
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = list(argv)
+        captured["kwargs"] = dict(kwargs)
+        return _FakeBrowserProcess(return_code=0)
+
+    monkeypatch.setattr(browser_module.subprocess, "Popen", fake_popen)
+    with pytest.raises(browser_module.BrowserBootstrapError):
+        browser.start("SAFE", timeout=2)
+    command = " ".join(captured["argv"]).casefold()
+    assert "--remote-debugging-address=127.0.0.1" in command
+    assert "--remote-debugging-port=0" in command
+    assert "--user-data-dir=" in command
+    assert "0.0.0.0" not in command
+    assert "--headless" not in command
+    assert "chromium" not in command
+    assert "webdriver" not in command
+    assert "chromedriver" not in command
+    assert captured["kwargs"]["shell"] is False
