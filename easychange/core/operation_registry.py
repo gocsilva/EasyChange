@@ -16,6 +16,20 @@ STRUCTURED_UBUNTU_TYPES = frozenset({
     "ubuntu_job_status", "ubuntu_job_logs", "ubuntu_job_cancel",
     "k8s_context", "k8s_get", "k8s_describe", "k8s_logs", "k8s_events", "k8s_command",
 })
+STRUCTURED_ALWAYS_SIDE_EFFECT_TYPES = frozenset({
+    *STRUCTURED_MUTATION_TYPES,
+    "runtime_configure", "run_project", "process_exec", "stop_process",
+    "job_start", "job_cancel", "test_job_start", "build_job_start",
+    "browser_open", "browser_attach", "browser_detach", "browser_actions",
+    "browser_show", "browser_hide", "browser_navigate", "browser_evaluate",
+    "browser_cdp_call", "browser_cdp_batch", "swagger_browser_execute",
+    "db_configure", "ef_database_update", "secret_broker_import",
+    "ubuntu_open", "ubuntu_close", "ubuntu_cd", "ubuntu_env",
+    "ubuntu_shell", "ubuntu_job_cancel",
+})
+STRUCTURED_CONDITIONAL_SIDE_EFFECT_TYPES = frozenset({
+    "db_query", "ubuntu_exec", "ubuntu_batch", "k8s_command",
+})
 TEXT_MUTATION_COMMANDS = frozenset({
     "write", "save", "force-write", "append", "insert", "replace", "replace-line",
     "replace-range", "delete", "rename", "move", "mkdir", "new", "batch",
@@ -65,13 +79,20 @@ _OPERATION_FAMILIES = {
 }
 
 def structured_operation_is_mutation(item: dict) -> bool:
+    """Classify any sequenced operation that can produce an external side effect.
+
+    This is intentionally broader than STRUCTURED_MUTATION_TYPES, which remains
+    the file-edit transaction set. Durable sequence receipts use this predicate
+    so process/browser/database/Kubernetes side effects get the same fail-closed
+    replay semantics as file mutations.
+    """
     if not isinstance(item, dict):
         return False
     kind = str(item.get("type") or "").casefold()
-    if kind in STRUCTURED_MUTATION_TYPES:
+    if kind in STRUCTURED_ALWAYS_SIDE_EFFECT_TYPES:
         return True
-    if kind in {"ubuntu_cd", "ubuntu_env", "ubuntu_close", "ubuntu_shell", "ubuntu_job_cancel"}:
-        return True
+    if kind == "db_query":
+        return bool(item.get("allow_write", False))
     if kind in {"ubuntu_exec", "k8s_command"}:
         return bool(item.get("allow_mutation", False))
     if kind == "ubuntu_batch":
@@ -80,15 +101,22 @@ def structured_operation_is_mutation(item: dict) -> bool:
             return False
         return any(
             isinstance(command, dict)
-            and (bool(command.get("allow_mutation", False)) or bool(str(command.get("command") or "").strip()))
+            and (
+                bool(command.get("allow_mutation", False))
+                or bool(str(command.get("command") or "").strip())
+            )
             for command in commands
         )
     return False
+
+
 def structured_operation_profile(kind: str) -> dict:
     normalized = str(kind or "").casefold()
     return {
         "family": _OPERATION_FAMILIES.get(normalized, "unknown"),
         "mutation": normalized in STRUCTURED_MUTATION_TYPES,
+        "side_effect": normalized in STRUCTURED_ALWAYS_SIDE_EFFECT_TYPES,
+        "conditional_side_effect": normalized in STRUCTURED_CONDITIONAL_SIDE_EFFECT_TYPES,
         "recovery": normalized in STRUCTURED_RECOVERY_TYPES,
         "job": normalized in STRUCTURED_JOB_TYPES,
         "continue_on_error_safe": normalized in STRUCTURED_CONTINUE_SAFE_TYPES,
