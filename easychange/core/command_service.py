@@ -922,8 +922,29 @@ class CommandService:
                         value["has_more"] = True
                         value["next_start"] = int(value["start"]) + len(lines)
                         encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                    output.append(value)
-                    total_bytes += len(encoded)
+                    if len(encoded) > max_bytes:
+                        # A single pathological/minified line can be megabytes.
+                        # Never violate the optical response budget just because
+                        # line-based paging cannot split it safely.
+                        errors.append({
+                            "path": spec["path"],
+                            "start": spec["start"],
+                            "count": spec["count"],
+                            "error": "Single source line exceeds read_regions byte budget",
+                            "code": "LINE_EXCEEDS_BYTE_BUDGET",
+                            "byte_budget": max_bytes,
+                        })
+                    else:
+                        output.append(value)
+                        total_bytes += len(encoded)
+                        consumed = len(lines)
+                        remaining_count = max(0, int(spec["count"]) - consumed)
+                        if bool(value.get("budget_truncated")) and remaining_count > 0:
+                            skipped.append({
+                                "path": spec["path"],
+                                "start": int(spec["start"]) + consumed,
+                                "count": remaining_count,
+                            })
                     skipped.extend(item[0] for item in loaded[position + 1:] if item[2] is None)
                 else:
                     skipped.extend(item[0] for item in loaded[position:] if item[2] is None)
@@ -2905,18 +2926,30 @@ class CommandService:
                             encoded = json.dumps(
                                 info, ensure_ascii=False, separators=(",", ":")
                             ).encode("utf-8")
-                        files.append(info)
-                        total_bytes += len(encoded)
-                        consumed = len(lines)
-                        remaining_lines = max(0, requested_lines - consumed)
-                        if remaining_lines > 0:
-                            next_cursor = (
-                                f"v1:{absolute_index}:{start_line + consumed}:{remaining_lines}"
-                            )
-                        else:
+                        if len(encoded) > max_bytes:
+                            errors.append({
+                                "path": path,
+                                "error": "Single source line exceeds read-many byte budget",
+                                "code": "LINE_EXCEEDS_BYTE_BUDGET",
+                                "start": start_line,
+                                "byte_budget": max_bytes,
+                            })
                             next_index = absolute_index + 1
                             if next_index < len(paths):
                                 next_cursor = f"v1:{next_index}:1:{count}"
+                        else:
+                            files.append(info)
+                            total_bytes += len(encoded)
+                            consumed = len(lines)
+                            remaining_lines = max(0, requested_lines - consumed)
+                            if remaining_lines > 0:
+                                next_cursor = (
+                                    f"v1:{absolute_index}:{start_line + consumed}:{remaining_lines}"
+                                )
+                            else:
+                                next_index = absolute_index + 1
+                                if next_index < len(paths):
+                                    next_cursor = f"v1:{next_index}:1:{count}"
                         skipped.extend(
                             item[0][1]
                             for item in loaded[position + 1:]
