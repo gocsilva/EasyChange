@@ -1993,6 +1993,40 @@ class CommandService:
                             kind,
                             data=self.secret_broker.import_envelope(**required),
                         )
+                elif kind == "secret_broker_import_source":
+                    source_name = str(item.get("source_name") or "").strip()
+                    source_path = str(item.get("path") or "").strip()
+                    if not source_name or not source_path:
+                        result = Result(
+                            False,
+                            kind,
+                            error="SECRET_SOURCE_NAME_AND_PATH_REQUIRED",
+                            code="INVALID_STRUCTURED_PAYLOAD",
+                        )
+                    else:
+                        try:
+                            secret, metadata = self._secret_value_from_workspace_source(
+                                source_path,
+                                source_format=str(item.get("source_format") or "raw"),
+                                key=str(item.get("key") or ""),
+                            )
+                            imported = self.secret_broker.import_local_value(
+                                source_name=source_name,
+                                value=secret,
+                            )
+                            result = Result(
+                                True,
+                                kind,
+                                data={**imported, **metadata},
+                            )
+                        except Exception as exc:
+                            result = Result(
+                                False,
+                                kind,
+                                error=str(exc),
+                                code=str(getattr(exc, "code", "") or type(exc).__name__),
+                                data={"secret_values_returned": False},
+                            )
                 elif kind == "human_text_info":
                     result = Result(True, kind, data=self.human_text.info())
                 elif kind == "human_text_read":
@@ -2487,6 +2521,121 @@ class CommandService:
         self.state_store.data["ec_results"] = dict(list(compact_journal.items())[-128:])
         self.state_store.save()
 
+    def _secret_value_from_workspace_source(
+        self,
+        path: str,
+        *,
+        source_format: str = "raw",
+        key: str = "",
+    ) -> tuple[str, dict]:
+        """Read one secret locally without ever placing plaintext in a Result."""
+        source_path = str(path or "").strip()
+        if not source_path:
+            raise ValueError("SECRET_SOURCE_PATH_REQUIRED")
+        resolved = self.workspace.resolve(source_path, must_exist=True)
+        if not resolved.is_file():
+            raise ValueError("SECRET_SOURCE_MUST_BE_FILE")
+        try:
+            size = int(resolved.stat().st_size)
+        except OSError:
+            size = 0
+        if size <= 0:
+            raise ValueError("SECRET_SOURCE_EMPTY")
+        if size > 64 * 1024:
+            raise ValueError("SECRET_SOURCE_FILE_TOO_LARGE")
+        raw = resolved.read_bytes()
+        if b"\0" in raw:
+            raise ValueError("SECRET_SOURCE_BINARY_FORBIDDEN")
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise ValueError("SECRET_SOURCE_UTF8_REQUIRED") from exc
+
+        mode = str(source_format or "raw").strip().casefold()
+        selector = str(key or "").strip()
+        value: object
+        if mode == "raw":
+            if selector:
+                raise ValueError("SECRET_SOURCE_RAW_DOES_NOT_ACCEPT_KEY")
+            value = text.strip()
+        elif mode in {"env", "dotenv", "kv"}:
+            if not selector:
+                raise ValueError("SECRET_SOURCE_KEY_REQUIRED")
+            entries: dict[str, str] = {}
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.casefold().startswith("export "):
+                    line = line[7:].lstrip()
+                if "=" not in line:
+                    continue
+                name, raw_value = line.split("=", 1)
+                name = name.strip()
+                if not name:
+                    continue
+                parsed = raw_value.strip()
+                if len(parsed) >= 2 and parsed[0] == parsed[-1] and parsed[0] in {'"', "'"}:
+                    parsed = parsed[1:-1]
+                entries[name] = parsed
+            if selector in entries:
+                value = entries[selector]
+            else:
+                match = next(
+                    (candidate for name, candidate in entries.items()
+                     if name.casefold() == selector.casefold()),
+                    None,
+                )
+                if match is None:
+                    raise LookupError("SECRET_SOURCE_KEY_NOT_FOUND")
+                value = match
+        elif mode == "json":
+            if not selector:
+                raise ValueError("SECRET_SOURCE_KEY_REQUIRED")
+            try:
+                current: object = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError("SECRET_SOURCE_JSON_INVALID") from exc
+            parts = [part for part in re.split(r"[.:]", selector) if part]
+            if not parts:
+                raise ValueError("SECRET_SOURCE_KEY_REQUIRED")
+            for part in parts:
+                if isinstance(current, dict):
+                    if part in current:
+                        current = current[part]
+                        continue
+                    actual = next(
+                        (name for name in current if str(name).casefold() == part.casefold()),
+                        None,
+                    )
+                    if actual is None:
+                        raise LookupError("SECRET_SOURCE_KEY_NOT_FOUND")
+                    current = current[actual]
+                    continue
+                if isinstance(current, list) and part.isdigit():
+                    index = int(part)
+                    if index < 0 or index >= len(current):
+                        raise LookupError("SECRET_SOURCE_KEY_NOT_FOUND")
+                    current = current[index]
+                    continue
+                raise LookupError("SECRET_SOURCE_KEY_NOT_FOUND")
+            if isinstance(current, (dict, list)) or current is None:
+                raise ValueError("SECRET_SOURCE_VALUE_MUST_BE_SCALAR")
+            value = current
+        else:
+            raise ValueError("SECRET_SOURCE_FORMAT_MUST_BE_RAW_ENV_OR_JSON")
+
+        secret = str(value)
+        if not secret:
+            raise ValueError("SECRET_VALUE_EMPTY")
+        relative = resolved.relative_to(self.workspace.root_path).as_posix()
+        return secret, {
+            "source_path": relative,
+            "source_format": "env" if mode in {"env", "dotenv", "kv"} else mode,
+            "selector": selector or None,
+            "secret_values_returned": False,
+        }
+
     def _capability_manifest(self) -> dict:
         structured = structured_capabilities()
         supported_operations = sorted(structured.get("operations") or {})
@@ -2501,6 +2650,7 @@ class CommandService:
             "git_diff_cursor": True,
             "runtime_env_refs": True,
             "secret_broker": True,
+            "secret_source_import": True,
             "human_text_buffer": True,
             "ef_migrations": True,
             "database_aliases": True,
