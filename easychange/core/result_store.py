@@ -40,10 +40,25 @@ def _find_execution_summary(value: Any, depth: int = 0) -> dict[str, Any] | None
 class DurableResultStore:
     """Bounded durable EC1 result/receipt store keyed by sequence."""
 
-    def __init__(self, root: Path, *, max_results: int = 128, ttl_seconds: float = 1800.0) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        max_results: int = 128,
+        ttl_seconds: float = 1800.0,
+        active_ttl_seconds: float = 24 * 60 * 60,
+    ) -> None:
         self.root = root
         self.max_results = max(16, int(max_results))
         self.ttl_seconds = max(60.0, float(ttl_seconds))
+        # RUNNING/APPLIED-but-not-final records are execution truth. Pruning
+        # them on the ordinary 30-minute result TTL can make a long build/test
+        # or mutation look never-executed after restart and permit a duplicate.
+        self.active_ttl_seconds = max(
+            self.ttl_seconds,
+            60 * 60,
+            float(active_ttl_seconds),
+        )
         self._lock = threading.RLock()
         self.root.mkdir(parents=True, exist_ok=True)
 
@@ -68,13 +83,44 @@ class DurableResultStore:
         temporary.replace(target)
         self._cleanup()
 
+    @staticmethod
+    def _active_record(value: dict[str, Any]) -> bool:
+        state = str(value.get("state") or "").upper()
+        execution = str(value.get("execution_state") or "").upper()
+        return state == "RUNNING" or execution in {"STARTED", "RUNNING"}
+
     def _cleanup(self) -> None:
         now = time.time()
-        files = sorted(self.root.glob("Q*.json.zlib"), key=lambda path: path.stat().st_mtime, reverse=True)
-        for position, path in enumerate(files):
+        try:
+            files = sorted(
+                self.root.glob("Q*.json.zlib"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return
+
+        terminal_seen = 0
+        for path in files:
             try:
-                age = now - path.stat().st_mtime
-                if position >= self.max_results or age > self.ttl_seconds:
+                stat = path.stat()
+                age = now - stat.st_mtime
+                try:
+                    value = self._decode(path.read_bytes())
+                except (OSError, ValueError, json.JSONDecodeError, zlib.error):
+                    # Corrupt EasyChange-owned result files carry no execution
+                    # truth. Retain briefly for diagnostics, then remove.
+                    if age > self.ttl_seconds:
+                        path.unlink(missing_ok=True)
+                    continue
+
+                if self._active_record(value):
+                    if age > self.active_ttl_seconds:
+                        path.unlink(missing_ok=True)
+                    continue
+
+                terminal_seen += 1
+                if terminal_seen > self.max_results or age > self.ttl_seconds:
                     path.unlink(missing_ok=True)
             except OSError:
                 continue
@@ -88,8 +134,16 @@ class DurableResultStore:
                 value = self._decode(target.read_bytes())
             except (OSError, ValueError, json.JSONDecodeError, zlib.error):
                 return None
-            finished = float(value.get("finished_at") or value.get("created_at") or 0.0)
-            if finished and time.time() - finished > self.ttl_seconds:
+            active = self._active_record(value)
+            timestamp = float(
+                value.get("updated_at")
+                or value.get("finished_at")
+                or value.get("started_at")
+                or value.get("created_at")
+                or 0.0
+            )
+            ttl = self.active_ttl_seconds if active else self.ttl_seconds
+            if timestamp and time.time() - timestamp > ttl:
                 target.unlink(missing_ok=True)
                 return None
             return value
