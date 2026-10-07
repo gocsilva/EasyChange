@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 
 from .indexer import Indexer
@@ -25,6 +26,8 @@ class WorkspaceWatcher:
         self.last_error: str | None = None
         self._fingerprints: dict[str, tuple[int, int] | None] = {}
         self._last_head: str | None = None
+        self._last_poll_monotonic = 0.0
+        self._last_poll_result: dict | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -171,11 +174,37 @@ class WorkspaceWatcher:
             result = self.indexer.refresh(force=True)
             result["backend"] = "filesystem-scan"
 
+        self._last_poll_monotonic = time.monotonic()
+        self._last_poll_result = dict(result)
         if result["indexed"] or result["removed"]:
             self.last_change = result
             if self.on_change:
                 self.on_change(result)
         return result
+
+    def poll_if_due(self, minimum_interval: float = 0.75) -> dict:
+        """Refresh external changes only when discovery needs fresh index state.
+
+        Machine-mode callers historically saw stale warm-index hits unless they
+        explicitly started :watch. A demand-driven poll keeps search/definition
+        correct without spawning a permanent git-status process every 1.5s.
+        """
+        interval = max(0.0, float(minimum_interval))
+        now = time.monotonic()
+        if (
+            self._last_poll_result is not None
+            and now - self._last_poll_monotonic < interval
+        ):
+            return {
+                **self._last_poll_result,
+                "cached": True,
+                "freshness_poll": False,
+            }
+        result = self.poll_once()
+        return {
+            **result,
+            "freshness_poll": True,
+        }
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval):
