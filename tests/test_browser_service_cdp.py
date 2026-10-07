@@ -338,6 +338,109 @@ def test_cdp_websocket_rejects_non_loopback_before_network_access():
         )
 
 
+
+
+def _bare_async_websocket():
+    ws = browser_module._WebSocket.__new__(browser_module._WebSocket)
+    ws._next_id = 0
+    ws._send_lock = threading.RLock()
+    ws._state_lock = threading.RLock()
+    ws._response_ready = threading.Condition(ws._state_lock)
+    ws._responses = {}
+    ws._events = deque()
+    ws._event_limit = 512
+    ws._events_dropped = 0
+    ws._reader_error = None
+    ws._closed = False
+    return ws
+
+
+def test_cdp_websocket_continuous_reader_correlates_calls_and_buffers_events(monkeypatch):
+    ws = _bare_async_websocket()
+    sent = []
+
+    def send(payload, opcode=1):
+        assert opcode == 1
+        request = json.loads(payload.decode("utf-8"))
+        sent.append(request)
+        ws._dispatch_message({
+            "method": "Network.requestWillBeSent",
+            "params": {"requestId": "R-ASYNC"},
+        })
+        ws._dispatch_message({
+            "id": request["id"],
+            "result": {"product": "Microsoft Edge/140.0"},
+        })
+
+    monkeypatch.setattr(ws, "_send_frame", send)
+
+    result = ws.call("Browser.getVersion", timeout=0.2)
+    events = ws.drain_events(10)
+
+    assert result["product"].startswith("Microsoft Edge/")
+    assert sent[0]["method"] == "Browser.getVersion"
+    assert events == [{
+        "method": "Network.requestWillBeSent",
+        "params": {"requestId": "R-ASYNC"},
+    }]
+
+
+def test_cdp_websocket_event_buffer_is_fifo_and_bounded():
+    ws = _bare_async_websocket()
+    ws._event_limit = 3
+    for index in range(5):
+        ws._dispatch_message({
+            "method": "Runtime.consoleAPICalled",
+            "params": {"index": index},
+        })
+
+    status = ws.event_status()
+    assert status["pending_events"] == 3
+    assert status["events_dropped"] == 2
+    assert [event["params"]["index"] for event in ws.drain_events(10)] == [2, 3, 4]
+    assert ws.drain_events(10) == []
+
+
+def test_cdp_websocket_reader_collects_event_without_pump(monkeypatch):
+    ws = _bare_async_websocket()
+    values = iter([
+        json.dumps({
+            "method": "Network.responseReceived",
+            "params": {"requestId": "R-PUSH"},
+        }),
+    ])
+
+    def recv_text():
+        try:
+            return next(values)
+        except StopIteration:
+            raise browser_module.CdpError("CDP_WEBSOCKET_CLOSED")
+
+    monkeypatch.setattr(ws, "_recv_text", recv_text)
+    ws._reader = threading.Thread(target=ws._reader_loop, daemon=True)
+    ws._reader.start()
+    ws._reader.join(timeout=0.5)
+
+    events = ws.drain_events(10)
+    assert events[0]["method"] == "Network.responseReceived"
+    assert ws._reader_error == "CdpError:CDP_WEBSOCKET_CLOSED"
+
+
+def test_wait_ready_rejects_chrome_error_page(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        browser,
+        "_evaluate",
+        lambda *args, **kwargs: {
+            "readyState": "complete",
+            "url": "chrome-error://chromewebdata/",
+            "title": "localhost",
+        },
+    )
+
+    with pytest.raises(browser_module.BrowserError, match="BROWSER_NAVIGATION_ERROR_PAGE"):
+        browser.wait_ready("ERR", timeout=0.2)
+
 def test_browser_open_without_installed_edge_or_chrome_fails_closed(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
     workspace = tmp_path / "workspace"
