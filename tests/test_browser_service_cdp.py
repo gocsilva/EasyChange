@@ -582,3 +582,94 @@ def test_bootstrap_launch_never_uses_chromium_headless_or_network_binding(tmp_pa
     assert "webdriver" not in command
     assert "chromedriver" not in command
     assert captured["kwargs"]["shell"] is False
+
+
+class _FakeUser32Focus:
+    def __init__(self, *, allow_focus: bool = True):
+        self.foreground = 200
+        self.allow_focus = allow_focus
+        self.attach_calls = []
+        self.show_calls = []
+        self.set_foreground_calls = []
+        self.active_calls = []
+        self.focus_calls = []
+
+    def GetForegroundWindow(self):
+        return self.foreground
+
+    def IsWindowVisible(self, hwnd):
+        return int(hwnd) == 100
+
+    def GetWindowThreadProcessId(self, hwnd, _pid):
+        return {100: 10, 200: 20}.get(int(hwnd), 0)
+
+    def AttachThreadInput(self, left, right, attach):
+        self.attach_calls.append((int(left), int(right), bool(attach)))
+        return True
+
+    def IsIconic(self, hwnd):
+        return False
+
+    def ShowWindow(self, hwnd, mode):
+        self.show_calls.append((int(hwnd), int(mode)))
+        return True
+
+    def BringWindowToTop(self, hwnd):
+        return True
+
+    def SetForegroundWindow(self, hwnd):
+        self.set_foreground_calls.append(int(hwnd))
+        if self.allow_focus:
+            self.foreground = int(hwnd)
+        return bool(self.allow_focus)
+
+    def SetActiveWindow(self, hwnd):
+        self.active_calls.append(int(hwnd))
+        return int(hwnd)
+
+    def SetFocus(self, hwnd):
+        self.focus_calls.append(int(hwnd))
+        return int(hwnd)
+
+
+class _FakeKernel32Focus:
+    def GetCurrentThreadId(self):
+        return 30
+
+
+def test_restore_easychange_foreground_uses_attach_thread_input_and_confirms(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    browser.set_focus_window_handle_provider(lambda: 100)
+    user32 = _FakeUser32Focus(allow_focus=True)
+    kernel32 = _FakeKernel32Focus()
+    monkeypatch.setattr(browser_module, "_windows_user32", lambda: user32)
+    monkeypatch.setattr(browser_module, "_windows_kernel32", lambda: kernel32)
+
+    result = browser.restore_easychange_foreground(attempts=2)
+
+    assert result["command_focus_confirmed"] is True
+    assert result["easychange_foreground"] is True
+    assert result["focus_restore_attempted"] is True
+    assert result["focus_restore_attempts"] == 1
+    assert result["focus_restore_strategy"] == "ATTACH_THREAD_INPUT"
+    assert user32.set_foreground_calls == [100]
+    assert (30, 20, True) in user32.attach_calls
+    assert (30, 10, True) in user32.attach_calls
+    assert (30, 10, False) in user32.attach_calls
+    assert (30, 20, False) in user32.attach_calls
+
+
+def test_restore_easychange_foreground_fails_closed_when_windows_refuses_focus(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    browser.set_focus_window_handle_provider(lambda: 100)
+    user32 = _FakeUser32Focus(allow_focus=False)
+    monkeypatch.setattr(browser_module, "_windows_user32", lambda: user32)
+    monkeypatch.setattr(browser_module, "_windows_kernel32", lambda: _FakeKernel32Focus())
+
+    result = browser.restore_easychange_foreground(attempts=2)
+
+    assert result["command_focus_confirmed"] is False
+    assert result["easychange_foreground"] is False
+    assert result["focus_restore_attempted"] is True
+    assert result["focus_restore_attempts"] == 2
+    assert len(user32.set_foreground_calls) == 2

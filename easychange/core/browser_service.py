@@ -32,6 +32,16 @@ def _windows_user32():
         return None
 
 
+def _windows_kernel32():
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        return ctypes.windll.kernel32
+    except Exception:
+        return None
+
+
 class BrowserError(RuntimeError):
     pass
 
@@ -352,40 +362,100 @@ class BrowserService:
                 "focus_error": f"{type(exc).__name__}:{str(exc)[:240]}",
             }
 
-    def restore_easychange_foreground(self, attempts: int = 4) -> dict:
+    def restore_easychange_foreground(self, attempts: int = 6) -> dict:
         hwnd = self._easychange_hwnd()
         user32 = _windows_user32()
+        kernel32 = _windows_kernel32()
         if user32 is None or not hwnd:
             return {
                 **self.easychange_focus_state(),
                 "focus_restore_attempted": False,
                 "focus_restore_attempts": 0,
             }
+
         last = self.easychange_focus_state()
-        count = max(1, min(8, int(attempts or 1)))
+        count = max(1, min(10, int(attempts or 1)))
+        strategies: list[str] = []
+
         for index in range(count):
+            foreground = 0
+            foreground_thread = 0
+            target_thread = 0
+            current_thread = 0
+            attached: list[tuple[int, int]] = []
             try:
+                foreground = int(user32.GetForegroundWindow() or 0)
+                if kernel32 is not None:
+                    current_thread = int(kernel32.GetCurrentThreadId() or 0)
+                if foreground:
+                    foreground_thread = int(
+                        user32.GetWindowThreadProcessId(foreground, None) or 0
+                    )
+                target_thread = int(
+                    user32.GetWindowThreadProcessId(hwnd, None) or 0
+                )
+
+                for left, right in (
+                    (current_thread, foreground_thread),
+                    (current_thread, target_thread),
+                ):
+                    if left and right and left != right:
+                        try:
+                            if bool(user32.AttachThreadInput(left, right, True)):
+                                attached.append((left, right))
+                        except Exception:
+                            pass
+
                 if bool(user32.IsIconic(hwnd)):
-                    user32.ShowWindow(hwnd, 9)
+                    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    strategies.append("SW_RESTORE")
                 else:
-                    user32.ShowWindow(hwnd, 5)
+                    user32.ShowWindow(hwnd, 5)  # SW_SHOW
                 user32.BringWindowToTop(hwnd)
                 user32.SetForegroundWindow(hwnd)
                 user32.SetActiveWindow(hwnd)
-            except Exception:
-                pass
+                try:
+                    user32.SetFocus(hwnd)
+                except Exception:
+                    pass
+                strategies.append(
+                    "ATTACH_THREAD_INPUT"
+                    if attached else "DIRECT_FOREGROUND"
+                )
+            except Exception as exc:
+                strategies.append(f"ERROR:{type(exc).__name__}")
+            finally:
+                for left, right in reversed(attached):
+                    try:
+                        user32.AttachThreadInput(left, right, False)
+                    except Exception:
+                        pass
+
             last = self.easychange_focus_state()
             if last.get("command_focus_confirmed"):
                 return {
                     **last,
                     "focus_restore_attempted": True,
                     "focus_restore_attempts": index + 1,
+                    "focus_restore_strategy": strategies[-1] if strategies else None,
+                    "focus_restore_strategies": strategies,
+                    "foreground_before_restore": foreground or None,
+                    "foreground_thread_id": foreground_thread or None,
+                    "easychange_thread_id": target_thread or None,
+                    "current_thread_id": current_thread or None,
                 }
-            time.sleep(0.02)
+            time.sleep(0.04)
+
         return {
             **last,
             "focus_restore_attempted": True,
             "focus_restore_attempts": count,
+            "focus_restore_strategy": strategies[-1] if strategies else None,
+            "focus_restore_strategies": strategies,
+            "foreground_before_restore": foreground or None,
+            "foreground_thread_id": foreground_thread or None,
+            "easychange_thread_id": target_thread or None,
+            "current_thread_id": current_thread or None,
         }
 
     @staticmethod
