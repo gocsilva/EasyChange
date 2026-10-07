@@ -155,6 +155,34 @@ class SecretBroker:
                 "secret_values_returned": False,
             }
 
+    def import_local_value(self, *, source_name: str, value: str) -> dict[str, Any]:
+        """Import a local secret directly into ephemeral broker memory.
+
+        This path exists for credentials that already live on REMOTE_PC (for
+        example a workspace HML credential file or project configuration).
+        Plaintext never enters a Result, journal, state file or optical frame.
+        """
+        source = str(source_name or "").strip()
+        if not _ENV_NAME_RE.fullmatch(source):
+            raise ValueError("INVALID_SECRET_SOURCE_NAME")
+        if not isinstance(value, str):
+            raise TypeError("SECRET_VALUE_STRING_REQUIRED")
+        encoded = value.encode("utf-8")
+        if not encoded:
+            raise ValueError("SECRET_VALUE_EMPTY")
+        if len(encoded) > self.MAX_SECRET_BYTES:
+            raise ValueError("SECRET_VALUE_TOO_LARGE")
+        with self._lock:
+            self._ensure_live()
+            self._values[source] = value
+            return {
+                "broker_id": self._broker_id,
+                "source_name": source,
+                "imported": True,
+                "expires_at": self._expires_at,
+                "secret_values_returned": False,
+            }
+
     def values(self) -> dict[str, str]:
         with self._lock:
             self._ensure_live()
