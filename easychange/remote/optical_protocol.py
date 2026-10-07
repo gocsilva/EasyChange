@@ -31,7 +31,6 @@ def _result_value(result: Any) -> dict[str, Any]:
     return value
 
 
-
 def _compact_transport_value(value: dict[str, Any]) -> dict[str, Any]:
     """Remove reversible structured-response duplication without copying payloads."""
     data = value.get("data")
@@ -53,7 +52,6 @@ def _compact_transport_value(value: dict[str, Any]) -> dict[str, Any]:
     compact_data["transport_compacted"] = True
     compact["data"] = compact_data
     return compact
-
 
 
 def _expand_transport_value(value: dict[str, Any]) -> dict[str, Any]:
@@ -110,74 +108,6 @@ def _transport_components(
 
 
 def _packet_json(
-    *,
-    sequence: str,
-    index: int,
-    total: int,
-    digest: str,
-    crc: str,
-    piece: str,
-) -> str:
-    return json.dumps({
-        "p": PROTOCOL,
-        "v": 2,
-        "s": sequence,
-        "i": index,
-        "n": total,
-        "h": digest[:16],
-        "c": crc,
-        "x": f"{binascii.crc32(piece.encode('ascii')) & 0xffffffff:08x}",
-        "d": piece,
-    }, ensure_ascii=False, separators=(",", ":"))
-
-
-def _header_json(
-    value: dict[str, Any],
-    raw: bytes,
-    *,
-    total: int,
-    digest: str,
-    broadcast_count: int | None = None,
-) -> str:
-    data = value.get("data") if isinstance(value.get("data"), dict) else {}
-    receipt = data.get("mutation_receipt") if isinstance(data.get("mutation_receipt"), dict) else {}
-    header = {
-        "p": HEADER_PROTOCOL,
-        "v": 1,
-        "s": str(value.get("sequence") or "-"),
-        "f": True,
-        "ok": bool(value.get("ok")),
-        "rc": value.get("code"),
-        "l": len(raw),
-        "n": int(total),
-        "h": digest,
-        "m": receipt.get("lifecycle_state") or receipt.get("state"),
-        "cid": value.get("command_id"),
-    }
-    if broadcast_count is not None:
-        header["w"] = max(0, min(int(total), int(broadcast_count)))
-    return json.dumps(header, ensure_ascii=False, separators=(",", ":"))
-
-
-def _transport_components(
-    result: Any,
-    *,
-    chunk_chars: int | None = None,
-) -> tuple[dict[str, Any], bytes, str, int, int, str, str, str]:
-    value = _result_value(result)
-    wire_value = _compact_transport_value(value)
-    raw, _compressed, token = _encode_raw(wire_value)
-    size = adaptive_chunk_chars(len(token)) if chunk_chars is None else int(chunk_chars)
-    if size < 120:
-        raise ValueError("chunk_chars must be >= 120")
-    total = max(1, (len(token) + size - 1) // size)
-    digest = hashlib.sha256(raw).hexdigest()
-    crc = f"{binascii.crc32(raw) & 0xffffffff:08x}"
-    sequence = str(value.get("sequence") or "-")
-    return value, raw, token, size, total, digest, crc, sequence
-
-
-def _packet_json(
     *, sequence: str, index: int, total: int, digest: str, crc: str, piece: str,
 ) -> str:
     return json.dumps({
@@ -188,17 +118,23 @@ def _packet_json(
     }, ensure_ascii=False, separators=(",", ":"))
 
 
-def _header_json(value: dict[str, Any], raw: bytes, *, total: int, digest: str) -> str:
+def _header_json(
+    value: dict[str, Any], raw: bytes, *, total: int, digest: str,
+    broadcast_count: int | None = None,
+) -> str:
     data = value.get("data") if isinstance(value.get("data"), dict) else {}
     receipt = data.get("mutation_receipt") if isinstance(data.get("mutation_receipt"), dict) else {}
-    return json.dumps({
+    header = {
         "p": HEADER_PROTOCOL, "v": 1,
         "s": str(value.get("sequence") or "-"), "f": True,
         "ok": bool(value.get("ok")), "rc": value.get("code"),
         "l": len(raw), "n": int(total), "h": digest,
         "m": receipt.get("lifecycle_state") or receipt.get("state"),
         "cid": value.get("command_id"),
-    }, ensure_ascii=False, separators=(",", ":"))
+    }
+    if broadcast_count is not None:
+        header["w"] = max(0, min(int(total), int(broadcast_count)))
+    return json.dumps(header, ensure_ascii=False, separators=(",", ":"))
 
 
 def encode_result_chunks(
@@ -266,8 +202,9 @@ def encode_result_bundle(
             sequence=sequence, index=index, total=total,
             digest=digest, crc=crc, piece=piece,
         ))
-    return packets, _header_json(value, raw, total=total, digest=digest)
-
+    return packets, _header_json(
+        value, raw, total=total, digest=digest, broadcast_count=materialized
+    )
 
 
 def decode_result_chunks(payloads: list[str]) -> dict[str, Any]:
