@@ -22,6 +22,7 @@ class WorkspaceWatcher:
         self.on_change = on_change
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._poll_lock = threading.Lock()
         self.last_change: dict | None = None
         self.last_error: str | None = None
         self._fingerprints: dict[str, tuple[int, int] | None] = {}
@@ -168,19 +169,23 @@ class WorkspaceWatcher:
         }
 
     def poll_once(self) -> dict:
-        if (self.indexer.root / ".git").exists():
-            result = self._poll_git()
-        else:
-            result = self.indexer.refresh(force=True)
-            result["backend"] = "filesystem-scan"
+        # Explicit :watch and demand-driven discovery can overlap. Serialize
+        # fingerprint/index mutation so two git-status snapshots cannot race
+        # and make one caller "forget" a path the other just observed.
+        with self._poll_lock:
+            if (self.indexer.root / ".git").exists():
+                result = self._poll_git()
+            else:
+                result = self.indexer.refresh(force=True)
+                result["backend"] = "filesystem-scan"
 
-        self._last_poll_monotonic = time.monotonic()
-        self._last_poll_result = dict(result)
-        if result["indexed"] or result["removed"]:
-            self.last_change = result
-            if self.on_change:
-                self.on_change(result)
-        return result
+            self._last_poll_monotonic = time.monotonic()
+            self._last_poll_result = dict(result)
+            if result["indexed"] or result["removed"]:
+                self.last_change = result
+                if self.on_change:
+                    self.on_change(result)
+            return result
 
     def poll_if_due(self, minimum_interval: float = 0.75) -> dict:
         """Refresh external changes only when discovery needs fresh index state.
