@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from easychange.core.workspace import Workspace
 
 
