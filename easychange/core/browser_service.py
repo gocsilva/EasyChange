@@ -362,7 +362,13 @@ class BrowserService:
                 "focus_error": f"{type(exc).__name__}:{str(exc)[:240]}",
             }
 
-    def restore_easychange_foreground(self, attempts: int = 6) -> dict:
+    def restore_easychange_foreground(
+        self,
+        attempts: int = 6,
+        *,
+        stable_checks: int = 2,
+        stable_interval: float = 0.05,
+    ) -> dict:
         hwnd = self._easychange_hwnd()
         user32 = _windows_user32()
         kernel32 = _windows_kernel32()
@@ -375,6 +381,8 @@ class BrowserService:
 
         last = self.easychange_focus_state()
         count = max(1, min(10, int(attempts or 1)))
+        required_stable_checks = max(1, min(8, int(stable_checks or 1)))
+        stable_interval = max(0.0, min(0.25, float(stable_interval or 0.0)))
         strategies: list[str] = []
 
         for index in range(count):
@@ -431,20 +439,30 @@ class BrowserService:
                     except Exception:
                         pass
 
-            last = self.easychange_focus_state()
-            if last.get("command_focus_confirmed"):
+            stable = 0
+            for stable_index in range(required_stable_checks):
+                last = self.easychange_focus_state()
+                if not last.get("command_focus_confirmed"):
+                    stable = 0
+                    break
+                stable += 1
+                if stable < required_stable_checks and stable_interval > 0:
+                    time.sleep(stable_interval)
+            if stable >= required_stable_checks:
                 return {
                     **last,
                     "focus_restore_attempted": True,
                     "focus_restore_attempts": index + 1,
                     "focus_restore_strategy": strategies[-1] if strategies else None,
                     "focus_restore_strategies": strategies,
+                    "focus_restore_stable_checks": stable,
+                    "focus_restore_required_stable_checks": required_stable_checks,
                     "foreground_before_restore": foreground or None,
                     "foreground_thread_id": foreground_thread or None,
                     "easychange_thread_id": target_thread or None,
                     "current_thread_id": current_thread or None,
                 }
-            time.sleep(0.04)
+            time.sleep(max(0.04, stable_interval))
 
         return {
             **last,
@@ -452,6 +470,8 @@ class BrowserService:
             "focus_restore_attempts": count,
             "focus_restore_strategy": strategies[-1] if strategies else None,
             "focus_restore_strategies": strategies,
+            "focus_restore_stable_checks": 0,
+            "focus_restore_required_stable_checks": required_stable_checks,
             "foreground_before_restore": foreground or None,
             "foreground_thread_id": foreground_thread or None,
             "easychange_thread_id": target_thread or None,

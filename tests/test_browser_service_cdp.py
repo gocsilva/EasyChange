@@ -645,7 +645,7 @@ def test_restore_easychange_foreground_uses_attach_thread_input_and_confirms(tmp
     monkeypatch.setattr(browser_module, "_windows_user32", lambda: user32)
     monkeypatch.setattr(browser_module, "_windows_kernel32", lambda: kernel32)
 
-    result = browser.restore_easychange_foreground(attempts=2)
+    result = browser.restore_easychange_foreground(attempts=2, stable_checks=1, stable_interval=0)
 
     assert result["command_focus_confirmed"] is True
     assert result["easychange_foreground"] is True
@@ -666,7 +666,7 @@ def test_restore_easychange_foreground_fails_closed_when_windows_refuses_focus(t
     monkeypatch.setattr(browser_module, "_windows_user32", lambda: user32)
     monkeypatch.setattr(browser_module, "_windows_kernel32", lambda: _FakeKernel32Focus())
 
-    result = browser.restore_easychange_foreground(attempts=2)
+    result = browser.restore_easychange_foreground(attempts=2, stable_checks=1, stable_interval=0)
 
     assert result["command_focus_confirmed"] is False
     assert result["easychange_foreground"] is False
@@ -704,3 +704,48 @@ def test_dom_script_avoids_literal_newline_inside_javascript_string(tmp_path, mo
     assert "String.fromCharCode(10)" in captured["expression"]
     assert "<!doctype html>\n'" not in captured["expression"]
     assert "ok" in result["text"]
+
+
+def test_restore_easychange_foreground_requires_stable_confirmation_after_focus_race(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    browser.set_focus_window_handle_provider(lambda: 100)
+    user32 = _FakeUser32Focus(allow_focus=True)
+    kernel32 = _FakeKernel32Focus()
+    monkeypatch.setattr(browser_module, "_windows_user32", lambda: user32)
+    monkeypatch.setattr(browser_module, "_windows_kernel32", lambda: kernel32)
+
+    states = iter([
+        False,  # initial state before first restore
+        True,   # first confirmation after SetForegroundWindow
+        False,  # browser steals focus back during settle
+        True,   # second restore confirmation 1
+        True,   # confirmation 2
+        True,   # confirmation 3
+    ])
+
+    def fake_focus_state():
+        confirmed = next(states, True)
+        return {
+            "focus_required": True,
+            "easychange_hwnd": 100,
+            "easychange_visible": True,
+            "easychange_foreground": confirmed,
+            "command_focus_confirmed": confirmed,
+            "focus_supported": True,
+            "foreground_hwnd": 100 if confirmed else 200,
+            "focus_validation": "WIN32_FOREGROUND_WINDOW",
+        }
+
+    monkeypatch.setattr(browser, "easychange_focus_state", fake_focus_state)
+
+    result = browser.restore_easychange_foreground(
+        attempts=3,
+        stable_checks=3,
+        stable_interval=0,
+    )
+
+    assert result["command_focus_confirmed"] is True
+    assert result["focus_restore_attempts"] == 2
+    assert result["focus_restore_stable_checks"] == 3
+    assert result["focus_restore_required_stable_checks"] == 3
+    assert user32.set_foreground_calls == [100, 100]

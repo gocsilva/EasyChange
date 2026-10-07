@@ -1119,7 +1119,11 @@ class CommandService:
                 else:
                     raise ValueError(f"UNSUPPORTED_BROWSER_OPERATION:{kind}")
 
-                focus = self.browser.restore_easychange_foreground()
+                focus = self.browser.restore_easychange_foreground(
+                    attempts=10 if kind == "browser_open" else 6,
+                    stable_checks=5 if kind == "browser_open" else 2,
+                    stable_interval=0.08 if kind == "browser_open" else 0.04,
+                )
                 data = self._scrub_browser_secret_values(data, secret_sources)
                 if isinstance(data, dict):
                     data = {
@@ -1145,7 +1149,11 @@ class CommandService:
                     command_id=self.ids.next("C"),
                 )
             except Exception as exc:
-                focus = self.browser.restore_easychange_foreground()
+                focus = self.browser.restore_easychange_foreground(
+                    attempts=10 if kind == "browser_open" else 6,
+                    stable_checks=5 if kind == "browser_open" else 2,
+                    stable_interval=0.08 if kind == "browser_open" else 0.04,
+                )
                 error = self._scrub_browser_secret_values(str(exc), secret_sources)
                 diagnostics = getattr(exc, "diagnostics", {})
                 diagnostics = self._scrub_browser_secret_values(
