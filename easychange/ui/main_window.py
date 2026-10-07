@@ -701,9 +701,14 @@ class MainWindow(QMainWindow):
                 # EC2 is machine-readable, so a valid deterministic mask is
                 # preferable to spending CPU choosing the prettiest one.
                 code = qrcode.QRCode(
-                    error_correction=qrcode.constants.ERROR_CORRECT_L,
+                    # EC2 values remain at >=2 screen pixels/module even at the
+                    # largest adaptive chunk size. Use the standard 4-module
+                    # quiet zone plus M-level correction so HDMI/JPEG/paint
+                    # noise becomes a recoverable symbol error instead of a
+                    # lost transport packet.
+                    error_correction=qrcode.constants.ERROR_CORRECT_M,
                     box_size=1,
-                    border=2,
+                    border=4,
                     mask_pattern=3,
                 )
                 code.add_data(payload)
