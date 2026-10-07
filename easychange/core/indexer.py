@@ -11,6 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
+from .subprocess_utils import hidden_console_kwargs
+
 
 SKIP_DIRS = {".git", ".easychange", ".venv", "venv", "node_modules", "bin", "obj", "dist", "build",
              "__pycache__", ".gradle", ".idea", ".vs", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
@@ -386,7 +388,8 @@ class Indexer:
             argv.append(f":(glob)**/*{ext}")
         try:
             completed = subprocess.run(argv, cwd=self.root, text=True, capture_output=True,
-                                       timeout=8, check=False, shell=False)
+                                       timeout=8, check=False, shell=False,
+                                       **hidden_console_kwargs())
         except (OSError, subprocess.TimeoutExpired):
             return []
         if completed.returncode not in {0, 1}:
@@ -586,6 +589,7 @@ class Indexer:
                 completed = subprocess.run(
                     argv, cwd=self.root, text=True, capture_output=True,
                     timeout=10, check=False, shell=False,
+                    **hidden_console_kwargs(),
                 )
                 # Older Git builds may not support --untracked on grep. Retry
                 # once without it rather than sacrificing the cold fast path.
@@ -594,6 +598,7 @@ class Indexer:
                     completed = subprocess.run(
                         legacy_argv, cwd=self.root, text=True, capture_output=True,
                         timeout=10, check=False, shell=False,
+                        **hidden_console_kwargs(),
                     )
                 if completed.returncode in {0, 1}:
                     for line in (completed.stdout or "").splitlines():
