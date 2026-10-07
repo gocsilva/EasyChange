@@ -21,22 +21,28 @@ def _result_value(result: Any) -> dict[str, Any]:
 
 
 def _compact_transport_value(value: dict[str, Any]) -> dict[str, Any]:
-    """Remove reversible structured-response duplication only on the wire."""
-    compact = copy.deepcopy(value)
-    data = compact.get("data")
+    """Remove reversible structured-response duplication without copying huge payloads."""
+    data = value.get("data")
     if not isinstance(data, dict):
-        return compact
+        return value
     results = data.get("results")
     primary = data.get("primary")
-    if (
+    if not (
         isinstance(results, list)
         and len(results) == 1
         and isinstance(results[0], dict)
         and isinstance(primary, dict)
         and primary == results[0]
     ):
-        data["primary"] = {"$ec_ref": "results[0]"}
-        data["transport_compacted"] = True
+        return value
+
+    # Multi-megabyte reads used to be deep-copied here exactly when optical
+    # encoding started. Copy only mappings that are actually mutated.
+    compact = dict(value)
+    compact_data = dict(data)
+    compact_data["primary"] = {"$ec_ref": "results[0]"}
+    compact_data["transport_compacted"] = True
+    compact["data"] = compact_data
     return compact
 
 
@@ -75,44 +81,56 @@ def adaptive_chunk_chars(token_chars: int) -> int:
     return DEFAULT_CHUNK_CHARS
 
 
-def encode_result_chunks(result: Any, *, chunk_chars: int | None = None) -> list[str]:
-    """Encode a complete command result into bounded QR-friendly EC2 packets."""
+def _transport_components(
+    result: Any,
+    *,
+    chunk_chars: int | None = None,
+) -> tuple[dict[str, Any], bytes, str, int, int, str, str, str]:
     value = _result_value(result)
     wire_value = _compact_transport_value(value)
     raw, _compressed, token = _encode_raw(wire_value)
     size = adaptive_chunk_chars(len(token)) if chunk_chars is None else int(chunk_chars)
     if size < 120:
         raise ValueError("chunk_chars must be >= 120")
-    pieces = [token[i:i + size] for i in range(0, len(token), size)] or [""]
-    digest = hashlib.sha256(raw).hexdigest()[:16]
+    total = max(1, (len(token) + size - 1) // size)
+    digest = hashlib.sha256(raw).hexdigest()
     crc = f"{binascii.crc32(raw) & 0xffffffff:08x}"
     sequence = str(value.get("sequence") or "-")
-    total = len(pieces)
-    return [
-        json.dumps({
-            "p": PROTOCOL,
-            "v": 2,
-            "s": sequence,
-            "i": index,
-            "n": total,
-            "h": digest,
-            "c": crc,
-            "x": f"{binascii.crc32(piece.encode('ascii')) & 0xffffffff:08x}",
-            "d": piece,
-        }, ensure_ascii=False, separators=(",", ":"))
-        for index, piece in enumerate(pieces)
-    ]
+    return value, raw, token, size, total, digest, crc, sequence
 
 
-def encode_result_header(result: Any, *, chunk_count: int | None = None) -> str:
-    """Small status-first QR that can be read before the full EC2 payload."""
-    value = _result_value(result)
-    wire_value = _compact_transport_value(value)
-    raw, _compressed, token = _encode_raw(wire_value)
+def _packet_json(
+    *,
+    sequence: str,
+    index: int,
+    total: int,
+    digest: str,
+    crc: str,
+    piece: str,
+) -> str:
+    return json.dumps({
+        "p": PROTOCOL,
+        "v": 2,
+        "s": sequence,
+        "i": index,
+        "n": total,
+        "h": digest[:16],
+        "c": crc,
+        "x": f"{binascii.crc32(piece.encode('ascii')) & 0xffffffff:08x}",
+        "d": piece,
+    }, ensure_ascii=False, separators=(",", ":"))
+
+
+def _header_json(
+    value: dict[str, Any],
+    raw: bytes,
+    *,
+    total: int,
+    digest: str,
+    broadcast_count: int | None = None,
+) -> str:
     data = value.get("data") if isinstance(value.get("data"), dict) else {}
     receipt = data.get("mutation_receipt") if isinstance(data.get("mutation_receipt"), dict) else {}
-    if chunk_count is None:
-        chunk_count = max(1, (len(token) + adaptive_chunk_chars(len(token)) - 1) // adaptive_chunk_chars(len(token)))
     header = {
         "p": HEADER_PROTOCOL,
         "v": 1,
@@ -121,12 +139,107 @@ def encode_result_header(result: Any, *, chunk_count: int | None = None) -> str:
         "ok": bool(value.get("ok")),
         "rc": value.get("code"),
         "l": len(raw),
-        "n": int(chunk_count),
-        "h": hashlib.sha256(raw).hexdigest(),
+        "n": int(total),
+        "h": digest,
         "m": receipt.get("lifecycle_state") or receipt.get("state"),
         "cid": value.get("command_id"),
     }
+    if broadcast_count is not None:
+        header["w"] = max(0, min(int(total), int(broadcast_count)))
     return json.dumps(header, ensure_ascii=False, separators=(",", ":"))
+
+
+def encode_result_chunks(
+    result: Any,
+    *,
+    chunk_chars: int | None = None,
+    max_packets: int | None = None,
+    indexes: list[int] | tuple[int, ...] | None = None,
+) -> list[str]:
+    """Encode only the EC2 packet window or indexes that are actually needed.
+
+    Every packet still advertises the full packet count. Selective recovery can
+    request 16 missing indexes without materializing thousands of packet JSON
+    strings for a large result.
+    """
+    _value, _raw, token, size, total, digest, crc, sequence = _transport_components(
+        result, chunk_chars=chunk_chars
+    )
+
+    if indexes is None:
+        materialized = total if max_packets is None else max(1, min(total, int(max_packets)))
+        selected = list(range(materialized))
+    else:
+        selected: list[int] = []
+        for raw_index in indexes:
+            if isinstance(raw_index, bool):
+                raise ValueError("invalid optical chunk index")
+            index = int(raw_index)
+            if index < 0 or index >= total:
+                raise IndexError("OPTICAL_CHUNK_OUT_OF_RANGE")
+            if index not in selected:
+                selected.append(index)
+        if not selected:
+            raise ValueError("at least one optical chunk index is required")
+        if max_packets is not None:
+            selected = selected[:max(1, int(max_packets))]
+
+    packets: list[str] = []
+    for index in selected:
+        start = index * size
+        piece = token[start:start + size]
+        packets.append(_packet_json(
+            sequence=sequence,
+            index=index,
+            total=total,
+            digest=digest,
+            crc=crc,
+            piece=piece,
+        ))
+    return packets
+
+
+def encode_result_header(result: Any, *, chunk_count: int | None = None) -> str:
+    """Small status-first QR that can be read before the full EC2 payload."""
+    value, raw, _token, _size, total, digest, _crc, _sequence = _transport_components(result)
+    return _header_json(
+        value,
+        raw,
+        total=total if chunk_count is None else int(chunk_count),
+        digest=digest,
+    )
+
+
+def encode_result_bundle(
+    result: Any,
+    *,
+    chunk_chars: int | None = None,
+    max_packets: int | None = None,
+) -> tuple[list[str], str]:
+    """Encode broadcast packets and EC2H in one serialization/compression pass."""
+    value, raw, token, size, total, digest, crc, sequence = _transport_components(
+        result, chunk_chars=chunk_chars
+    )
+    materialized = total if max_packets is None else max(1, min(total, int(max_packets)))
+    packets: list[str] = []
+    for index in range(materialized):
+        piece = token[index * size:(index + 1) * size]
+        packets.append(_packet_json(
+            sequence=sequence,
+            index=index,
+            total=total,
+            digest=digest,
+            crc=crc,
+            piece=piece,
+        ))
+    header = _header_json(
+        value,
+        raw,
+        total=total,
+        digest=digest,
+        broadcast_count=materialized,
+    )
+    return packets, header
 
 
 def decode_result_chunks(payloads: list[str]) -> dict[str, Any]:
