@@ -140,3 +140,38 @@ def test_optical_recovery_renders_original_packets_without_nested_envelope(tmp_p
     assert window._optical_header_payload is None
     window.close()
     app.processEvents()
+
+
+def test_machine_mode_focus_command_never_promotes_inactive_window(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    window.show(); app.processEvents()
+    restore_calls = []
+    monkeypatch.setattr(
+        window.service.browser,
+        "restore_easychange_foreground",
+        lambda *args, **kwargs: restore_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(MainWindow, "isActiveWindow", lambda self: False)
+
+    result = window.focus_command()
+
+    assert restore_calls == []
+    assert result["focus_restore_attempted"] is False
+    assert result["focus_restore_skipped"] == "WINDOW_NOT_ACTIVE"
+    assert result["user_focus_override"] is True
+    window.close(); app.processEvents()
+
+
+def test_machine_mode_restore_callback_respects_minimized_window(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    window.show(); app.processEvents()
+    calls = []
+    monkeypatch.setattr(MainWindow, "isMinimized", lambda self: True)
+    monkeypatch.setattr(window, "focus_command", lambda: calls.append(True) or {})
+
+    window._restore_command_focus()
+
+    assert calls == []
+    window.close(); app.processEvents()

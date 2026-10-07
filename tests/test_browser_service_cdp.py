@@ -757,6 +757,73 @@ def test_restore_easychange_foreground_requires_stable_confirmation_after_focus_
     assert user32.set_foreground_calls == [100, 100]
 
 
+def test_restore_easychange_foreground_respects_user_minimize(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    browser.set_focus_window_handle_provider(lambda: 100)
+    user32 = _FakeUser32Focus(allow_focus=True)
+    user32.IsIconic = lambda hwnd: True
+    monkeypatch.setattr(browser_module, "_windows_user32", lambda: user32)
+    monkeypatch.setattr(browser_module, "_windows_kernel32", lambda: _FakeKernel32Focus())
+
+    result = browser.restore_easychange_foreground(
+        attempts=2,
+        stable_checks=1,
+        stable_interval=0,
+        respect_user_state=True,
+    )
+
+    assert result["command_focus_confirmed"] is False
+    assert result["focus_restore_attempted"] is False
+    assert result["focus_restore_skipped"] == "USER_MINIMIZED"
+    assert result["user_focus_override"] is True
+    assert user32.set_foreground_calls == []
+    assert user32.show_calls == []
+
+
+def test_browser_focus_recovery_preserves_user_switch_to_other_application(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    browser.set_focus_window_handle_provider(lambda: 100)
+    user32 = _FakeUser32Focus(allow_focus=True)
+    monkeypatch.setattr(browser_module, "_windows_user32", lambda: user32)
+    monkeypatch.setattr(browser_module, "_windows_kernel32", lambda: _FakeKernel32Focus())
+    monkeypatch.setattr(browser, "_foreground_process_name", lambda: "devenv.exe")
+
+    result = browser.restore_easychange_foreground(
+        attempts=2,
+        stable_checks=1,
+        stable_interval=0,
+        respect_user_state=True,
+        require_browser_foreground=True,
+    )
+
+    assert result["focus_restore_attempted"] is False
+    assert result["focus_restore_skipped"] == "USER_SWITCHED_APPLICATION"
+    assert result["foreground_process"] == "devenv.exe"
+    assert result["user_focus_override"] is True
+    assert user32.set_foreground_calls == []
+
+
+def test_browser_focus_recovery_may_reclaim_focus_from_edge(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    browser.set_focus_window_handle_provider(lambda: 100)
+    user32 = _FakeUser32Focus(allow_focus=True)
+    monkeypatch.setattr(browser_module, "_windows_user32", lambda: user32)
+    monkeypatch.setattr(browser_module, "_windows_kernel32", lambda: _FakeKernel32Focus())
+    monkeypatch.setattr(browser, "_foreground_process_name", lambda: "msedge.exe")
+
+    result = browser.restore_easychange_foreground(
+        attempts=2,
+        stable_checks=1,
+        stable_interval=0,
+        respect_user_state=True,
+        require_browser_foreground=True,
+    )
+
+    assert result["command_focus_confirmed"] is True
+    assert result["focus_restore_attempted"] is True
+    assert user32.set_foreground_calls == [100]
+
+
 @pytest.mark.skipif(not BrowserService.candidates(), reason="Edge/Chrome not installed")
 def test_visual_keeps_screenshot_when_position_metadata_times_out(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
@@ -866,6 +933,51 @@ def test_browser_open_gets_one_bounded_second_focus_pass_after_launch_race(tmp_p
         assert len(focus_calls) == 2
         assert result.data["command_focus_confirmed"] is True
         assert result.data["easychange_focus"]["focus_restore_second_pass"] is True
+    finally:
+        service.close()
+
+
+def test_browser_operation_user_focus_override_is_not_reported_as_failure(tmp_path, monkeypatch):
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        monkeypatch.setattr(
+            service.browser,
+            "start",
+            lambda *args, **kwargs: {
+                "alive": True,
+                "browser_launched": True,
+                "url": "data:text/html,focus",
+            },
+        )
+        focus_calls = []
+
+        def restore(**kwargs):
+            focus_calls.append(dict(kwargs))
+            return {
+                "focus_required": True,
+                "command_focus_confirmed": False,
+                "easychange_foreground": False,
+                "focus_restore_attempted": False,
+                "focus_restore_skipped": "USER_SWITCHED_APPLICATION",
+                "user_focus_override": True,
+            }
+
+        monkeypatch.setattr(service.browser, "restore_easychange_foreground", restore)
+        monkeypatch.setattr(command_module.time, "sleep", lambda seconds: None)
+
+        result = service._execute_structured({
+            "op": "operation",
+            "type": "browser_open",
+            "session_id": "focus-user-override",
+            "url": "data:text/html,focus",
+            "visible": False,
+            "timeout": 10,
+        })
+
+        assert result.ok is True
+        assert len(focus_calls) == 1
+        assert result.data["command_focus_confirmed"] is False
+        assert result.data["easychange_focus"]["user_focus_override"] is True
     finally:
         service.close()
 

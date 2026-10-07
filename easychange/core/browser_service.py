@@ -364,12 +364,49 @@ class BrowserService:
                 "focus_error": f"{type(exc).__name__}:{str(exc)[:240]}",
             }
 
+    def _foreground_process_name(self) -> str:
+        """Return the executable name that owns the current foreground window."""
+        user32 = _windows_user32()
+        kernel32 = _windows_kernel32()
+        if user32 is None or kernel32 is None:
+            return ""
+        try:
+            import ctypes
+            foreground = int(user32.GetForegroundWindow() or 0)
+            if not foreground:
+                return ""
+            pid = ctypes.c_ulong(0)
+            user32.GetWindowThreadProcessId(foreground, ctypes.byref(pid))
+            if not pid.value:
+                return ""
+            handle = kernel32.OpenProcess(0x1000, False, int(pid.value))
+            if not handle:
+                return ""
+            try:
+                size = ctypes.c_ulong(32768)
+                buffer = ctypes.create_unicode_buffer(size.value)
+                if not bool(
+                    kernel32.QueryFullProcessImageNameW(
+                        handle,
+                        0,
+                        buffer,
+                        ctypes.byref(size),
+                    )
+                ):
+                    return ""
+                return Path(buffer.value).name.casefold()
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return ""
     def restore_easychange_foreground(
         self,
         attempts: int = 6,
         *,
         stable_checks: int = 2,
         stable_interval: float = 0.05,
+        respect_user_state: bool = True,
+        require_browser_foreground: bool = False,
     ) -> dict:
         hwnd = self._easychange_hwnd()
         user32 = _windows_user32()
@@ -382,6 +419,45 @@ class BrowserService:
             }
 
         last = self.easychange_focus_state()
+
+        if respect_user_state:
+            try:
+                if bool(user32.IsIconic(hwnd)):
+                    return {
+                        **last,
+                        "focus_restore_attempted": False,
+                        "focus_restore_attempts": 0,
+                        "focus_restore_skipped": "USER_MINIMIZED",
+                        "user_focus_override": True,
+                    }
+            except Exception:
+                pass
+
+        if require_browser_foreground and respect_user_state:
+            try:
+                foreground = int(user32.GetForegroundWindow() or 0)
+            except Exception:
+                foreground = 0
+            if foreground and foreground != hwnd:
+                owner = self._foreground_process_name()
+                if owner not in {"msedge.exe", "chrome.exe"}:
+                    return {
+                        **last,
+                        "focus_restore_attempted": False,
+                        "focus_restore_attempts": 0,
+                        "focus_restore_skipped": "USER_SWITCHED_APPLICATION",
+                        "user_focus_override": True,
+                        "foreground_process": owner or None,
+                    }
+
+        if last.get("command_focus_confirmed"):
+            return {
+                **last,
+                "focus_restore_attempted": False,
+                "focus_restore_attempts": 0,
+                "focus_restore_skipped": "ALREADY_FOREGROUND",
+            }
+
         count = max(1, min(10, int(attempts or 1)))
         required_stable_checks = max(1, min(8, int(stable_checks or 1)))
         stable_interval = max(0.0, min(0.25, float(stable_interval or 0.0)))

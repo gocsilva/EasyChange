@@ -1338,11 +1338,14 @@ class CommandService:
                     attempts=10 if kind == "browser_open" else 6,
                     stable_checks=5 if kind == "browser_open" else 2,
                     stable_interval=0.08 if kind == "browser_open" else 0.04,
+                    respect_user_state=True,
+                    require_browser_foreground=True,
                 )
                 if (
                     kind == "browser_open"
                     and focus.get("focus_required")
                     and not focus.get("command_focus_confirmed")
+                    and not focus.get("user_focus_override")
                 ):
                     # A newly launched Edge/Chrome can steal foreground again
                     # while its first window finishes activating. Wait once,
@@ -1352,6 +1355,8 @@ class CommandService:
                         attempts=10,
                         stable_checks=5,
                         stable_interval=0.08,
+                        respect_user_state=True,
+                        require_browser_foreground=True,
                     )
                     focus["focus_restore_second_pass"] = True
                 data = self._scrub_browser_secret_values(data, secret_sources)
@@ -1363,7 +1368,11 @@ class CommandService:
                         "secret_refs_used": used_secret_refs,
                         "secret_values_returned": False,
                     }
-                if focus.get("focus_required") and not focus.get("command_focus_confirmed"):
+                if (
+                    focus.get("focus_required")
+                    and not focus.get("command_focus_confirmed")
+                    and not focus.get("user_focus_override")
+                ):
                     return Result(
                         False,
                         kind,
@@ -1383,6 +1392,8 @@ class CommandService:
                     attempts=10 if kind == "browser_open" else 6,
                     stable_checks=5 if kind == "browser_open" else 2,
                     stable_interval=0.08 if kind == "browser_open" else 0.04,
+                    respect_user_state=True,
+                    require_browser_foreground=True,
                 )
                 error = self._scrub_browser_secret_values(str(exc), secret_sources)
                 diagnostics = getattr(exc, "diagnostics", {})

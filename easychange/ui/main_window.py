@@ -229,13 +229,31 @@ class MainWindow(QMainWindow):
         shortcut = QShortcut(QKeySequence(sequence), self); shortcut.activated.connect(callback)
 
     def focus_command(self) -> dict:
-        focus = self.service.browser.restore_easychange_foreground()
+        # Keep focus inside COMMAND only while EasyChange is already active.
+        # This helper must never promote or unminimize the application.
+        state = self.service.browser.easychange_focus_state()
+        if self.isMinimized():
+            return {
+                **state,
+                "focus_restore_attempted": False,
+                "focus_restore_skipped": "USER_MINIMIZED",
+                "user_focus_override": True,
+            }
+        if not self.isActiveWindow():
+            return {
+                **state,
+                "focus_restore_attempted": False,
+                "focus_restore_skipped": "WINDOW_NOT_ACTIVE",
+                "user_focus_override": True,
+            }
         self.command.setFocus(Qt.FocusReason.ShortcutFocusReason)
         QApplication.processEvents()
         state = self.service.browser.easychange_focus_state()
-        if state.get("focus_required"):
-            focus = {**focus, **state}
-        return focus
+        return {
+            **state,
+            "focus_restore_attempted": False,
+            "focus_restore_skipped": "UI_INTERNAL_FOCUS_ONLY",
+        }
 
     def eventFilter(self, watched, event) -> bool:
         if watched is self.command and event.type() == QEvent.Type.FocusOut and self._machine and not self._workspace_dialog_open:
@@ -243,8 +261,13 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def _restore_command_focus(self) -> None:
-        if not self._workspace_dialog_open:
-            self.focus_command()
+        if (
+            self._workspace_dialog_open
+            or self.isMinimized()
+            or not self.isActiveWindow()
+        ):
+            return
+        self.focus_command()
 
     def select_workspace(self) -> None:
         self._workspace_dialog_open = True
