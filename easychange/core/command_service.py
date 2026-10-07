@@ -1480,6 +1480,19 @@ class CommandService:
                         )
                     except (TypeError, ValueError, IndexError) as exc:
                         return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_CHUNK")
+                elif query_kind == "result_chunks":
+                    try:
+                        raw_indexes = query_item.get("chunk_indexes")
+                        if not isinstance(raw_indexes, list) or not 1 <= len(raw_indexes) <= 8:
+                            raise ValueError("RESULT_CHUNK_INDEXES_REQUIRES_1_TO_8_ITEMS")
+                        data = self.result_store.chunks(
+                            target_sequence,
+                            raw_indexes,
+                            chunk_bytes=int(query_item.get("chunk_bytes") or 1536),
+                            max_chunks=8,
+                        )
+                    except (TypeError, ValueError, IndexError) as exc:
+                        return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_CHUNK")
                 else:
                     original_result = self.result_store.result(target_sequence)
                     if original_result is None:
