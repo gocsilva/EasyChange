@@ -2710,15 +2710,49 @@ class CommandService:
             "capabilities_sha256": digest,
         }
 
+    def _ensure_index_freshness(self) -> dict:
+        """Demand-refresh Git deltas before index-backed discovery.
+
+        A warm SQLite index previously stayed stale until callers explicitly
+        enabled :watch. Use the incremental Git watcher synchronously and at a
+        bounded cadence; non-Git workspaces keep their existing explicit-watch
+        behavior because a full filesystem refresh is materially more expensive.
+        """
+        if not (self.workspace.root_path / ".git").exists():
+            return {
+                "freshness_poll": False,
+                "backend": "non-git-explicit-watch",
+            }
+        if self.watcher is None:
+            self.watcher = WorkspaceWatcher(self.indexer)
+        try:
+            result = self.watcher.poll_if_due(0.75)
+            return dict(result)
+        except (OSError, RuntimeError) as exc:
+            # Search still has cold git-grep / existing index fallbacks. A
+            # transient watcher failure must be visible but not make discovery
+            # unusable.
+            return {
+                "freshness_poll": False,
+                "backend": "git-incremental",
+                "error": f"{type(exc).__name__}:{str(exc)[:300]}",
+            }
+
     def _dispatch(self, name: str, args: list[str]) -> dict:
+        index_sensitive = {
+            "search", "locate", "study", "discover-many",
+            "symbols", "symbol", "definition", "references",
+            "implementations", "outline",
+        }
         if name in {
             "files", "tree", "projects", "next", "prev",
-            "search", "locate", "study", "discover-many",
-            "symbols", "symbol", "definition", "references", "implementations", "outline",
+            *index_sensitive,
         } and self._transaction_dirty_paths:
             # Preserve read-after-write semantics while allowing mutation-only
             # batches to index each changed file once at commit.
             self._flush_transaction_index()
+        if name in index_sensitive:
+            self._ensure_index_freshness()
         if name == "command-schema":
             _require(args, 1, "command")
             if len(args) != 1:
