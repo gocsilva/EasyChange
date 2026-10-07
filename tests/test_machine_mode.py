@@ -13,11 +13,20 @@ from easychange.core.workspace import Workspace
 from easychange.ui.main_window import MainWindow
 
 
+def _drain_optical(window, app, limit: int = 256) -> None:
+    for _ in range(limit):
+        app.processEvents()
+        if window._optical_render_pending is None:
+            return
+    raise AssertionError("optical renderer did not quiesce")
+
+
 def test_machine_mode_keeps_command_focus_and_renders_sequence_qr(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
     window.show(); app.processEvents()
-    window._run_command(":ec QGUI1234 :state"); app.processEvents()
+    window._run_command(":ec QGUI1234 :state")
+    _drain_optical(window, app)
     assert window.output.toPlainText().startswith("EC1 QGUI1234 OK")
     assert window.machine_qr.isVisible()
     assert window.machine_qr.pixmap() is not None
@@ -39,7 +48,7 @@ def test_machine_mode_uses_16_slot_optical_burst_for_large_results(tmp_path):
     window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
     window.show(); app.processEvents()
     window._run_command(":ec QGUI5678 :read large.py 1 900")
-    app.processEvents()
+    _drain_optical(window, app)
     assert not window.tree.isVisible()
     assert len(window.machine_qrs) == 16
     assert len(window._optical_payloads) > 8
@@ -63,12 +72,12 @@ def test_machine_mode_reuses_cached_qr_pixmaps(tmp_path):
     window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
     window.show(); app.processEvents()
     window._run_command(":ec QCACHE123 :read large.py 1 500")
-    app.processEvents()
+    _drain_optical(window, app)
     first_payload = window._optical_payloads[0]
     first_pixmap = window._optical_pixmaps[first_payload]
     window._optical_page = 0
     window._render_optical_page()
-    app.processEvents()
+    _drain_optical(window, app)
     assert window._optical_pixmaps[first_payload].cacheKey() == first_pixmap.cacheKey()
     window.close(); app.processEvents()
 
@@ -82,28 +91,31 @@ def test_optical_burst_pads_final_page_to_all_16_visible_slots(tmp_path):
     window._optical_burst = True
     window._optical_page = 1
     window._render_optical_page()
-    app.processEvents()
+    _drain_optical(window, app)
     assert all(label.pixmap() is not None for label in window.machine_qrs)
     window.close(); app.processEvents()
 
 
 
 def test_five_chunk_result_enters_single_page_burst_with_redundancy(tmp_path, monkeypatch):
-    from easychange.ui.main_window import MainWindow
     from easychange.core.result import Result
 
+    app = QApplication.instance() or QApplication([])
     window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
     monkeypatch.setattr(
-        "easychange.ui.main_window.encode_result_chunks",
-        lambda result: [f'{{"p":"EC2","s":"QX","i":{i},"n":5,"d":"{i}"}}' for i in range(5)],
+        "easychange.ui.main_window.encode_result_bundle",
+        lambda result, **kwargs: (
+            [json.dumps({"p":"EC2","s":"QX","i":i,"n":5,"d":str(i)}, separators=(",", ":")) for i in range(5)],
+            '{"p":"EC2H","s":"QX","n":5}',
+        ),
     )
     window._update_machine_qr(Result(True, "study", {"x": 1}, sequence="QX"))
+    _drain_optical(window, app)
     assert window._optical_burst is True
     assert window._optical_timer.isActive() is False
     assert len(window._optical_payloads) == 5
     assert sum(1 for label in window.machine_qrs if label.pixmap() and not label.pixmap().isNull()) == 16
-    window.close()
-
+    window.close(); app.processEvents()
 
 def test_optical_recovery_renders_original_packets_without_nested_envelope(tmp_path):
     from easychange.core.result import Result
@@ -130,7 +142,7 @@ def test_optical_recovery_renders_original_packets_without_nested_envelope(tmp_p
     )
 
     window._update_machine_qr(recovery)
-    app.processEvents()
+    _drain_optical(window, app)
 
     assert len(window._optical_payloads) == 2
     decoded = [json.loads(payload) for payload in window._optical_payloads]
@@ -269,3 +281,30 @@ def test_explicit_human_gui_launch_resets_persisted_machine_transport(tmp_path):
         assert window.service.state_store.data["output_mode"] == "text"
     finally:
         window.close(); app.processEvents()
+
+
+def test_optical_render_is_non_reentrant_and_incremental(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    window.show(); app.processEvents()
+    window._optical_payloads = [f"payload-{index}" for index in range(8)]
+    window._optical_header_payload = '{"p":"EC2H","s":"QASYNC","n":8}'
+    window._optical_burst = True
+    builds = []
+    original = window._build_optical_pixmap
+
+    def counted(payload):
+        builds.append(payload)
+        return original(payload)
+
+    monkeypatch.setattr(window, "_build_optical_pixmap", counted)
+    window._render_optical_page()
+    pending = window._optical_render_pending
+    assert isinstance(pending, dict)
+    assert builds == []
+    window._render_optical_page()
+    assert window._optical_render_pending is pending
+    _drain_optical(window, app)
+    assert len(builds) == len(set(builds))
+    assert window._optical_render_pending is None
+    window.close(); app.processEvents()
