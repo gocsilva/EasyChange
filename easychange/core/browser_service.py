@@ -1159,6 +1159,10 @@ class BrowserService:
                             )
                             if candidate:
                                 self._connect_target(key, str(candidate["target_id"]))
+                            else:
+                                raise LookupError(
+                                    f"BROWSER_TAB_NOT_FOUND_FOR_URL:{url_contains[:300]}"
+                                )
                         return {**self.state(key), "reused": True}
                 except Exception:
                     try:
@@ -1727,9 +1731,22 @@ class BrowserService:
         # durable profile after an EasyChange restart.
         try:
             attached = self.attach(session_id, timeout=min(5.0, timeout))
+            target_strategy = "attached_target"
             if url and url != "about:blank":
-                self.navigate(session_id, url, timeout)
-                attached = self.state(session_id)
+                profile_mode = str(attached.get("profile_mode") or "")
+                if profile_mode == "existing_human":
+                    created = self.new_tab(
+                        session_id,
+                        url=str(url),
+                        activate=True,
+                    )
+                    attached = self.state(session_id)
+                    target_strategy = "new_tab_preserve_human_target"
+                    attached["easychange_created_target_id"] = created.get("target_id")
+                else:
+                    self.navigate(session_id, url, timeout)
+                    attached = self.state(session_id)
+                    target_strategy = "navigate_easychange_controlled_target"
             if visible:
                 try:
                     self.show(session_id)
@@ -1738,6 +1755,7 @@ class BrowserService:
             return {
                 **attached,
                 "attach_first": True,
+                "target_strategy": target_strategy,
                 "browser_launched": False,
                 "profile_created": False,
                 "profile_persistent": True,
