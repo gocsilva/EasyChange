@@ -2511,6 +2511,7 @@ class CommandService:
             "swagger_browser_control": True,
             "browser_launch_allowed": False,
             "browser_profile_creation_allowed": False,
+            "operation_profiles": True,
         }
         fingerprint_source = {
             "core_version": __version__,
@@ -2520,6 +2521,7 @@ class CommandService:
             "secret_protocol_version": "easychange.secret/1",
             "db_protocol_version": "easychange.db/1",
             "supported_operations": supported_operations,
+            "operation_profiles": structured.get("operations") or {},
             "feature_flags": feature_flags,
         }
         digest = hashlib.sha256(
@@ -2539,6 +2541,7 @@ class CommandService:
             "db_protocol_version": "easychange.db/1",
             "supported_operations": supported_operations,
             "unsupported_operations": [],
+            "operation_profiles": structured.get("operations") or {},
             "feature_flags": feature_flags,
             "max_payload": {
                 "decoded_command_bytes": 262144,
