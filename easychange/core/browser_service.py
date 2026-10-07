@@ -124,6 +124,8 @@ class _WebSocket:
         self._state_lock = threading.RLock()
         self._response_ready = threading.Condition(self._state_lock)
         self._responses: dict[int, dict] = {}
+        self._pending_ids: set[int] = set()
+        self._late_responses_dropped = 0
         self._events = deque()
         self._event_limit = 512
         self._events_dropped = 0
@@ -244,7 +246,13 @@ class _WebSocket:
         with self._response_ready:
             raw_id = message.get("id")
             if isinstance(raw_id, int):
-                self._responses[raw_id] = message
+                if raw_id in self._pending_ids:
+                    self._responses[raw_id] = message
+                else:
+                    # Responses that arrive after their caller timed out are no
+                    # longer useful. Keeping them forever caused an unbounded
+                    # dictionary leak during repeated slow CDP operations.
+                    self._late_responses_dropped += 1
             elif isinstance(message.get("method"), str):
                 self._events.append(message)
                 while len(self._events) > self._event_limit:
@@ -287,33 +295,38 @@ class _WebSocket:
                 raise CdpError("CDP_WEBSOCKET_READER_FAILED:" + self._reader_error)
             self._next_id += 1
             call_id = self._next_id
+            self._pending_ids.add(call_id)
         payload = json.dumps(
             {"id": call_id, "method": method, "params": dict(params or {})},
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
-        self._send_frame(payload)
-
-        deadline = time.monotonic() + max(0.1, float(timeout))
-        with self._response_ready:
-            while True:
-                message = self._responses.pop(call_id, None)
-                if isinstance(message, dict):
-                    error = message.get("error")
-                    if isinstance(error, dict):
-                        raise CdpError(
-                            f"CDP_ERROR:{method}:{error.get('code')}:{error.get('message')}"
-                        )
-                    result = message.get("result")
-                    return result if isinstance(result, dict) else {}
-                if self._reader_error:
-                    raise CdpError("CDP_WEBSOCKET_READER_FAILED:" + self._reader_error)
-                if self._closed:
-                    raise CdpError("CDP_WEBSOCKET_CLOSED")
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError(f"CDP_TIMEOUT:{method}")
-                self._response_ready.wait(timeout=min(0.25, remaining))
+        try:
+            self._send_frame(payload)
+            deadline = time.monotonic() + max(0.1, float(timeout))
+            with self._response_ready:
+                while True:
+                    message = self._responses.pop(call_id, None)
+                    if isinstance(message, dict):
+                        error = message.get("error")
+                        if isinstance(error, dict):
+                            raise CdpError(
+                                f"CDP_ERROR:{method}:{error.get('code')}:{error.get('message')}"
+                            )
+                        result = message.get("result")
+                        return result if isinstance(result, dict) else {}
+                    if self._reader_error:
+                        raise CdpError("CDP_WEBSOCKET_READER_FAILED:" + self._reader_error)
+                    if self._closed:
+                        raise CdpError("CDP_WEBSOCKET_CLOSED")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(f"CDP_TIMEOUT:{method}")
+                    self._response_ready.wait(timeout=min(0.25, remaining))
+        finally:
+            with self._response_ready:
+                self._pending_ids.discard(call_id)
+                self._responses.pop(call_id, None)
 
     def drain_events(self, limit: int = 100) -> list[dict]:
         with self._state_lock:
@@ -329,6 +342,8 @@ class _WebSocket:
                 "reader_alive": bool(self._reader.is_alive()) if hasattr(self, "_reader") else False,
                 "pending_events": len(self._events),
                 "events_dropped": int(self._events_dropped),
+                "pending_calls": len(self._pending_ids),
+                "late_responses_dropped": int(self._late_responses_dropped),
                 "reader_error": self._reader_error,
             }
 
@@ -2874,7 +2889,17 @@ __BODY__
         pump: bool = True,
     ) -> dict:
         socket_channel, normalized = self._cdp_channel(session_id, channel)
-        if pump:
+        event_status_before = (
+            socket_channel.event_status()
+            if hasattr(socket_channel, "event_status")
+            else {"reader_alive": False}
+        )
+        pump_performed = False
+        # Continuous-reader sockets already receive events while idle. Retain
+        # pump only as a compatibility/recovery path for legacy/fake channels;
+        # issuing Runtime.evaluate on every poll wasted one CDP round trip and
+        # could itself time out under a busy page.
+        if pump and not bool(event_status_before.get("reader_alive")):
             if normalized == "page":
                 socket_channel.call(
                     "Runtime.evaluate",
@@ -2883,6 +2908,7 @@ __BODY__
                 )
             else:
                 socket_channel.call("Browser.getVersion", timeout=2.0)
+            pump_performed = True
         events = socket_channel.drain_events(max(0, min(512, int(limit or 0))))
         event_status = (
             socket_channel.event_status()
@@ -2891,6 +2917,8 @@ __BODY__
                 "reader_alive": False,
                 "pending_events": None,
                 "events_dropped": 0,
+                "pending_calls": None,
+                "late_responses_dropped": 0,
                 "reader_error": None,
             }
         )
@@ -2902,6 +2930,8 @@ __BODY__
             "events": self._redact_value(events),
             "event_reader": event_status,
             "continuous_reader": bool(event_status.get("reader_alive")),
+            "pump_requested": bool(pump),
+            "pump_performed": pump_performed,
             "secrets_exposed": False,
         }
 
