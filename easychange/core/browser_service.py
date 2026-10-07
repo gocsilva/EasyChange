@@ -93,6 +93,15 @@ class _BoundedProcessCapture:
 
 
 class _WebSocket:
+    """Small CDP WebSocket client with one continuous reader.
+
+    Only the reader thread consumes socket frames. Calls publish requests and
+    wait on correlated response ids, while unsolicited CDP events are buffered
+    continuously. This avoids the historical pump-only behavior where Network/
+    console events were visible only while another command happened to be
+    waiting for a response.
+    """
+
     def __init__(self, url: str, timeout: float = 5.0) -> None:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in {"ws", "wss"}:
@@ -111,10 +120,26 @@ class _WebSocket:
         self.sock = sock
         self.sock.settimeout(timeout)
         self._next_id = 0
-        self._lock = threading.RLock()
-        self._events: list[dict] = []
+        self._send_lock = threading.RLock()
+        self._state_lock = threading.RLock()
+        self._response_ready = threading.Condition(self._state_lock)
+        self._responses: dict[int, dict] = {}
+        self._events = deque()
         self._event_limit = 512
+        self._events_dropped = 0
+        self._reader_error: str | None = None
+        self._closed = False
         self._handshake()
+        # The continuous reader owns recv() after the HTTP upgrade. A short
+        # socket timeout lets close() stop the daemon promptly without turning
+        # idle event streams into failures.
+        self.sock.settimeout(0.5)
+        self._reader = threading.Thread(
+            target=self._reader_loop,
+            name="easychange-cdp-reader",
+            daemon=True,
+        )
+        self._reader.start()
 
     def _handshake(self) -> None:
         key = base64.b64encode(os.urandom(16)).decode("ascii")
@@ -176,7 +201,8 @@ class _WebSocket:
             header.extend(struct.pack("!Q", length))
         header.extend(mask)
         masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
-        self.sock.sendall(bytes(header) + masked)
+        with self._send_lock:
+            self.sock.sendall(bytes(header) + masked)
 
     def _recv_text(self) -> str:
         fragments = bytearray()
@@ -212,30 +238,67 @@ class _WebSocket:
             if fin:
                 return fragments.decode("utf-8", errors="replace")
 
+    def _dispatch_message(self, message: dict) -> None:
+        if not isinstance(message, dict):
+            return
+        with self._response_ready:
+            raw_id = message.get("id")
+            if isinstance(raw_id, int):
+                self._responses[raw_id] = message
+            elif isinstance(message.get("method"), str):
+                self._events.append(message)
+                while len(self._events) > self._event_limit:
+                    self._events.popleft()
+                    self._events_dropped += 1
+            self._response_ready.notify_all()
+
+    def _reader_loop(self) -> None:
+        while True:
+            with self._state_lock:
+                if self._closed:
+                    return
+            try:
+                raw = self._recv_text()
+            except socket.timeout:
+                continue
+            except Exception as exc:
+                with self._response_ready:
+                    if not self._closed:
+                        self._reader_error = f"{type(exc).__name__}:{str(exc)[:500]}"
+                    self._response_ready.notify_all()
+                return
+            try:
+                message = json.loads(raw)
+            except json.JSONDecodeError:
+                # A malformed CDP message is transport damage, not a valid
+                # event. Keep the socket alive and surface a bounded counter by
+                # recording a synthetic diagnostic event.
+                message = {
+                    "method": "EasyChange.cdpMalformedMessage",
+                    "params": {"chars": len(raw)},
+                }
+            self._dispatch_message(message)
+
     def call(self, method: str, params: dict | None = None, timeout: float = 10.0) -> dict:
-        with self._lock:
+        with self._state_lock:
+            if self._closed:
+                raise CdpError("CDP_WEBSOCKET_CLOSED")
+            if self._reader_error:
+                raise CdpError("CDP_WEBSOCKET_READER_FAILED:" + self._reader_error)
             self._next_id += 1
             call_id = self._next_id
-            payload = json.dumps(
-                {"id": call_id, "method": method, "params": dict(params or {})},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            old_timeout = self.sock.gettimeout()
-            self.sock.settimeout(max(0.1, float(timeout)))
-            try:
-                self._send_frame(payload)
-                deadline = time.monotonic() + max(0.1, float(timeout))
-                while time.monotonic() < deadline:
-                    message = json.loads(self._recv_text())
-                    if not isinstance(message, dict):
-                        continue
-                    if message.get("id") != call_id:
-                        if isinstance(message.get("method"), str):
-                            self._events.append(message)
-                            if len(self._events) > self._event_limit:
-                                self._events = self._events[-self._event_limit:]
-                        continue
+        payload = json.dumps(
+            {"id": call_id, "method": method, "params": dict(params or {})},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self._send_frame(payload)
+
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        with self._response_ready:
+            while True:
+                message = self._responses.pop(call_id, None)
+                if isinstance(message, dict):
                     error = message.get("error")
                     if isinstance(error, dict):
                         raise CdpError(
@@ -243,29 +306,53 @@ class _WebSocket:
                         )
                     result = message.get("result")
                     return result if isinstance(result, dict) else {}
-                raise TimeoutError(f"CDP_TIMEOUT:{method}")
-            finally:
-                self.sock.settimeout(old_timeout)
+                if self._reader_error:
+                    raise CdpError("CDP_WEBSOCKET_READER_FAILED:" + self._reader_error)
+                if self._closed:
+                    raise CdpError("CDP_WEBSOCKET_CLOSED")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"CDP_TIMEOUT:{method}")
+                self._response_ready.wait(timeout=min(0.25, remaining))
 
     def drain_events(self, limit: int = 100) -> list[dict]:
-        with self._lock:
+        with self._state_lock:
             count = max(0, min(self._event_limit, int(limit or 0)))
-            if not count:
-                return []
-            values = self._events[-count:]
-            if values:
-                del self._events[-len(values):]
+            values = []
+            while self._events and len(values) < count:
+                values.append(self._events.popleft())
             return values
 
+    def event_status(self) -> dict:
+        with self._state_lock:
+            return {
+                "reader_alive": bool(self._reader.is_alive()) if hasattr(self, "_reader") else False,
+                "pending_events": len(self._events),
+                "events_dropped": int(self._events_dropped),
+                "reader_error": self._reader_error,
+            }
+
     def close(self) -> None:
+        with self._response_ready:
+            if self._closed:
+                return
+            self._closed = True
+            self._response_ready.notify_all()
         try:
             self._send_frame(b"", opcode=8)
         except Exception:
             pass
         try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
             self.sock.close()
         except OSError:
             pass
+        reader = getattr(self, "_reader", None)
+        if reader is not None and reader is not threading.current_thread():
+            reader.join(timeout=0.75)
 
 
 @dataclass
@@ -2061,8 +2148,14 @@ return {page:{url:location.href,title:document.title,scrollX:window.scrollX,scro
                 "({readyState:document.readyState,url:location.href,title:document.title})",
                 timeout=min(2.0, max(0.2, deadline - time.monotonic())),
             )
-            if isinstance(last, dict) and last.get("readyState") in {"interactive", "complete"}:
-                return last
+            if isinstance(last, dict):
+                current_url = str(last.get("url") or "")
+                if current_url.casefold().startswith("chrome-error://"):
+                    raise BrowserError(
+                        "BROWSER_NAVIGATION_ERROR_PAGE:" + current_url[:500]
+                    )
+                if last.get("readyState") in {"interactive", "complete"}:
+                    return last
             time.sleep(0.04)
         raise TimeoutError(f"BROWSER_READY_TIMEOUT:{last}")
 
@@ -2769,12 +2862,24 @@ __BODY__
             else:
                 socket_channel.call("Browser.getVersion", timeout=2.0)
         events = socket_channel.drain_events(max(0, min(512, int(limit or 0))))
+        event_status = (
+            socket_channel.event_status()
+            if hasattr(socket_channel, "event_status")
+            else {
+                "reader_alive": False,
+                "pending_events": None,
+                "events_dropped": 0,
+                "reader_error": None,
+            }
+        )
         return {
             "schema": "easychange.browser-cdp-events/1",
             "session_id": self._safe_id(session_id),
             "channel": normalized,
             "count": len(events),
             "events": self._redact_value(events),
+            "event_reader": event_status,
+            "continuous_reader": bool(event_status.get("reader_alive")),
             "secrets_exposed": False,
         }
 
