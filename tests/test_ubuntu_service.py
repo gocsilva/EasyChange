@@ -336,3 +336,101 @@ def test_structured_mutation_profile_covers_non_file_side_effects():
     assert capabilities["db_query"]["conditional_side_effect"] is True
     assert capabilities["k8s_get"]["side_effect"] is False
     assert capabilities["read"]["conditional_side_effect"] is False
+
+
+
+def test_unknown_kubectl_verb_fails_closed_as_mutating():
+    service = UbuntuService(_FakeProcesses())
+    _session(service)
+
+    with pytest.raises(
+        UbuntuError,
+        match="KUBECTL_MUTATION_REQUIRES_ALLOW_MUTATION",
+    ):
+        service.kubectl(
+            "hml",
+            ["some-plugin", "do-dangerous-thing"],
+            job_id="JPLUGIN",
+            allow_mutation=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["debug", "pod/app"],
+        ["certificate", "approve", "csr-a"],
+    ],
+)
+def test_new_mutating_kubectl_verbs_require_explicit_gate(args):
+    service = UbuntuService(_FakeProcesses())
+    _session(service)
+
+    with pytest.raises(
+        UbuntuError,
+        match="KUBECTL_MUTATION_REQUIRES_ALLOW_MUTATION",
+    ):
+        service.kubectl(
+            "hml",
+            args,
+            job_id="JNEWVERB",
+            allow_mutation=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["completion", "bash"],
+        ["options"],
+        ["help"],
+    ],
+)
+def test_known_read_only_meta_kubectl_verbs_stay_read_only(monkeypatch, args):
+    service = UbuntuService(_FakeProcesses())
+    _session(service)
+    monkeypatch.setattr(
+        service,
+        "_exec_job",
+        lambda session, argv, **kwargs: {
+            "terminal": True,
+            "return_code": 0,
+            "stdout": "ok\n",
+            "stderr": "",
+        },
+    )
+
+    result = service.kubectl(
+        "hml",
+        args,
+        job_id="JMETA",
+        allow_mutation=False,
+    )
+
+    assert result["kubectl"]["mutation"] is False
+
+
+@pytest.mark.parametrize(
+    "args,namespace",
+    [
+        (["delete", "job", "tmp", "--namespace=other"], ""),
+        (["delete", "job", "tmp", "-n", "other"], ""),
+        (["delete", "job", "tmp"], "other"),
+    ],
+)
+def test_kubectl_mutation_cannot_escape_pinned_namespace(args, namespace):
+    service = UbuntuService(_FakeProcesses())
+    _session(service)
+
+    with pytest.raises(
+        UbuntuError,
+        match="KUBECTL_MUTATION_NAMESPACE_OVERRIDE_FORBIDDEN:hml",
+    ):
+        service.kubectl(
+            "hml",
+            args,
+            job_id="JNS",
+            namespace=namespace,
+            allow_mutation=True,
+            confirm_context="aks-hml",
+        )
