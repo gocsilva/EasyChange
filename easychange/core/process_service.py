@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from dataclasses import dataclass
 
+from .subprocess_utils import hidden_console_kwargs
+
 
 _DIAGNOSTIC_RE = re.compile(
     r"(?:\berror\b|\bwarning\b|\bfailed\b|\bfailure\b|\bexception\b|"
@@ -186,6 +188,7 @@ class ProcessService:
                     text=True,
                     timeout=2,
                     check=False,
+                    **hidden_console_kwargs(),
                 )
             except (OSError, subprocess.SubprocessError):
                 return False
@@ -432,7 +435,7 @@ class ProcessService:
         env: dict[str, str] | None = None,
         redact_values: list[str] | tuple[str, ...] | None = None,
         metadata: dict | None = None,
-        no_window: bool = False,
+        no_window: bool = True,
     ) -> dict:
         requested_argv = [str(item) for item in (argv or [])]
         if not requested_argv or not requested_argv[0]:
@@ -1118,6 +1121,7 @@ class ProcessService:
                     shell=False,
                     env=launch_env,
                     bufsize=0,
+                    **hidden_console_kwargs(),
                 )
                 assert proc.stdout is not None and proc.stderr is not None
                 pumps = (
@@ -1158,6 +1162,7 @@ class ProcessService:
                         check=False,
                         shell=False,
                         env=launch_env,
+                        **hidden_console_kwargs(),
                     )
                 returncode = completed.returncode
 
@@ -1238,7 +1243,7 @@ class ProcessService:
         *,
         env: dict[str, str] | None = None,
         redact_values: list[str] | tuple[str, ...] | None = None,
-        no_window: bool = False,
+        no_window: bool = True,
     ) -> dict:
         requested_argv, exec_argv, launch_env, cleanup_paths = self._prepare_launch(
             argv, env=env
@@ -1250,9 +1255,7 @@ class ProcessService:
         stdout_path, stderr_path = self.root / f"{process_id}.out", self.root / f"{process_id}.err"
         secure_values = tuple(str(value) for value in (redact_values or ()) if str(value))
         pump_threads: tuple[threading.Thread, ...] = ()
-        popen_extra: dict = {}
-        if bool(no_window) and os.name == "nt":
-            popen_extra["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        popen_extra: dict = hidden_console_kwargs() if bool(no_window) else {}
         if secure_values:
             proc = subprocess.Popen(
                 exec_argv,
