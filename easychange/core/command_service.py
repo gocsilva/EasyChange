@@ -2798,13 +2798,83 @@ class CommandService:
         if name == "health":
             index = self.indexer.status()
             processes = self.processes.list()
-            active_processes = sum(1 for item in processes if str(item.get("state") or "").upper() == "RUNNING")
+            active_processes = sum(
+                1 for item in processes
+                if str(item.get("state") or "").upper() == "RUNNING"
+            )
             transaction_state = "ACTIVE" if self.transaction is not None else "NONE"
+            maintenance = self.maintenance_report()
+            browser_health = self.browser.health_summary()
+            broker_status = self.secret_broker.status()
+            result_root_ready = bool(
+                self.result_store.root.exists()
+                and self.result_store.root.is_dir()
+            )
+            try:
+                result_temp_files = sum(
+                    1 for _ in self.result_store.root.glob("*.tmp")
+                )
+            except OSError:
+                result_temp_files = -1
+
             degraded_reasons = []
             if transaction_state == "ACTIVE":
                 degraded_reasons.append("TRANSACTION_ACTIVE")
-            if str(index.get("state") or index.get("status") or "").upper() in {"FAILED", "ERROR"}:
+            index_state = str(
+                index.get("state") or index.get("status") or ""
+            ).upper()
+            if index_state in {"FAILED", "ERROR"}:
                 degraded_reasons.append("INDEX_ERROR")
+            if not result_root_ready:
+                degraded_reasons.append("DURABLE_RESULT_STORE_UNAVAILABLE")
+            if not bool(browser_health.get("healthy", True)):
+                degraded_reasons.append("BROWSER_TRANSPORT_DEGRADED")
+            disk_budget = (
+                maintenance.get("disk_budget")
+                if isinstance(maintenance, dict)
+                and isinstance(maintenance.get("disk_budget"), dict)
+                else {}
+            )
+            if bool(disk_budget.get("over_budget")):
+                degraded_reasons.append("EASYCHANGE_DISK_BUDGET_EXCEEDED")
+
+            subsystems = {
+                "index": {
+                    "healthy": index_state not in {"FAILED", "ERROR"},
+                    "state": index_state or "UNKNOWN",
+                },
+                "durable_results": {
+                    "healthy": result_root_ready,
+                    "state": "READY" if result_root_ready else "UNAVAILABLE",
+                    "temporary_files": result_temp_files,
+                    "max_results": self.result_store.max_results,
+                    "ttl_seconds": self.result_store.ttl_seconds,
+                    "active_ttl_seconds": self.result_store.active_ttl_seconds,
+                },
+                "processes": {
+                    "healthy": True,
+                    "state": "READY",
+                    "count": len(processes),
+                    "active": active_processes,
+                },
+                "secret_broker": {
+                    "healthy": True,
+                    "state": "READY",
+                    "count": int(broker_status.get("count") or 0),
+                    "expires_at": broker_status.get("expires_at"),
+                    "secret_values_returned": False,
+                },
+                "browser_transport": browser_health,
+                "maintenance": {
+                    "healthy": not bool(disk_budget.get("over_budget")),
+                    "state": (
+                        "DEGRADED"
+                        if bool(disk_budget.get("over_budget"))
+                        else "READY"
+                    ),
+                    "disk_budget": disk_budget,
+                },
+            }
             return {
                 "healthy": not degraded_reasons,
                 "state": "READY" if not degraded_reasons else "DEGRADED",
@@ -2816,10 +2886,11 @@ class CommandService:
                 "transport": self.state_store.data.get("transport", "local"),
                 "process_count": len(processes),
                 "active_processes": active_processes,
-                "durable_results": True,
+                "durable_results": result_root_ready,
+                "subsystems": subsystems,
                 "capability_manifest": self._capability_manifest(),
                 "structured_operations": structured_capabilities(),
-                "maintenance": self.maintenance_report(),
+                "maintenance": maintenance,
                 "degraded_reasons": degraded_reasons,
             }
         if name == "state":
