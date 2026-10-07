@@ -1,5 +1,7 @@
 from __future__ import annotations
 import base64
+import json
+from collections import deque
 import easychange.core.browser_service as browser_module
 import easychange.core.command_service as command_module
 
