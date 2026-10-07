@@ -312,3 +312,27 @@ def test_structured_mutation_profile_understands_ubuntu_and_k8s():
         "type": "ubuntu_batch",
         "commands": [{"command": "echo x > /tmp/x", "allow_mutation": True}],
     }) is True
+
+
+
+def test_structured_mutation_profile_covers_non_file_side_effects():
+    from easychange.core.operation_registry import (
+        structured_capabilities,
+        structured_operation_is_mutation,
+    )
+
+    assert structured_operation_is_mutation({"type": "browser_navigate", "url": "about:blank"})
+    assert structured_operation_is_mutation({"type": "run_project", "profile": "api"})
+    assert structured_operation_is_mutation({"type": "process_exec", "argv": ["dotnet", "--info"]})
+    assert structured_operation_is_mutation({"type": "secret_broker_import", "source_name": "X"})
+    assert structured_operation_is_mutation({"type": "ef_database_update", "connection_alias": "hml"})
+    assert structured_operation_is_mutation({"type": "db_query", "allow_write": True})
+    assert not structured_operation_is_mutation({"type": "db_query", "allow_write": False})
+    assert structured_operation_is_mutation({"type": "ubuntu_exec", "allow_mutation": True})
+    assert not structured_operation_is_mutation({"type": "ubuntu_exec", "allow_mutation": False})
+
+    capabilities = structured_capabilities()["operations"]
+    assert capabilities["browser_navigate"]["side_effect"] is True
+    assert capabilities["db_query"]["conditional_side_effect"] is True
+    assert capabilities["k8s_get"]["side_effect"] is False
+    assert capabilities["read"]["conditional_side_effect"] is False
