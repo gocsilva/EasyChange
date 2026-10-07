@@ -75,7 +75,7 @@ class MainWindow(QMainWindow):
     # ResultStore and are fetched selectively by optical_chunks. The old code
     # built/cached one QPixmap per result chunk and could consume hundreds of
     # MiB or GiB while Windows reported the GUI as "Not Responding".
-    _OPTICAL_BROADCAST_MAX_CHUNKS = 64
+    _OPTICAL_BROADCAST_MAX_CHUNKS = 31
     # More than one 4-QR row should not rotate in compact mode.
     # Switch to the 16-slot canvas so 5-16 chunks are visible simultaneously
     # and duplicated padding adds optical redundancy.
@@ -185,6 +185,8 @@ class MainWindow(QMainWindow):
         self._optical_pixmaps: dict[str, QPixmap] = {}
         self._optical_page = 0
         self._optical_burst = False
+        self._optical_render_generation = 0
+        self._optical_render_pending: dict | None = None
         self._optical_timer = QTimer(self)
         self._optical_timer.setInterval(420)
         self._optical_timer.timeout.connect(self._render_optical_page)
@@ -621,6 +623,8 @@ class MainWindow(QMainWindow):
             self._optical_timer.setInterval(420)
     def _update_machine_qr(self, result) -> None:
         self._optical_timer.stop()
+        self._optical_render_generation += 1
+        self._optical_render_pending = None
         self._optical_payloads = []
         self._optical_header_payload = None
         self._optical_pixmaps.clear()
@@ -633,52 +637,31 @@ class MainWindow(QMainWindow):
             return
         try:
             direct_payloads = _direct_recovery_optical_payloads(result)
+            bundle_header = None
             if direct_payloads is not None:
                 self._optical_payloads = direct_payloads
-                # Original EC2 packets are already self-identifying. Never add
-                # an EC2H wrapper for recovery queries or they become recursive.
-                self._optical_header_payload = None
             else:
-                (
-                    self._optical_payloads,
-                    prepared_header,
-                ) = encode_result_bundle(
-                    result,
-                    max_packets=self._OPTICAL_BROADCAST_MAX_CHUNKS,
+                self._optical_payloads, bundle_header = encode_result_bundle(
+                    result, max_packets=self._OPTICAL_BROADCAST_MAX_CHUNKS
                 )
             self._set_optical_burst(
                 len(self._optical_payloads) > self._OPTICAL_BURST_THRESHOLD
             )
             if self._optical_burst and direct_payloads is None:
-                # Packets + header share one compression pass. The header keeps
-                # the full chunk count plus the bounded broadcast-window size.
-                self._optical_header_payload = prepared_header
+                self._optical_header_payload = bundle_header
             self._render_optical_page()
-            _slots, page_count, _start, _data_slots, _include_header = self._optical_page_plan()
-            if page_count > 1:
-                self._optical_timer.start()
         except (ImportError, ValueError, RuntimeError):
             self._set_optical_burst(False)
-            # Compact EC1 text remains a correlation fallback.
             return
 
     def _optical_page_plan(self) -> tuple[int, int, int, int, bool]:
-        """Return slots, page_count, start, data_slots, include_header.
-
-        In burst mode the EC2H status header is repeated once per cycle, on page
-        zero only. Subsequent pages use all 16 cells for EC2 data. The previous
-        layout spent one slot on the same header on every page, increasing page
-        count and packet-loss exposure for large results.
-        """
         requested_slots = (
-            self._OPTICAL_BURST_SLOTS
-            if self._optical_burst
+            self._OPTICAL_BURST_SLOTS if self._optical_burst
             else self._OPTICAL_NORMAL_SLOTS
         )
         slots = min(requested_slots, len(self.machine_qrs))
         total = len(self._optical_payloads)
         has_header = bool(self._optical_header_payload)
-
         if self._optical_burst and has_header:
             first_capacity = max(1, slots - 1)
             tail = max(0, total - first_capacity)
@@ -686,9 +669,7 @@ class MainWindow(QMainWindow):
             page = self._optical_page % max(1, page_count)
             if page == 0:
                 return slots, page_count, 0, first_capacity, True
-            start = first_capacity + (page - 1) * slots
-            return slots, page_count, start, slots, False
-
+            return slots, page_count, first_capacity + (page - 1) * slots, slots, False
         header_slots = 1 if has_header else 0
         data_slots = max(1, slots - header_slots)
         page_count = max(1, (total + data_slots - 1) // data_slots)
@@ -696,68 +677,95 @@ class MainWindow(QMainWindow):
         return slots, page_count, page * data_slots, data_slots, has_header
 
     def _render_optical_page(self) -> None:
-        if not self._machine or not self._optical_payloads:
+        if (
+            not self._machine
+            or not self._optical_payloads
+            or self._optical_render_pending is not None
+        ):
             return
-        import qrcode
-
+        self._optical_timer.stop()
         slots, page_count, start, data_slots, include_header = self._optical_page_plan()
         page = self._optical_page % page_count
         payloads = self._optical_payloads[start:start + data_slots]
         if include_header and self._optical_header_payload:
             payloads = [self._optical_header_payload, *payloads]
-        # In burst mode keep all optical cells populated even on the final
-        # partial page. Repeating already-present chunks costs no protocol state
-        # and lets the HDMI decoder reliably identify the dense burst grid.
         if self._optical_burst and payloads and len(payloads) < slots:
             original = list(payloads)
             index = 0
             while len(payloads) < slots:
                 payloads.append(original[index % len(original)])
                 index += 1
+        self._optical_render_pending = {
+            "generation": self._optical_render_generation,
+            "page": page, "page_count": page_count, "slots": slots,
+            "payloads": list(payloads), "index": 0,
+        }
+        QTimer.singleShot(0, self._render_next_optical_symbol)
 
+    def _render_next_optical_symbol(self) -> None:
+        pending = self._optical_render_pending
+        if not isinstance(pending, dict):
+            return
+        if pending.get("generation") != self._optical_render_generation:
+            self._optical_render_pending = None
+            return
+        payloads = pending.get("payloads") or []
+        index = int(pending.get("index") or 0)
+        while index < len(payloads) and payloads[index] in self._optical_pixmaps:
+            index += 1
+        pending["index"] = index
+        if index < len(payloads):
+            payload = payloads[index]
+            self._optical_pixmaps[payload] = self._build_optical_pixmap(payload)
+            pending["index"] = index + 1
+            QTimer.singleShot(0, self._render_next_optical_symbol)
+            return
+        self._commit_optical_page(pending)
+
+    def _build_optical_pixmap(self, payload: str) -> QPixmap:
+        import qrcode
+        code = qrcode.QRCode(
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=1, border=4, mask_pattern=3,
+        )
+        code.add_data(payload)
+        code.make(fit=True)
+        matrix = code.get_matrix()
+        height = len(matrix); width = len(matrix[0])
+        pixels = bytes(0 if dark else 255 for row in matrix for dark in row)
+        image = QImage(
+            pixels, width, height, width, QImage.Format.Format_Grayscale8
+        ).copy()
+        label = self.machine_qrs[0]
+        scale = max(1, min(label.width() // width, label.height() // height))
+        return QPixmap.fromImage(image).scaled(
+            width * scale, height * scale,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+
+    def _commit_optical_page(self, pending: dict) -> None:
+        if (
+            self._optical_render_pending is not pending
+            or pending.get("generation") != self._optical_render_generation
+        ):
+            return
+        payloads = list(pending.get("payloads") or [])
+        slots = int(pending.get("slots") or 0)
+        page = int(pending.get("page") or 0)
+        page_count = max(1, int(pending.get("page_count") or 1))
         for label in self.machine_qrs:
             label.clear()
             label.setVisible(False)
-
         for label, payload in zip(self.machine_qrs[:slots], payloads):
             pixmap = self._optical_pixmaps.get(payload)
-            if pixmap is None:
-                # Fixed mask avoids qrcode's expensive 8-mask visual scoring.
-                # EC2 is machine-readable, so a valid deterministic mask is
-                # preferable to spending CPU choosing the prettiest one.
-                code = qrcode.QRCode(
-                    # EC2 values remain at >=2 screen pixels/module even at the
-                    # largest adaptive chunk size. Use the standard 4-module
-                    # quiet zone plus M-level correction so HDMI/JPEG/paint
-                    # noise becomes a recoverable symbol error instead of a
-                    # lost transport packet.
-                    error_correction=qrcode.constants.ERROR_CORRECT_M,
-                    box_size=1,
-                    border=4,
-                    mask_pattern=3,
-                )
-                code.add_data(payload)
-                code.make(fit=True)
-                matrix = code.get_matrix()
-                height = len(matrix); width = len(matrix[0])
-                pixels = bytes(0 if dark else 255 for row in matrix for dark in row)
-                image = QImage(
-                    pixels, width, height, width, QImage.Format.Format_Grayscale8
-                ).copy()
-                scale = max(1, min(label.width() // width, label.height() // height))
-                render_width = width * scale
-                render_height = height * scale
-                pixmap = QPixmap.fromImage(image).scaled(
-                    render_width,
-                    render_height,
-                    Qt.AspectRatioMode.IgnoreAspectRatio,
-                    Qt.TransformationMode.FastTransformation,
-                )
-                self._optical_pixmaps[payload] = pixmap
-            label.setPixmap(pixmap)
-            label.setVisible(True)
-
+            if pixmap is not None:
+                label.setPixmap(pixmap)
+                label.setVisible(True)
         self._optical_page = (page + 1) % page_count
+        self._optical_render_pending = None
+        if page_count > 1 and self._machine and self._optical_payloads:
+            self._optical_timer.start()
 
     def _prompt(self, value: str) -> None:
         self.command.setText(value); self.focus_command(); self.command.setCursorPosition(len(value))
