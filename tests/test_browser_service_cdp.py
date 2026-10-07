@@ -410,13 +410,13 @@ def test_browser_open_process_without_cdp_endpoint_fails_explicitly(tmp_path, mo
     ))
     monkeypatch.setattr(browser, "candidates", lambda: [str(edge)])
     monkeypatch.setattr(browser, "_active_port", lambda profile: 0)
-    monkeypatch.setattr(
-        browser_module.subprocess,
-        "Popen",
-        lambda *a, **k: _FakeBrowserProcess(return_code=None),
-    )
+    captured = {}
+    def fake_popen(argv, *args, **kwargs):
+        captured["argv"] = list(argv)
+        return _FakeBrowserProcess(return_code=None)
+    monkeypatch.setattr(browser_module.subprocess, "Popen", fake_popen)
     with pytest.raises(browser_module.BrowserBootstrapError) as exc:
-        browser.start("BOOT1", timeout=0.2)
+        browser.start("BOOT1", url="https://secret.local/path?token=hidden", timeout=0.2)
     assert exc.value.code == "CDP_PORT_NOT_OPEN"
     diag = exc.value.diagnostics
     assert diag["browser_process_started"] is True
@@ -424,6 +424,9 @@ def test_browser_open_process_without_cdp_endpoint_fails_explicitly(tmp_path, mo
     assert diag["cdp_port_selected"] is None
     assert diag["json_version_available"] is False
     assert diag["stage"] == "bootstrap_timeout"
+    assert "--no-startup-window" in captured["argv"]
+    assert "--restore-last-session" not in captured["argv"]
+    assert not any("secret.local" in str(arg) for arg in captured["argv"])
 
 
 def test_browser_open_detects_single_instance_handoff_without_debugging(tmp_path, monkeypatch):
@@ -865,3 +868,281 @@ def test_browser_open_gets_one_bounded_second_focus_pass_after_launch_race(tmp_p
         assert result.data["easychange_focus"]["focus_restore_second_pass"] is True
     finally:
         service.close()
+
+
+def test_background_target_bootstrap_uses_browser_websocket_and_background_true(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    state = {"created": False, "calls": []}
+    target_id = "TARGET-BG-1"
+    page_ws = "ws://127.0.0.1:9333/devtools/page/TARGET-BG-1"
+    browser_ws = "ws://127.0.0.1:9333/devtools/browser/BROWSER-1"
+
+    def fake_http(url, method="GET", timeout=3.0):
+        if url.endswith("/json/version"):
+            return {
+                "Browser": "Edg/154.0",
+                "webSocketDebuggerUrl": browser_ws,
+            }
+        if url.endswith("/json/list"):
+            if not state["created"]:
+                return []
+            return [{
+                "id": target_id,
+                "type": "page",
+                "url": "data:text/html,<title>Background</title>",
+                "title": "Background",
+                "webSocketDebuggerUrl": page_ws,
+            }]
+        raise AssertionError(url)
+
+    class FakeBrowserWs:
+        def __init__(self, url, timeout=5.0):
+            assert url == browser_ws
+            self.url = url
+        def call(self, method, params=None, timeout=10.0):
+            state["calls"].append((method, dict(params or {})))
+            assert method == "Target.createTarget"
+            assert params["background"] is True
+            assert params["url"] == "data:text/html,<title>Background</title>"
+            state["created"] = True
+            return {"targetId": target_id}
+        def close(self):
+            state["closed"] = True
+
+    monkeypatch.setattr(browser, "_http_json", fake_http)
+    monkeypatch.setattr(browser_module, "_WebSocket", FakeBrowserWs)
+
+    actual_id, created = browser._ensure_background_page_target(
+        9333,
+        "data:text/html,<title>Background</title>",
+        timeout=0.5,
+    )
+
+    assert actual_id == target_id
+    assert created is True
+    assert state["calls"] == [(
+        "Target.createTarget",
+        {
+            "url": "data:text/html,<title>Background</title>",
+            "background": True,
+        },
+    )]
+    assert state["closed"] is True
+
+
+def test_browser_open_attach_failure_enters_durable_controlled_profile_fallback(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    edge = tmp_path / "msedge.exe"
+    edge.write_bytes(b"edge")
+    primary = tmp_path / "profiles" / "edge"
+    primary.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        browser,
+        "attach",
+        lambda *a, **k: (_ for _ in ()).throw(
+            browser_module.BrowserBootstrapError(
+                "CDP_EXISTING_SESSION_NOT_AVAILABLE",
+                {"localhost_only": True},
+            )
+        ),
+    )
+    monkeypatch.setattr(browser, "candidates", lambda: [str(edge)])
+    monkeypatch.setattr(
+        browser,
+        "_persistent_profile_candidates",
+        lambda browser_path: [("primary", primary)],
+    )
+    monkeypatch.setattr(browser, "_browser_process_present", lambda path: True)
+
+    calls = []
+    def launch(session_id, **kwargs):
+        calls.append((session_id, dict(kwargs)))
+        return {
+            "session_id": session_id,
+            "cdp_alive": True,
+            "alive": True,
+            "profile_mode": "easychange_persistent_nondefault",
+            "profile_slot": kwargs["profile_slot"],
+            "bootstrap": {
+                "fallback_attempted": kwargs["fallback_attempted"],
+                "fallback_strategy": kwargs["fallback_strategy"],
+                "existing_browser_detected": kwargs["existing_browser_detected"],
+            },
+        }
+
+    monkeypatch.setattr(browser, "_launch_controlled_profile", launch)
+
+    result = browser.start(
+        "FALLBACK1",
+        url="https://localhost:65230/swagger/index.html",
+        visible=False,
+        timeout=1,
+    )
+
+    assert result["cdp_alive"] is True
+    assert result["fallback_attempted"] is True
+    assert result["fallback_success"] is True
+    assert result["fallback_strategy"] == "durable_controlled_profile"
+    assert len(calls) == 1
+    assert calls[0][1]["profile_slot"] == "primary"
+    assert calls[0][1]["existing_browser_detected"] is True
+    assert calls[0][1]["fallback_attempted"] is True
+
+
+def test_existing_browser_reuse_rotates_to_next_durable_profile(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    edge = tmp_path / "msedge.exe"
+    edge.write_bytes(b"edge")
+    primary = tmp_path / "profiles" / "edge"
+    fallback = tmp_path / "profiles" / "edge-fallback-1"
+    primary.mkdir(parents=True)
+    fallback.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        browser,
+        "attach",
+        lambda *a, **k: (_ for _ in ()).throw(
+            browser_module.BrowserBootstrapError(
+                "CDP_EXISTING_SESSION_NOT_AVAILABLE",
+                {"localhost_only": True},
+            )
+        ),
+    )
+    monkeypatch.setattr(browser, "candidates", lambda: [str(edge)])
+    monkeypatch.setattr(
+        browser,
+        "_persistent_profile_candidates",
+        lambda browser_path: [
+            ("primary", primary),
+            ("fallback-1", fallback),
+        ],
+    )
+    monkeypatch.setattr(browser, "_browser_process_present", lambda path: True)
+
+    calls = []
+    def launch(session_id, **kwargs):
+        calls.append(kwargs["profile_slot"])
+        if kwargs["profile_slot"] == "primary":
+            raise browser_module.BrowserBootstrapError(
+                "CDP_EXISTING_BROWSER_REUSED_WITHOUT_DEBUGGING",
+                {
+                    "stage": "existing_browser_reused_without_debugging",
+                    "existing_browser_reused": True,
+                    "cdp_ready": False,
+                },
+            )
+        return {
+            "session_id": session_id,
+            "cdp_alive": True,
+            "alive": True,
+            "profile_mode": "easychange_persistent_nondefault",
+            "profile_slot": kwargs["profile_slot"],
+            "bootstrap": {},
+        }
+
+    monkeypatch.setattr(browser, "_launch_controlled_profile", launch)
+
+    result = browser.start(
+        "FALLBACK2",
+        url="https://localhost:65230/swagger/index.html",
+        visible=False,
+        timeout=1,
+    )
+
+    assert calls == ["primary", "fallback-1"]
+    assert result["cdp_alive"] is True
+    assert result["profile_slot"] == "fallback-1"
+    assert result["fallback_attempted"] is True
+    assert result["fallback_success"] is True
+    assert result["fallback_strategy"] == "durable_profile_rotation"
+
+
+def test_edge_fallback_exhausted_uses_installed_chrome(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    edge = tmp_path / "msedge.exe"
+    chrome = tmp_path / "chrome.exe"
+    edge.write_bytes(b"edge")
+    chrome.write_bytes(b"chrome")
+    edge_profile = tmp_path / "profiles" / "edge"
+    chrome_profile = tmp_path / "profiles" / "chrome"
+    edge_profile.mkdir(parents=True)
+    chrome_profile.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        browser,
+        "attach",
+        lambda *a, **k: (_ for _ in ()).throw(
+            browser_module.BrowserBootstrapError(
+                "CDP_EXISTING_SESSION_NOT_AVAILABLE",
+                {"localhost_only": True},
+            )
+        ),
+    )
+    monkeypatch.setattr(browser, "candidates", lambda: [str(edge), str(chrome)])
+    monkeypatch.setattr(
+        browser,
+        "_persistent_profile_candidates",
+        lambda browser_path: [
+            (
+                "primary",
+                edge_profile if Path(browser_path).name == "msedge.exe" else chrome_profile,
+            )
+        ],
+    )
+    monkeypatch.setattr(browser, "_browser_process_present", lambda path: True)
+
+    calls = []
+    def launch(session_id, **kwargs):
+        family = browser._browser_family(kwargs["browser"])
+        calls.append(family)
+        if family == "edge":
+            raise browser_module.BrowserBootstrapError(
+                "CDP_BOOTSTRAP_TIMEOUT",
+                {"stage": "bootstrap_timeout", "cdp_ready": False},
+            )
+        return {
+            "session_id": session_id,
+            "cdp_alive": True,
+            "alive": True,
+            "browser": "Chrome/154.0",
+            "profile_mode": "easychange_persistent_nondefault",
+            "profile_slot": kwargs["profile_slot"],
+            "bootstrap": {},
+        }
+
+    monkeypatch.setattr(browser, "_launch_controlled_profile", launch)
+
+    result = browser.start("FALLBACK3", visible=False, timeout=1)
+
+    assert calls == ["edge", "chrome"]
+    assert result["cdp_alive"] is True
+    assert result["fallback_attempted"] is True
+    assert result["fallback_success"] is True
+    assert result["fallback_strategy"] == "alternate_installed_browser"
+
+
+def test_compact_success_bootstrap_diagnostics_exclude_large_tails_and_argv():
+    compact = BrowserService._compact_bootstrap_diagnostics({
+        "browser": "edge",
+        "bootstrap_strategy": "installed_browser_durable_profile_cdp",
+        "session_id": "S1",
+        "profile_kind": "easychange_durable_primary",
+        "profile_path_redacted": "EasyChange/BrowserProfiles/edge",
+        "port": 50001,
+        "target_id": "T1",
+        "fallback_attempted": True,
+        "fallback_strategy": "durable_controlled_profile",
+        "fallback_success": True,
+        "argv": ["msedge.exe", "--secret-like-large-argument"],
+        "stdout_tail": "x" * 4000,
+        "stderr_tail": "y" * 4000,
+    })
+
+    assert compact["browser"] == "edge"
+    assert compact["port"] == 50001
+    assert compact["target_id"] == "T1"
+    assert compact["fallback_success"] is True
+    assert "argv" not in compact
+    assert "stdout_tail" not in compact
+    assert "stderr_tail" not in compact

@@ -284,6 +284,7 @@ class BrowserSession:
     browser_path: str = ""
     profile_dir: Path | None = None
     profile_mode: str = "existing_human"
+    profile_slot: str | None = None
     headless: bool = False
     launch_pid: int | None = None
     launch_diagnostics: dict[str, Any] = field(default_factory=dict)
@@ -539,6 +540,126 @@ class BrowserService:
         root.mkdir(parents=True, exist_ok=True)
         return root
 
+    def _persistent_profile_candidates(
+        self,
+        browser_path: str,
+    ) -> list[tuple[str, Path]]:
+        """Predictable durable EasyChange-controlled profile pool.
+
+        The historical primary path is preserved for compatibility. Fallback
+        slots are stable siblings, never random/temp directories, and are not
+        deleted on detach/restart.
+        """
+        family = self._browser_family(browser_path)
+        primary = self._persistent_profile_dir(browser_path)
+        root = primary.parent
+        values = [
+            ("primary", primary),
+            ("fallback-1", root / f"{family}-fallback-1"),
+            ("fallback-2", root / f"{family}-fallback-2"),
+        ]
+        for _slot, profile in values:
+            profile.mkdir(parents=True, exist_ok=True)
+        return values
+
+    @staticmethod
+    def _profile_path_redacted(profile: Path) -> str:
+        return f"EasyChange/BrowserProfiles/{profile.name}"
+
+    @staticmethod
+    def _browser_process_present(browser_path: str) -> bool:
+        if os.name != "nt":
+            return False
+        image = Path(str(browser_path or "")).name.casefold()
+        if not image:
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            TH32CS_SNAPPROCESS = 0x00000002
+            INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+            class PROCESSENTRY32W(ctypes.Structure):
+                _fields_ = [
+                    ("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", wintypes.WCHAR * 260),
+                ]
+
+            kernel32 = ctypes.windll.kernel32
+            snapshot = kernel32.CreateToolhelp32Snapshot(
+                TH32CS_SNAPPROCESS,
+                0,
+            )
+            if snapshot == INVALID_HANDLE_VALUE:
+                return False
+            try:
+                entry = PROCESSENTRY32W()
+                entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+                if not kernel32.Process32FirstW(
+                    snapshot,
+                    ctypes.byref(entry),
+                ):
+                    return False
+                while True:
+                    if str(entry.szExeFile or "").casefold() == image:
+                        return True
+                    if not kernel32.Process32NextW(
+                        snapshot,
+                        ctypes.byref(entry),
+                    ):
+                        break
+                return False
+            finally:
+                kernel32.CloseHandle(snapshot)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _compact_bootstrap_diagnostics(value: dict | None) -> dict:
+        source = dict(value or {})
+        keys = (
+            "browser",
+            "browser_path",
+            "bootstrap_strategy",
+            "session_id",
+            "profile_kind",
+            "profile_path_redacted",
+            "profile_persistent",
+            "profile_slot",
+            "cdp_address",
+            "cdp_port_selected",
+            "port",
+            "pid",
+            "browser_process_alive",
+            "process_alive",
+            "existing_browser_detected",
+            "existing_browser_reused",
+            "cdp_ready",
+            "json_version_ready",
+            "json_list_ready",
+            "websocket_ready",
+            "target_id",
+            "fallback_attempted",
+            "fallback_strategy",
+            "fallback_success",
+            "stage",
+            "duration_ms",
+            "no_startup_window",
+            "background_target_created",
+            "bootstrap_target_id",
+            "secrets_exposed",
+        )
+        return {key: source.get(key) for key in keys if key in source}
+
     @staticmethod
     def _human_profile_dir(family: str) -> Path | None:
         local = os.environ.get("LOCALAPPDATA")
@@ -564,16 +685,25 @@ class BrowserService:
         values: list[dict] = []
         seen: set[int] = set()
         for family in ("edge", "chrome"):
-            roots: list[tuple[str, Path]] = []
+            roots: list[tuple[str, Path, str | None]] = []
             human = self._human_profile_dir(family)
             if human is not None:
-                roots.append(("existing_human", human))
-            persistent = (
+                roots.append(("existing_human", human, None))
+            base = (
                 Path(os.environ.get("LOCALAPPDATA") or Path.home())
-                / "EasyChange" / "BrowserProfiles" / family
+                / "EasyChange" / "BrowserProfiles"
             )
-            roots.append(("easychange_persistent_nondefault", persistent))
-            for mode, root in roots:
+            for slot, persistent in (
+                ("primary", base / family),
+                ("fallback-1", base / f"{family}-fallback-1"),
+                ("fallback-2", base / f"{family}-fallback-2"),
+            ):
+                roots.append((
+                    "easychange_persistent_nondefault",
+                    persistent,
+                    slot,
+                ))
+            for mode, root, profile_slot in roots:
                 port = self._active_port(root)
                 if not port or port in seen:
                     continue
@@ -582,6 +712,7 @@ class BrowserService:
                     "browser": family,
                     "profile_mode": mode,
                     "profile_dir": str(root),
+                    "profile_slot": profile_slot,
                     "port": port,
                 })
         return values
@@ -675,7 +806,31 @@ class BrowserService:
             "runtime_evaluate_ok": bool(runtime_evaluate_ok),
             "profile_mode": "easychange_persistent_nondefault",
             "profile_persistent": True,
+            "profile_kind": (
+                "easychange_durable_primary"
+                if profile.name == family
+                else "easychange_durable_fallback"
+            ),
             "profile_name": profile.name,
+            "profile_path_redacted": self._profile_path_redacted(profile),
+            "bootstrap_strategy": "installed_browser_durable_profile_cdp",
+            "existing_browser_detected": False,
+            "existing_browser_reused": False,
+            "cdp_ready": bool(
+                port
+                and json_version_available
+                and json_list_available
+                and target_available
+                and websocket_connected
+                and browser_get_version_ok
+                and runtime_evaluate_ok
+            ),
+            "json_version_ready": bool(json_version_available),
+            "json_list_ready": bool(json_list_available),
+            "websocket_ready": bool(websocket_connected),
+            "fallback_attempted": False,
+            "fallback_strategy": None,
+            "fallback_success": False,
             "url": self._sanitize_url_for_diagnostics(url),
             "stage": str(stage),
             "attempt": int(attempt),
@@ -726,6 +881,69 @@ class BrowserService:
             and value.get("type") == "page"
             and value.get("webSocketDebuggerUrl")
         ]
+
+    def _ensure_background_page_target(
+        self,
+        port: int,
+        url: str,
+        *,
+        timeout: float = 5.0,
+    ) -> tuple[str, bool]:
+        """Ensure a page target exists without activating a browser window.
+
+        Fresh Edge/Chrome bootstrap uses --no-startup-window so Windows keeps
+        EasyChange in the foreground. We connect only to the loopback browser
+        websocket and create the first page as a background target.
+        """
+        targets = self._targets(port)
+        if targets:
+            return str(targets[0].get("id") or ""), False
+
+        version = self._http_json(
+            f"http://127.0.0.1:{int(port)}/json/version",
+            timeout=max(0.5, min(3.0, float(timeout))),
+        )
+        browser_ws = str(
+            (version.get("webSocketDebuggerUrl") or "")
+            if isinstance(version, dict)
+            else ""
+        )
+        if not browser_ws:
+            raise BrowserError("CDP_BROWSER_WEBSOCKET_MISSING")
+
+        browser_cdp = _WebSocket(
+            browser_ws,
+            timeout=max(1.0, min(5.0, float(timeout))),
+        )
+        try:
+            created = browser_cdp.call(
+                "Target.createTarget",
+                {
+                    "url": str(url or "about:blank"),
+                    "background": True,
+                },
+                timeout=max(1.0, min(5.0, float(timeout))),
+            )
+        finally:
+            browser_cdp.close()
+
+        target_id = str((created or {}).get("targetId") or "")
+        if not target_id:
+            raise BrowserError("CDP_PAGE_TARGET_NOT_CREATED")
+
+        deadline = time.monotonic() + max(0.5, min(5.0, float(timeout)))
+        while time.monotonic() < deadline:
+            target = next(
+                (
+                    item for item in self._targets(port)
+                    if str(item.get("id") or "") == target_id
+                ),
+                None,
+            )
+            if target is not None:
+                return target_id, True
+            time.sleep(0.03)
+        raise BrowserError("CDP_PAGE_TARGET_NOT_AVAILABLE_AFTER_CREATE")
 
     def _candidate_ports(self, explicit_port: int = 0) -> list[int]:
         if explicit_port:
@@ -895,6 +1113,10 @@ class BrowserService:
                         Path(str(marker.get("profile_dir")))
                         if marker and marker.get("profile_dir") else None
                     )
+                    profile_slot = (
+                        str(marker.get("profile_slot") or "") or None
+                        if marker else None
+                    )
                     self._sessions[key] = BrowserSession(
                         session_id=key,
                         port=int(candidate_port),
@@ -906,6 +1128,7 @@ class BrowserService:
                         browser_product=product,
                         profile_mode=profile_mode,
                         profile_dir=profile_dir,
+                        profile_slot=profile_slot,
                     )
                     return {
                         **self.state(key),
@@ -961,63 +1184,23 @@ class BrowserService:
                 diagnostics,
             )
 
-    def start(
+    def _launch_controlled_profile(
         self,
-        session_id: str = "default",
+        session_id: str,
         *,
-        url: str = "about:blank",
-        headless: bool = False,
-        visible: bool = True,
-        width: int = 1440,
-        height: int = 1000,
-        timeout: float = 10.0,
-        browser_path: str = "",
+        browser: str,
+        profile_slot: str,
+        profile: Path,
+        url: str,
+        visible: bool,
+        timeout: float,
+        attach_error: str,
+        fallback_attempted: bool,
+        fallback_strategy: str | None,
+        existing_browser_detected: bool,
     ) -> dict:
-        del width, height
-        if headless:
-            raise BrowserError("BROWSER_HEADLESS_FORBIDDEN")
-
-        try:
-            attached = self.attach(session_id, timeout=min(5.0, timeout))
-            if url and url != "about:blank":
-                self.navigate(session_id, url, timeout)
-                attached = self.state(session_id)
-            if visible:
-                try:
-                    self.show(session_id)
-                except Exception:
-                    pass
-            return {
-                **attached,
-                "attach_first": True,
-                "browser_launched": False,
-                "profile_created": False,
-                "profile_persistent": True,
-                "profile_mode": attached.get("profile_mode", "existing_human"),
-                "human_profile_reused": attached.get("profile_mode") == "existing_human",
-                "install_required": False,
-            }
-        except Exception as attach_exc:
-            attach_error = f"{type(attach_exc).__name__}:{str(attach_exc)[:500]}"
-
-        installed = self.candidates()
-        requested = str(browser_path or "").strip()
-        if requested:
-            requested_path = Path(requested)
-            allowed = {str(Path(value).resolve()).casefold() for value in installed}
-            if (
-                not requested_path.is_file()
-                or str(requested_path.resolve()).casefold() not in allowed
-            ):
-                raise BrowserError("ONLY_INSTALLED_EDGE_OR_CHROME_ALLOWED")
-            browser = str(requested_path)
-        else:
-            browser = next(iter(installed), "")
-        if not browser:
-            raise FileNotFoundError("NO_INSTALLED_EDGE_OR_CHROME_FOUND")
-
         family = self._browser_family(browser)
-        profile = self._persistent_profile_dir(browser)
+        profile.mkdir(parents=True, exist_ok=True)
         profile_existed = any(profile.iterdir())
         started_at = time.monotonic()
 
@@ -1032,6 +1215,7 @@ class BrowserService:
                 session = self._session(session_id)
                 session.profile_dir = profile
                 session.profile_mode = "easychange_persistent_nondefault"
+                session.profile_slot = profile_slot
                 session.browser_path = browser
                 if url and url != "about:blank":
                     self.navigate(session_id, url, timeout)
@@ -1040,17 +1224,53 @@ class BrowserService:
                         self.show(session_id)
                     except Exception:
                         pass
+                state = self.state(session_id)
+                bootstrap = {
+                    "browser": family,
+                    "browser_path": browser,
+                    "bootstrap_strategy": "reuse_easychange_durable_profile_cdp",
+                    "session_id": self._safe_id(session_id),
+                    "profile_kind": (
+                        "easychange_durable_primary"
+                        if profile_slot == "primary"
+                        else "easychange_durable_fallback"
+                    ),
+                    "profile_path_redacted": self._profile_path_redacted(profile),
+                    "profile_persistent": True,
+                    "profile_slot": profile_slot,
+                    "port": int(prior_port),
+                    "pid": state.get("pid"),
+                    "process_alive": state.get("pid_alive"),
+                    "existing_browser_detected": bool(existing_browser_detected),
+                    "existing_browser_reused": True,
+                    "cdp_ready": bool(state.get("cdp_alive")),
+                    "json_version_ready": True,
+                    "json_list_ready": True,
+                    "websocket_ready": True,
+                    "target_id": state.get("target_id"),
+                    "fallback_attempted": bool(fallback_attempted),
+                    "fallback_strategy": fallback_strategy,
+                    "fallback_success": bool(fallback_attempted),
+                    "secrets_exposed": False,
+                }
+                session.launch_diagnostics = bootstrap
                 return {
-                    **self.state(session_id),
+                    **state,
                     "attach_first": True,
                     "persistent_profile_reused": True,
                     "browser_launched": False,
                     "profile_created": False,
                     "profile_persistent": True,
-                    "profile_mode": "easychange_persistent_nondefault",
+                    "profile_mode": session.profile_mode,
+                    "profile_slot": profile_slot,
+                    "profile_path_redacted": self._profile_path_redacted(profile),
                     "human_profile_reused": False,
                     "default_profile_preserved": True,
                     "install_required": False,
+                    "fallback_attempted": bool(fallback_attempted),
+                    "fallback_strategy": fallback_strategy,
+                    "fallback_success": bool(fallback_attempted),
+                    "bootstrap": self._compact_bootstrap_diagnostics(bootstrap),
                 }
             except Exception:
                 try:
@@ -1065,14 +1285,9 @@ class BrowserService:
             f"--user-data-dir={profile}",
             "--no-first-run",
             "--no-default-browser-check",
-            "--restore-last-session",
-            str(url or "about:blank"),
+            "--no-startup-window",
         ]
-        safe_argv = [
-            arg if not str(arg).startswith(("http://", "https://"))
-            else self._sanitize_url_for_diagnostics(str(arg))
-            for arg in argv
-        ]
+        safe_argv = list(argv)
         try:
             process = subprocess.Popen(
                 argv,
@@ -1093,8 +1308,14 @@ class BrowserService:
                 started_at=started_at,
                 url=url,
             )
-            diagnostics["argv"] = safe_argv
-            diagnostics["launch_error"] = type(exc).__name__
+            diagnostics.update({
+                "argv": safe_argv,
+                "launch_error": type(exc).__name__,
+                "session_id": self._safe_id(session_id),
+                "profile_slot": profile_slot,
+                "fallback_attempted": bool(fallback_attempted),
+                "fallback_strategy": fallback_strategy,
+            })
             raise BrowserBootstrapError(
                 "CDP_BROWSER_PROCESS_NOT_STARTED",
                 diagnostics,
@@ -1112,10 +1333,19 @@ class BrowserService:
             port = self._active_port(profile)
             if port:
                 try:
+                    remaining = min(5.0, max(0.5, deadline - time.monotonic()))
+                    bootstrap_target_id, background_target_created = (
+                        self._ensure_background_page_target(
+                            port,
+                            str(url or "about:blank"),
+                            timeout=remaining,
+                        )
+                    )
                     self.attach(
                         session_id,
                         port=port,
-                        timeout=min(2.0, max(0.5, deadline - time.monotonic())),
+                        target_id=bootstrap_target_id,
+                        timeout=min(3.0, remaining),
                     )
                     session = self._session(session_id)
                     observed_product = str(session.browser_product or "").casefold()
@@ -1135,12 +1365,23 @@ class BrowserService:
                         finally:
                             self._sessions.pop(self._safe_id(session_id), None)
                         raise BrowserError("CDP_BROWSER_PRODUCT_MISMATCH")
+
+                    # If a page existed already, explicitly navigate it. A newly
+                    # created background target already received the requested URL.
+                    if (
+                        not background_target_created
+                        and url
+                        and url != "about:blank"
+                    ):
+                        self.navigate(session_id, url, timeout)
+
                     session.managed_process = True
                     session.pid = int(process.pid)
                     session.launch_pid = int(process.pid)
                     session.browser_path = browser
                     session.profile_dir = profile
                     session.profile_mode = "easychange_persistent_nondefault"
+                    session.profile_slot = profile_slot
                     session.stdout_capture = stdout_capture
                     session.stderr_capture = stderr_capture
                     session.process = process
@@ -1154,6 +1395,7 @@ class BrowserService:
                             self.hide(session_id)
                         except Exception:
                             pass
+
                     diagnostics = self._bootstrap_diagnostics(
                         browser=browser,
                         family=family,
@@ -1173,7 +1415,24 @@ class BrowserService:
                         browser_get_version_ok=True,
                         runtime_evaluate_ok=True,
                     )
-                    diagnostics["argv"] = safe_argv
+                    diagnostics.update({
+                        "argv": safe_argv,
+                        "no_startup_window": True,
+                        "background_target_created": bool(
+                            background_target_created
+                        ),
+                        "bootstrap_target_id": bootstrap_target_id,
+                        "target_id": session.target_id,
+                        "session_id": self._safe_id(session_id),
+                        "profile_slot": profile_slot,
+                        "port": int(port),
+                        "process_alive": True,
+                        "existing_browser_detected": bool(existing_browser_detected),
+                        "existing_browser_reused": False,
+                        "fallback_attempted": bool(fallback_attempted),
+                        "fallback_strategy": fallback_strategy,
+                        "fallback_success": bool(fallback_attempted),
+                    })
                     session.launch_diagnostics = diagnostics
                     return {
                         **self.state(session_id),
@@ -1183,11 +1442,16 @@ class BrowserService:
                         "browser_path": browser,
                         "profile_created": not profile_existed,
                         "profile_persistent": True,
-                        "profile_mode": "easychange_persistent_nondefault",
+                        "profile_mode": session.profile_mode,
+                        "profile_slot": profile_slot,
+                        "profile_path_redacted": self._profile_path_redacted(profile),
                         "human_profile_reused": False,
                         "default_profile_preserved": True,
                         "install_required": False,
-                        "bootstrap": diagnostics,
+                        "fallback_attempted": bool(fallback_attempted),
+                        "fallback_strategy": fallback_strategy,
+                        "fallback_success": bool(fallback_attempted),
+                        "bootstrap": self._compact_bootstrap_diagnostics(diagnostics),
                     }
                 except Exception as exc:
                     last_error = f"{type(exc).__name__}:{str(exc)[:500]}"
@@ -1197,6 +1461,7 @@ class BrowserService:
             except Exception:
                 return_code = None
             elapsed = time.monotonic() - started_at
+
             if return_code is not None and int(return_code) != 0:
                 diagnostics = self._bootstrap_diagnostics(
                     browser=browser,
@@ -1210,13 +1475,20 @@ class BrowserService:
                     url=url,
                     attempt=attempt,
                 )
-                diagnostics["argv"] = safe_argv
-                diagnostics["attach_error"] = attach_error
+                diagnostics.update({
+                    "argv": safe_argv,
+                    "attach_error": attach_error,
+                    "session_id": self._safe_id(session_id),
+                    "profile_slot": profile_slot,
+                    "fallback_attempted": bool(fallback_attempted),
+                    "fallback_strategy": fallback_strategy,
+                })
                 raise BrowserBootstrapError(
                     "CDP_BROWSER_PROCESS_EXITED",
                     diagnostics,
                 )
-            if return_code == 0 and not port and elapsed >= 1.0:
+
+            if return_code == 0 and not port and elapsed >= 0.8:
                 diagnostics = self._bootstrap_diagnostics(
                     browser=browser,
                     family=family,
@@ -1229,8 +1501,16 @@ class BrowserService:
                     url=url,
                     attempt=attempt,
                 )
-                diagnostics["argv"] = safe_argv
-                diagnostics["attach_error"] = attach_error
+                diagnostics.update({
+                    "argv": safe_argv,
+                    "attach_error": attach_error,
+                    "session_id": self._safe_id(session_id),
+                    "profile_slot": profile_slot,
+                    "existing_browser_detected": True,
+                    "existing_browser_reused": True,
+                    "fallback_attempted": bool(fallback_attempted),
+                    "fallback_strategy": fallback_strategy,
+                })
                 raise BrowserBootstrapError(
                     "CDP_EXISTING_BROWSER_REUSED_WITHOUT_DEBUGGING",
                     diagnostics,
@@ -1250,11 +1530,171 @@ class BrowserService:
             url=url,
             attempt=attempt,
         )
-        diagnostics["argv"] = safe_argv
-        diagnostics["attach_error"] = attach_error
-        diagnostics["last_cdp_error"] = last_error
+        diagnostics.update({
+            "argv": safe_argv,
+            "attach_error": attach_error,
+            "last_cdp_error": last_error,
+            "session_id": self._safe_id(session_id),
+            "profile_slot": profile_slot,
+            "fallback_attempted": bool(fallback_attempted),
+            "fallback_strategy": fallback_strategy,
+        })
         code = "CDP_BOOTSTRAP_TIMEOUT" if port else "CDP_PORT_NOT_OPEN"
         raise BrowserBootstrapError(code, diagnostics)
+
+    def start(
+        self,
+        session_id: str = "default",
+        *,
+        url: str = "about:blank",
+        headless: bool = False,
+        visible: bool = True,
+        width: int = 1440,
+        height: int = 1000,
+        timeout: float = 10.0,
+        browser_path: str = "",
+    ) -> dict:
+        del width, height
+        if headless:
+            raise BrowserError("BROWSER_HEADLESS_FORBIDDEN")
+
+        # First choice is always attach-only reuse of any already exposed local
+        # Edge/Chrome CDP endpoint, including a prior EasyChange-controlled
+        # durable profile after an EasyChange restart.
+        try:
+            attached = self.attach(session_id, timeout=min(5.0, timeout))
+            if url and url != "about:blank":
+                self.navigate(session_id, url, timeout)
+                attached = self.state(session_id)
+            if visible:
+                try:
+                    self.show(session_id)
+                except Exception:
+                    pass
+            return {
+                **attached,
+                "attach_first": True,
+                "browser_launched": False,
+                "profile_created": False,
+                "profile_persistent": True,
+                "profile_mode": attached.get(
+                    "profile_mode",
+                    "existing_human",
+                ),
+                "human_profile_reused": (
+                    attached.get("profile_mode") == "existing_human"
+                ),
+                "install_required": False,
+                "fallback_attempted": False,
+                "fallback_strategy": None,
+                "fallback_success": False,
+            }
+        except Exception as attach_exc:
+            attach_error = (
+                f"{type(attach_exc).__name__}:{str(attach_exc)[:500]}"
+            )
+
+        installed = self.candidates()
+        requested = str(browser_path or "").strip()
+        if requested:
+            requested_path = Path(requested)
+            allowed = {
+                str(Path(value).resolve()).casefold()
+                for value in installed
+            }
+            if (
+                not requested_path.is_file()
+                or str(requested_path.resolve()).casefold() not in allowed
+            ):
+                raise BrowserError("ONLY_INSTALLED_EDGE_OR_CHROME_ALLOWED")
+            browsers = [str(requested_path)]
+        else:
+            browsers = list(installed)
+        if not browsers:
+            raise FileNotFoundError("NO_INSTALLED_EDGE_OR_CHROME_FOUND")
+
+        failures: list[dict] = []
+        last_exc: BrowserBootstrapError | None = None
+        existing_reuse_seen = False
+
+        for browser_index, browser in enumerate(browsers):
+            existing_browser_detected = self._browser_process_present(browser)
+            for profile_index, (profile_slot, profile) in enumerate(
+                self._persistent_profile_candidates(browser)
+            ):
+                # Reaching a controlled EasyChange profile already means the
+                # attach-first path could not use an existing CDP session.
+                fallback_attempted = True
+                if browser_index > 0:
+                    fallback_strategy = "alternate_installed_browser"
+                elif profile_index > 0 or existing_reuse_seen:
+                    fallback_strategy = "durable_profile_rotation"
+                else:
+                    fallback_strategy = "durable_controlled_profile"
+                try:
+                    result = self._launch_controlled_profile(
+                        session_id,
+                        browser=browser,
+                        profile_slot=profile_slot,
+                        profile=profile,
+                        url=url,
+                        visible=visible,
+                        timeout=timeout,
+                        attach_error=attach_error,
+                        fallback_attempted=fallback_attempted,
+                        fallback_strategy=fallback_strategy,
+                        existing_browser_detected=existing_browser_detected,
+                    )
+                    result["fallback_attempted"] = True
+                    result["fallback_success"] = True
+                    result["fallback_strategy"] = fallback_strategy
+                    bootstrap = result.get("bootstrap")
+                    if isinstance(bootstrap, dict):
+                        bootstrap["fallback_attempted"] = True
+                        bootstrap["fallback_success"] = True
+                        bootstrap["fallback_strategy"] = fallback_strategy
+                        if failures:
+                            bootstrap["fallback_attempts"] = list(failures)
+                    return result
+                except BrowserBootstrapError as exc:
+                    last_exc = exc
+                    code = str(exc.code or type(exc).__name__)
+                    if code == "CDP_EXISTING_BROWSER_REUSED_WITHOUT_DEBUGGING":
+                        existing_reuse_seen = True
+                    diag = exc.diagnostics if isinstance(exc.diagnostics, dict) else {}
+                    failures.append({
+                        "browser": self._browser_family(browser),
+                        "profile_slot": profile_slot,
+                        "profile_path_redacted": self._profile_path_redacted(profile),
+                        "code": code,
+                        "stage": diag.get("stage"),
+                        "existing_browser_reused": bool(
+                            diag.get("existing_browser_reused")
+                        ),
+                        "cdp_ready": bool(diag.get("cdp_ready")),
+                    })
+                    # browser_open owns fallback. Never stop/kill the human or
+                    # prior browser process; simply try the next durable slot.
+                    continue
+
+        if last_exc is not None:
+            diagnostics = dict(last_exc.diagnostics or {})
+            diagnostics.update({
+                "fallback_attempted": len(failures) > 1,
+                "fallback_success": False,
+                "fallback_strategy": (
+                    "durable_profile_rotation"
+                    if any(
+                        item.get("profile_slot") != "primary"
+                        for item in failures
+                    )
+                    else None
+                ),
+                "fallback_attempts": failures,
+                "existing_browser_reused": bool(existing_reuse_seen),
+            })
+            raise BrowserBootstrapError(last_exc.code, diagnostics)
+        raise BrowserError("CDP_BROWSER_OPEN_FALLBACK_EXHAUSTED")
 
     def _session(self, session_id: str) -> BrowserSession:
         key = self._safe_id(session_id)
@@ -1358,8 +1798,16 @@ class BrowserService:
             "profile_created": False,
             "profile_persistent": True,
             "profile_mode": session.profile_mode,
+            "profile_slot": session.profile_slot,
+            "profile_path_redacted": (
+                self._profile_path_redacted(session.profile_dir)
+                if session.profile_dir is not None
+                else None
+            ),
             "browser_path": session.browser_path or None,
-            "bootstrap": dict(session.launch_diagnostics or {}),
+            "bootstrap": self._compact_bootstrap_diagnostics(
+                session.launch_diagnostics
+            ),
         }
         if cdp_alive:
             value["url"] = current_url
