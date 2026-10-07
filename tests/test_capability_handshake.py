@@ -34,3 +34,21 @@ def test_health_reuses_same_capability_fingerprint(tmp_path):
         assert caps["supported_operations"] == health["supported_operations"]
     finally:
         service.close()
+
+
+
+def test_capability_manifest_publishes_operation_safety_profiles(tmp_path):
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        result = service.execute(":capabilities --compact")
+        assert result.ok is True
+        manifest = result.data["capability_manifest"]
+        profiles = manifest["operation_profiles"]
+        assert manifest["feature_flags"]["operation_profiles"] is True
+        assert profiles["read"]["family"] == "read"
+        assert profiles["read"]["side_effect"] is False
+        assert profiles["write_file"]["mutation"] is True
+        assert profiles["browser_navigate"]["side_effect"] is True
+        assert profiles["db_query"]["conditional_side_effect"] is True
+    finally:
+        service.close()
