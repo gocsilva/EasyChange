@@ -1471,3 +1471,73 @@ def test_swagger_execute_correlates_only_new_cdp_request(tmp_path, monkeypatch):
     assert body_calls == [
         ("Network.getResponseBody", {"requestId": "REQ-NEW"})
     ]
+
+
+
+def test_browser_open_existing_human_uses_new_tab_instead_of_navigating_human_target(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    calls = {"navigate": [], "new_tab": []}
+
+    monkeypatch.setattr(
+        browser,
+        "attach",
+        lambda *args, **kwargs: {
+            "alive": True,
+            "profile_mode": "existing_human",
+            "url": "https://human.local/work",
+            "target_id": "human-target",
+        },
+    )
+    monkeypatch.setattr(
+        browser,
+        "new_tab",
+        lambda session_id, url="about:blank", activate=True: (
+            calls["new_tab"].append((session_id, url, activate))
+            or {"target_id": "easychange-target", "activated": True}
+        ),
+    )
+    monkeypatch.setattr(
+        browser,
+        "navigate",
+        lambda *args, **kwargs: calls["navigate"].append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        browser,
+        "state",
+        lambda session_id="default": {
+            "alive": True,
+            "profile_mode": "existing_human",
+            "url": "https://swagger.local/index.html",
+            "target_id": "easychange-target",
+        },
+    )
+
+    result = browser.start(
+        "SAFE-HUMAN",
+        url="https://swagger.local/index.html",
+        visible=False,
+    )
+
+    assert calls["navigate"] == []
+    assert calls["new_tab"] == [
+        ("SAFE-HUMAN", "https://swagger.local/index.html", True)
+    ]
+    assert result["target_strategy"] == "new_tab_preserve_human_target"
+    assert result["easychange_created_target_id"] == "easychange-target"
+
+
+def test_reused_browser_attach_missing_url_does_not_destroy_healthy_session(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    _attach_fake(browser, monkeypatch)
+    session = browser._session("T1")
+
+    with pytest.raises(LookupError, match="BROWSER_TAB_NOT_FOUND_FOR_URL"):
+        browser.attach(
+            "T1",
+            url_contains="definitely-not-present.example",
+            timeout=0.5,
+        )
+
+    assert browser._session("T1") is session
+    assert session.cdp.closed is False
+    assert session.browser_cdp.closed is False
