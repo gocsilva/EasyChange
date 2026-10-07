@@ -1668,3 +1668,70 @@ def test_discover_many_cli_supports_scope_filters(service, tmp_path):
         path.startswith("src/") and path.endswith(".cs")
         for path in result.data["by_term"]["ScopedSymbol"]["files"]
     )
+
+
+
+def test_dotnet_adapter_targets_nested_solution_from_repo_root(tmp_path):
+    from easychange.adapters.dotnet import DotnetAdapter
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "Cambio.sln").write_text("", encoding="utf-8")
+    project = src / "Cambio.Api"
+    project.mkdir()
+    (project / "Cambio.Api.csproj").write_text("<Project />", encoding="utf-8")
+    obj = project / "obj"
+    obj.mkdir()
+    (obj / "project.assets.json").write_text("{}", encoding="utf-8")
+
+    workspace = Workspace.open(tmp_path)
+    adapter = DotnetAdapter()
+
+    assert workspace.kind == "DOTNET"
+    assert "DOTNET" in workspace.adapters
+    assert "src/Cambio.sln" in workspace.projects
+    assert adapter.detect(workspace) is True
+    assert adapter.describe(workspace)["target"] == "src/Cambio.sln"
+    assert adapter.build(workspace) == [
+        "dotnet", "build", "src/Cambio.sln", "--no-restore"
+    ]
+    assert adapter.test(workspace) == [
+        "dotnet", "test", "src/Cambio.sln", "--no-restore"
+    ]
+
+
+def test_runtime_service_uses_nested_solution_for_workspace_test(tmp_path):
+    from easychange.core.process_service import ProcessService
+    from easychange.core.runtime_service import ProjectRuntimeService
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "Cambio.sln").write_text("", encoding="utf-8")
+    project = src / "Cambio.Api"
+    project.mkdir()
+    (project / "Cambio.Api.csproj").write_text(
+        '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup>'
+        '<TargetFramework>net8.0</TargetFramework>'
+        '</PropertyGroup></Project>',
+        encoding="utf-8",
+    )
+    (project / "Program.cs").write_text(
+        "var app = WebApplication.CreateBuilder(args).Build();",
+        encoding="utf-8",
+    )
+    obj = project / "obj"
+    obj.mkdir()
+    (obj / "project.assets.json").write_text("{}", encoding="utf-8")
+
+    runtime = ProjectRuntimeService(
+        Workspace.open(tmp_path),
+        ProcessService(tmp_path),
+    )
+    profile = next(
+        item for item in runtime.profiles()
+        if item["project"] == "src/Cambio.Api/Cambio.Api.csproj"
+    )
+
+    assert profile["workspace_test_argv"] == [
+        "dotnet", "test", "src/Cambio.sln", "--no-restore"
+    ]
