@@ -207,3 +207,68 @@ def test_evidence_reports_generated_file_metadata(tmp_path, monkeypatch):
     assert result["total_bytes"] > 0
     assert len(result["files"]) == result["file_count"]
     assert result["duration_ms"] >= 0
+
+
+
+def test_durable_result_chunk_batch_reads_one_payload_contract(tmp_path):
+    store = DurableResultStore(tmp_path / "results")
+    sequence = "QCHUNKBATCH1"
+    result = {
+        "ok": True,
+        "command": "read",
+        "data": {"payload": "abcdef" * 900},
+    }
+    store.mark_running(sequence, "b" * 64, ":read batch", mutation=False)
+    store.complete(sequence, "b" * 64, ":read batch", result)
+
+    meta = store.chunk_meta(sequence, chunk_bytes=512)
+    indexes = list(range(min(8, meta["total_chunks"])))
+    batch = store.chunks(sequence, indexes, chunk_bytes=512)
+
+    assert batch["sequence"] == sequence
+    assert batch["requested_indexes"] == indexes
+    assert batch["returned_indexes"] == indexes
+    assert batch["complete"] is True
+    assert len(batch["chunks"]) == len(indexes)
+    assert all(item["chunk_bytes"] == 512 for item in batch["chunks"])
+    assert len({item["result_hash"] for item in batch["chunks"]}) == 1
+
+
+def test_structured_result_chunks_is_bounded_to_eight_items(tmp_path):
+    from easychange.core.command_service import CommandService
+
+    service = CommandService(Workspace.open(tmp_path))
+    sequence = "QCHUNKBATCH2"
+    result = {
+        "ok": True,
+        "command": "read",
+        "data": {"payload": "x" * 12000},
+    }
+    service.result_store.mark_running(
+        sequence, "c" * 64, ":read batch", mutation=False
+    )
+    service.result_store.complete(
+        sequence, "c" * 64, ":read batch", result
+    )
+
+    ok = service._execute_structured({
+        "op": "operation",
+        "type": "result_chunks",
+        "target_sequence": sequence,
+        "chunk_indexes": [0, 1],
+        "chunk_bytes": 512,
+    })
+    assert ok.ok is True
+    assert ok.data["chunks"][0]["chunk_index"] == 0
+    assert ok.data["chunks"][1]["chunk_index"] == 1
+
+    blocked = service._execute_structured({
+        "op": "operation",
+        "type": "result_chunks",
+        "target_sequence": sequence,
+        "chunk_indexes": list(range(9)),
+        "chunk_bytes": 512,
+    })
+    assert blocked.ok is False
+    assert blocked.code == "INVALID_RESULT_CHUNK"
+    assert "RESULT_CHUNK_INDEXES_REQUIRES_1_TO_8_ITEMS" in str(blocked.error)
