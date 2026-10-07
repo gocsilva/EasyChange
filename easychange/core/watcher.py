@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable
 
 from .indexer import Indexer
+from .subprocess_utils import hidden_console_kwargs
 
 
 class WorkspaceWatcher:
@@ -55,6 +56,7 @@ class WorkspaceWatcher:
             timeout=8,
             check=False,
             shell=False,
+            **hidden_console_kwargs(),
         )
         if completed.returncode not in {0, 1}:
             return b""
