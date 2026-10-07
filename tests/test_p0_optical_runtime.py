@@ -55,6 +55,42 @@ def test_optical_chunks_returns_only_requested_indexes_with_crc(tmp_path):
         service.close()
 
 
+
+
+def test_optical_chunks_rejects_multi_page_recovery_request(tmp_path):
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        sequence = "QOPTICALLIMIT1"
+        result = {
+            "ok": True,
+            "command": "read",
+            "data": {"text": "large-result-" * 1200},
+            "error": None,
+            "code": None,
+            "command_id": "C-LIMIT",
+            "duration_ms": 1,
+            "sequence": sequence,
+        }
+        service.result_store.mark_running(
+            sequence, "c" * 64, ":read large.cs", mutation=False
+        )
+        service.result_store.complete(
+            sequence, "c" * 64, ":read large.cs", result
+        )
+
+        response = service._execute_structured({
+            "op": "operation",
+            "type": "optical_chunks",
+            "target_sequence": sequence,
+            "chunk_indexes": list(range(17)),
+        })
+
+        assert response.ok is False
+        assert response.code == "INVALID_RESULT_CHUNK"
+        assert "CHUNK_INDEXES_REQUIRES_1_TO_16_ITEMS" in str(response.error)
+    finally:
+        service.close()
+
 def test_smart_test_summary_parses_dotnet_and_pytest_counts():
     summary = ProjectRuntimeService._test_summary([
         {
