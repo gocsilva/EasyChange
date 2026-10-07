@@ -55,6 +55,7 @@ class Indexer:
         self.db_path = root / ".easychange" / "index.db"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._protected_paths: set[str] = set()
         self._fully_indexed = False
         self._build_thread: threading.Thread | None = None
         self._last_refresh_at = 0.0
@@ -83,6 +84,7 @@ class Indexer:
         db = sqlite3.connect(self.db_path, timeout=10)
         try:
             db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA secure_delete=ON")
             db.execute("PRAGMA synchronous=NORMAL")
             db.execute("PRAGMA temp_store=MEMORY")
             yield db
@@ -163,11 +165,66 @@ class Indexer:
             if content is not None:
                 db.execute("INSERT INTO files_fts(path,content) VALUES(?,?)", (relative, content))
 
+
+    @staticmethod
+    def _normalize_relative_path(relative_path: str) -> str:
+        value = str(relative_path or "").replace("\\", "/").strip()
+        while value.startswith("./"):
+            value = value[2:]
+        value = value.strip("/")
+        if (
+            not value
+            or value == ".."
+            or value.startswith("../")
+            or "/../" in f"/{value}/"
+        ):
+            raise ValueError("INVALID_PROTECTED_INDEX_PATH")
+        return value
+
+    def protect_path(self, relative_path: str, *, scrub: bool = True) -> dict:
+        """Exclude a known sensitive workspace file and purge prior indexed content."""
+        relative = self._normalize_relative_path(relative_path)
+        with self._lock:
+            self._protected_paths.add(relative)
+            with self._connect() as db:
+                db.execute("DELETE FROM files WHERE path=?", (relative,))
+                db.execute("DELETE FROM symbols WHERE path=?", (relative,))
+                if self._fts_enabled:
+                    db.execute("DELETE FROM files_fts WHERE path=?", (relative,))
+            if scrub:
+                # Deleted SQLite cells/WAL frames may otherwise retain plaintext.
+                # Rebuild locally after the targeted delete; secret-source imports
+                # are rare and bounded to small files, so correctness wins here.
+                db = sqlite3.connect(self.db_path, timeout=10, isolation_level=None)
+                try:
+                    db.execute("PRAGMA secure_delete=ON")
+                    try:
+                        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    except sqlite3.OperationalError:
+                        pass
+                    db.execute("VACUUM")
+                    try:
+                        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    except sqlite3.OperationalError:
+                        pass
+                finally:
+                    db.close()
+        return {"path": relative, "protected": True, "scrubbed": bool(scrub)}
+
+    def protected_paths(self) -> list[str]:
+        with self._lock:
+            return sorted(self._protected_paths)
     def update_path(self, relative_path: str) -> dict:
         """Update exactly one known path after an EasyChange mutation."""
         relative = relative_path.replace("\\", "/")
         target = self.root / Path(relative)
         with self._lock, self._connect() as db:
+            if relative in self._protected_paths:
+                db.execute("DELETE FROM files WHERE path=?", (relative,))
+                db.execute("DELETE FROM symbols WHERE path=?", (relative,))
+                if self._fts_enabled:
+                    db.execute("DELETE FROM files_fts WHERE path=?", (relative,))
+                return {"path": relative, "ignored": True, "protected": True}
             if not target.exists() or not target.is_file():
                 db.execute("DELETE FROM files WHERE path=?", (relative,))
                 db.execute("DELETE FROM symbols WHERE path=?", (relative,))
@@ -202,6 +259,8 @@ class Indexer:
                 if any(part in SKIP_DIRS for part in relative_path.parts):
                     continue
                 relative = relative_path.as_posix()
+                if relative in self._protected_paths:
+                    continue
                 stat = path.stat()
             except OSError:
                 continue
@@ -219,6 +278,12 @@ class Indexer:
         with self._lock, self._connect() as db:
             for (path, relative, _, _), row in zip(changed, loaded):
                 rel, size, mtime_ns, digest, content, symbols = row
+                if rel in self._protected_paths:
+                    db.execute("DELETE FROM files WHERE path=?", (rel,))
+                    db.execute("DELETE FROM symbols WHERE path=?", (rel,))
+                    if self._fts_enabled:
+                        db.execute("DELETE FROM files_fts WHERE path=?", (rel,))
+                    continue
                 if not digest:
                     continue
                 self._replace_index_row(db, rel, path.suffix.lower(), size, mtime_ns, digest, content, symbols)

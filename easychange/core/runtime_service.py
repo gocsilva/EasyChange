@@ -188,6 +188,82 @@ class ProjectRuntimeService:
             "env_refs": dict(profile.get("env_refs") or {}),
         }
 
+
+    def environment_resolution_status(
+        self,
+        profile_id: str = "",
+        *,
+        env_key: str = "",
+        ref_name: str = "",
+    ) -> dict[str, Any]:
+        """Return compact, secret-free resolution state for one runtime profile."""
+        profile = self.profile(profile_id)
+        _env, metadata = self.resolve_environment(profile, require_all=False)
+        refs = self._env_refs(profile.get("env_refs"))
+        resolved_keys = {
+            str(item) for item in (metadata.get("resolved_env_keys") or [])
+        }
+        unresolved_refs = {
+            str(item) for item in (metadata.get("unresolved_env_refs") or [])
+        }
+        unresolved_keys = sorted(
+            key for key, ref in refs.items() if ref in unresolved_refs
+        )
+        resolved_ref_keys = sorted(
+            key for key, ref in refs.items()
+            if ref not in unresolved_refs and key in resolved_keys
+        )
+
+        key_filter = str(env_key or "").strip()
+        ref_filter = str(ref_name or "").strip()
+        selected = None
+        if key_filter:
+            selected_ref = refs.get(key_filter)
+            selected = {
+                "env_key": key_filter,
+                "configured": bool(
+                    key_filter in refs
+                    or key_filter in (profile.get("env") or {})
+                ),
+                "uses_ref": selected_ref is not None,
+                "ref": selected_ref,
+                "resolved": key_filter in resolved_keys,
+                "unresolved": (
+                    bool(selected_ref)
+                    and selected_ref in unresolved_refs
+                ),
+            }
+        elif ref_filter:
+            matching_keys = sorted(
+                key for key, ref in refs.items()
+                if ref == ref_filter
+                or ref.split(":", 1)[-1] == ref_filter
+            )
+            selected = {
+                "ref": ref_filter,
+                "configured": bool(matching_keys),
+                "env_keys": matching_keys,
+                "resolved": bool(matching_keys)
+                and all(key in resolved_keys for key in matching_keys),
+                "unresolved": any(
+                    refs[key] in unresolved_refs for key in matching_keys
+                ),
+            }
+
+        return {
+            "profile_id": profile.get("id"),
+            "runnable": bool(profile.get("runnable")),
+            "all_refs_resolved": not unresolved_keys,
+            "resolved_ref_keys": resolved_ref_keys,
+            "unresolved_ref_keys": unresolved_keys,
+            "resolved_ref_count": len(resolved_ref_keys),
+            "unresolved_ref_count": len(unresolved_keys),
+            "configured_ref_count": len(refs),
+            "selected": selected,
+            "secret_values_returned": False,
+            "compact": True,
+        }
+
     def _configured_profiles(self) -> list[dict[str, Any]]:
         if not self.config_path.exists():
             return []

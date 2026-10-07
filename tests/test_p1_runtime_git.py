@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from easychange.core.command_service import CommandService
 from easychange.core.git_service import GitService
 from easychange.core.process_service import ProcessService
 from easychange.core.runtime_service import ProjectRuntimeService
@@ -215,3 +216,71 @@ def test_runtime_secret_output_is_redacted(tmp_path, monkeypatch):
     assert result["passed"] is True
     assert "do-not-leak-12345" not in payload
     assert "[REDACTED]" in payload
+
+
+
+def test_runtime_environment_resolution_status_is_compact_and_secret_free(tmp_path, monkeypatch):
+    workspace = Workspace.open(tmp_path)
+    service = CommandService(workspace)
+    try:
+        service.runtime.configure_profile(
+            "api-hml",
+            kind="dotnet-api",
+            run_argv=["dotnet", "run"],
+            env={"STATIC_KEY": "visible-config"},
+            env_refs={
+                "ConnectionString": "MCP_HOST_ENV:ACAM_HML_CONNECTION",
+                "OtherKey": "MCP_HOST_ENV:OTHER_VALUE",
+            },
+        )
+        monkeypatch.setattr(
+            service.runtime,
+            "external_env_provider",
+            lambda: {"ACAM_HML_CONNECTION": "SECRET-VALUE-THAT-MUST-NOT-LEAK"},
+        )
+        result = service._execute_structured({
+            "op": "operation",
+            "type": "runtime_environment_status",
+            "profile": "api-hml",
+            "env_key": "ConnectionString",
+        })
+        assert result.ok is True
+        primary = result.data["primary"]["data"]
+        assert primary["compact"] is True
+        assert primary["all_refs_resolved"] is False
+        assert primary["resolved_ref_keys"] == ["ConnectionString"]
+        assert primary["unresolved_ref_keys"] == ["OtherKey"]
+        assert primary["selected"]["configured"] is True
+        assert primary["selected"]["resolved"] is True
+        assert primary["secret_values_returned"] is False
+        serialized = json.dumps(primary, ensure_ascii=False)
+        assert "SECRET-VALUE-THAT-MUST-NOT-LEAK" not in serialized
+        assert "STATIC_KEY" not in serialized
+    finally:
+        service.close()
+
+
+def test_runtime_environment_resolution_status_can_query_ref_name(tmp_path, monkeypatch):
+    workspace = Workspace.open(tmp_path)
+    service = CommandService(workspace)
+    try:
+        service.runtime.configure_profile(
+            "api-hml",
+            kind="dotnet-api",
+            run_argv=["dotnet", "run"],
+            env_refs={"ConnectionString": "MCP_HOST_ENV:ACAM_HML_CONNECTION"},
+        )
+        monkeypatch.setattr(
+            service.runtime,
+            "external_env_provider",
+            lambda: {"ACAM_HML_CONNECTION": "secret"},
+        )
+        status = service.runtime.environment_resolution_status(
+            "api-hml",
+            ref_name="ACAM_HML_CONNECTION",
+        )
+        assert status["selected"]["configured"] is True
+        assert status["selected"]["resolved"] is True
+        assert status["selected"]["env_keys"] == ["ConnectionString"]
+    finally:
+        service.close()

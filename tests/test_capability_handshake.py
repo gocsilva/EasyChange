@@ -114,3 +114,16 @@ def test_capabilities_explain_safe_result_rechunking(tmp_path):
         assert manifest["max_result"]["logical_chunk_rechunkable"] is True
     finally:
         service.close()
+
+
+
+def test_capabilities_prefer_compact_runtime_environment_status(tmp_path):
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        manifest = service.execute(":capabilities --compact").data["capability_manifest"]
+        assert manifest["feature_flags"]["compact_runtime_environment_status"] is True
+        contract = manifest["runtime_environment_contract"]
+        assert contract["compact_status_operation"] == "runtime_environment_status"
+        assert contract["secret_values_returned"] is False
+    finally:
+        service.close()

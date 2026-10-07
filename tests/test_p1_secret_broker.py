@@ -509,3 +509,49 @@ def test_workspace_secret_source_can_feed_runtime_env_ref(tmp_path, monkeypatch)
         assert marker not in rendered
     finally:
         service.close()
+
+
+
+def test_secret_source_path_is_persistently_excluded_from_index(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    secret = "SENSITIVE-INDEX-PAYLOAD-123456"
+    source = tmp_path / "private-source.txt"
+    source.write_text(secret, encoding="utf-8")
+
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        imported = service._execute_structured({
+            "op": "operation",
+            "type": "secret_broker_import_source",
+            "source_name": "PRIVATE_SOURCE",
+            "path": "private-source.txt",
+            "source_format": "raw",
+        })
+        assert imported.ok is True
+        service.indexer.refresh(force=True)
+        assert "private-source.txt" in service.indexer.protected_paths()
+        assert all(
+            item["path"] != "private-source.txt"
+            for item in service.indexer.files(limit=1000)
+        )
+    finally:
+        service.close()
+
+    session = json.loads(
+        (tmp_path / ".easychange" / "session.json").read_text(encoding="utf-8")
+    )
+    assert "private-source.txt" in session["sensitive_source_paths"]
+
+    reopened = CommandService(Workspace.open(tmp_path))
+    try:
+        reopened.indexer.refresh(force=True)
+        assert "private-source.txt" in reopened.indexer.protected_paths()
+        assert all(
+            item["path"] != "private-source.txt"
+            for item in reopened.indexer.files(limit=1000)
+        )
+        for file in (tmp_path / ".easychange").rglob("*"):
+            if file.is_file():
+                assert secret.encode("utf-8") not in file.read_bytes()
+    finally:
+        reopened.close()

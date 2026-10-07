@@ -91,6 +91,11 @@ class CommandService:
         self.aliases = dict(self.state_store.data.get("aliases", {}))
         self.parser = CommandParser(self.aliases)
         self.indexer = Indexer(workspace.root_path)
+        for sensitive_path in self.state_store.data.get("sensitive_source_paths", []):
+            try:
+                self.indexer.protect_path(str(sensitive_path), scrub=True)
+            except (OSError, ValueError):
+                pass
         self.symbol_service = SymbolService(workspace, self.indexer)
         # Build the persistent index in the background. Cold searches use git
         # immediately instead of blocking the AI on a full repository scan.
@@ -2108,6 +2113,16 @@ class CommandService:
                         kind,
                         data=self.runtime.environment_status(str(item.get("profile") or "")),
                     )
+                elif kind == "runtime_environment_status":
+                    result = Result(
+                        True,
+                        kind,
+                        data=self.runtime.environment_resolution_status(
+                            str(item.get("profile") or ""),
+                            env_key=str(item.get("env_key") or ""),
+                            ref_name=str(item.get("ref") or item.get("ref_name") or ""),
+                        ),
+                    )
                 elif kind == "git_diff":
                     result = Result(
                         True,
@@ -2387,6 +2402,11 @@ class CommandService:
             transaction_data = transaction.data if transaction.ok else {"state": "UNKNOWN", "error": transaction.code}
             ok = bool(ok and transaction.ok)
 
+        single_failure = (
+            results[0]
+            if not ok and not transactional and len(results) == 1 and isinstance(results[0], dict)
+            else None
+        )
         result = Result(
             ok,
             "structured",
@@ -2399,8 +2419,20 @@ class CommandService:
                 "summary": summary,
                 "transaction": transaction_data,
             },
-            error=None if ok else ("Structured batch failed and was rolled back" if transactional else "Structured read batch failed"),
-            code=None if ok else "STRUCTURED_BATCH_FAILED",
+            error=(
+                None
+                if ok
+                else (
+                    "Structured batch failed and was rolled back"
+                    if transactional
+                    else str((single_failure or {}).get("error") or "Structured read batch failed")
+                )
+            ),
+            code=(
+                None
+                if ok
+                else str((single_failure or {}).get("code") or "STRUCTURED_BATCH_FAILED")
+            ),
             command_id=self.ids.next("C"),
             duration_ms=int((time.monotonic() - started) * 1000),
         )
@@ -2571,6 +2603,19 @@ class CommandService:
         resolved = self.workspace.resolve(source_path, must_exist=True)
         if not resolved.is_file():
             raise ValueError("SECRET_SOURCE_MUST_BE_FILE")
+
+        relative_source = resolved.relative_to(self.workspace.root_path).as_posix()
+        protected = [
+            str(item)
+            for item in self.state_store.data.get("sensitive_source_paths", [])
+            if str(item).strip()
+        ]
+        if relative_source not in protected:
+            protected.append(relative_source)
+            self.state_store.data["sensitive_source_paths"] = protected[-128:]
+            self.state_store.save()
+        self.indexer.protect_path(relative_source, scrub=True)
+
         try:
             size = int(resolved.stat().st_size)
         except OSError:
@@ -2810,6 +2855,7 @@ class CommandService:
             "operation_profiles": True,
             "adaptive_optical_dwell": True,
             "mcp_optical_tuning": True,
+            "compact_runtime_environment_status": True,
         }
         fingerprint_source = {
             "core_version": __version__,
@@ -2831,6 +2877,11 @@ class CommandService:
                 "default_max_ms": 1800,
                 "default_current_ms": 900,
                 "guidance": "MCP should tune dwell to measured HDMI/decode latency: increase after incomplete delivery and decrease gradually after sustained healthy delivery.",
+            },
+            "runtime_environment_contract": {
+                "compact_status_operation": "runtime_environment_status",
+                "secret_values_returned": False,
+                "guidance": "Use runtime_environment_status for confirmation of env-ref resolution. Use runtime_environment only when the complete ref/key metadata is actually required.",
             },
             "result_chunk_recovery_contract": {
                 "adaptive_rechunking": True,
@@ -2860,6 +2911,7 @@ class CommandService:
             "operation_profiles": structured.get("operations") or {},
             "feature_flags": feature_flags,
             "optical_transport": self.optical_transport_config(),
+            "runtime_environment_contract": fingerprint_source["runtime_environment_contract"],
             "result_chunk_recovery_contract": fingerprint_source["result_chunk_recovery_contract"],
             "max_payload": {
                 "decoded_command_bytes": 262144,
