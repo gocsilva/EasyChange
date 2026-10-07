@@ -235,3 +235,37 @@ def test_large_burst_page_plan_covers_each_payload_exactly_once_per_cycle(tmp_pa
 
     assert seen == list(range(len(window._optical_payloads)))
     window.close(); app.processEvents()
+
+
+def test_explicit_human_gui_launch_resets_persisted_machine_transport(tmp_path):
+    state_dir = tmp_path / ".easychange"
+    state_dir.mkdir(parents=True)
+    (state_dir / "session.json").write_text(
+        json.dumps({
+            "session_id": "SGUI",
+            "workspace": str(tmp_path),
+            "mode": "machine",
+            "output_mode": "compact",
+            "transport": "hid",
+            "history": [],
+            "aliases": {},
+            "id_counts": {"C": 0, "R": 0},
+            "macros": {},
+            "snapshots": {},
+            "file_refs": {},
+            "results": {},
+        }),
+        encoding="utf-8",
+    )
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=False, hid_mode=False)
+    try:
+        assert window._machine is False
+        assert window.service.machine is False
+        assert window.service.output == "text"
+        assert window.service.state_store.data["mode"] == "human"
+        assert window.service.state_store.data["transport"] == "local"
+        assert window.service.state_store.data["output_mode"] == "text"
+    finally:
+        window.close(); app.processEvents()

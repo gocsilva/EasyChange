@@ -83,6 +83,20 @@ class MainWindow(QMainWindow):
         self._machine = self.service.machine if machine_mode is None else machine_mode
         self.service.machine = self._machine
         self._workspace_dialog_open = False
+
+        # An explicit human launch is a mode override, not merely a visual hint.
+        # The persisted session is commonly left in machine/HID/compact mode by
+        # the remote launcher. Without resetting that state, the GUI launcher can
+        # reopen as Machine Mode or render compact transport output and look
+        # "broken" even though the window process started successfully.
+        if machine_mode is False and not hid_mode:
+            self.service.machine = False
+            self.service.output = "text"
+            self.service.state_store.data["mode"] = "human"
+            self.service.state_store.data["transport"] = "local"
+            self.service.state_store.data["output_mode"] = "text"
+            self.service._persist_state()
+
         if hid_mode:
             self.service.output = "compact"
             self.service.state_store.data["transport"] = "hid"

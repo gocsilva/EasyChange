@@ -3664,7 +3664,15 @@ class CommandService:
             if include_test:
                 # validate has just completed a successful .NET build, so do
                 # not make dotnet test rebuild the same solution again.
-                test_args = list(_profile_command(self.workspace, "test") or []) if "DOTNET" in set(self.workspace.adapters or []) else []\n                if test_args and "--no-build" not in test_args:\n                    test_args.append("--no-build")\n                if test_args and "--no-restore" not in test_args:\n                    test_args.append("--no-restore")
+                test_args = (
+                    list(_profile_command(self.workspace, "test") or [])
+                    if "DOTNET" in set(self.workspace.adapters or [])
+                    else []
+                )
+                if test_args and "--no-build" not in test_args:
+                    test_args.append("--no-build")
+                if test_args and "--no-restore" not in test_args:
+                    test_args.append("--no-restore")
                 test_result = self.execute_tokens("test", test_args, raw=":test")
                 if not test_result.ok:
                     raise ProcessFailure(Result(False, "validate", data={"diff": diff, "build": build.to_dict(),
