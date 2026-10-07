@@ -2262,7 +2262,7 @@ const sensitive=(e)=>{
 for(const e of root.querySelectorAll('input,textarea')){
  if(sensitive(e)){e.setAttribute('value','[REDACTED]');e.textContent='[REDACTED]';}
 }
-return {html:'<!doctype html>\n'+root.outerHTML,url:location.href,title:document.title,
+return {html:'<!doctype html>'+String.fromCharCode(10)+root.outerHTML,url:location.href,title:document.title,
  scrollX:window.scrollX,scrollY:window.scrollY,viewportWidth:window.innerWidth,
  viewportHeight:window.innerHeight,totalWidth:Math.max(document.documentElement.scrollWidth,document.body?document.body.scrollWidth:0),
  totalHeight:Math.max(document.documentElement.scrollHeight,document.body?document.body.scrollHeight:0),

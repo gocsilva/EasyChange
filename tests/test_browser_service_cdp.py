@@ -673,3 +673,34 @@ def test_restore_easychange_foreground_fails_closed_when_windows_refuses_focus(t
     assert result["focus_restore_attempted"] is True
     assert result["focus_restore_attempts"] == 2
     assert len(user32.set_foreground_calls) == 2
+
+
+def test_dom_script_avoids_literal_newline_inside_javascript_string(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    captured = {}
+
+    def fake_evaluate(session_id, expression, timeout=10.0):
+        captured["session_id"] = session_id
+        captured["expression"] = expression
+        captured["timeout"] = timeout
+        return {
+            "html": "<!doctype html>\n<html><body>ok</body></html>",
+            "url": "data:text/html,test",
+            "title": "test",
+            "scrollX": 0,
+            "scrollY": 0,
+            "viewportWidth": 800,
+            "viewportHeight": 600,
+            "totalWidth": 800,
+            "totalHeight": 600,
+            "focused": "BODY",
+        }
+
+    monkeypatch.setattr(browser, "_evaluate", fake_evaluate)
+
+    result = browser.dom("dom-test", cursor=0, max_bytes=2048)
+
+    assert result["complete"] is True
+    assert "String.fromCharCode(10)" in captured["expression"]
+    assert "<!doctype html>\n'" not in captured["expression"]
+    assert "ok" in result["text"]
