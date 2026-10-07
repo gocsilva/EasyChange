@@ -353,3 +353,159 @@ def test_async_runtime_job_never_persists_unredacted_broker_value(tmp_path, monk
         assert "[REDACTED]" in rendered
     finally:
         service.close()
+
+
+
+def test_workspace_secret_source_import_never_returns_plaintext(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    raw_secret = "Server=hml-db;Database=CAMBIO_ACAMS;Password=NeverExposeThis;"
+    (tmp_path / "dbhml.txt").write_text(raw_secret + "\n", encoding="utf-8")
+    (tmp_path / "appsettings.HML.json").write_text(
+        json.dumps({
+            "Bs2HttpConfigurationOptions": {
+                "ApiKeyAuthorization": {
+                    "ApiKey": "PROJECT-API-KEY-SECRET-123"
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env.test").write_text(
+        "OTHER=value\nTARGET_TOKEN='ENV-SECRET-456'\n",
+        encoding="utf-8",
+    )
+
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        raw = service._execute_structured({
+            "op": "operation",
+            "type": "secret_broker_import_source",
+            "source_name": "ACAM_HML_CONNECTION",
+            "path": "dbhml.txt",
+            "source_format": "raw",
+        })
+        js = service._execute_structured({
+            "op": "operation",
+            "type": "secret_broker_import_source",
+            "source_name": "ACAM_API_KEY",
+            "path": "appsettings.HML.json",
+            "source_format": "json",
+            "key": "Bs2HttpConfigurationOptions.ApiKeyAuthorization.ApiKey",
+        })
+        env = service._execute_structured({
+            "op": "operation",
+            "type": "secret_broker_import_source",
+            "source_name": "ENV_TOKEN",
+            "path": ".env.test",
+            "source_format": "env",
+            "key": "TARGET_TOKEN",
+        })
+
+        assert raw.ok is True
+        assert js.ok is True
+        assert env.ok is True
+        rendered = json.dumps(
+            [raw.to_dict(), js.to_dict(), env.to_dict()],
+            ensure_ascii=False,
+        )
+        assert raw_secret not in rendered
+        assert "PROJECT-API-KEY-SECRET-123" not in rendered
+        assert "ENV-SECRET-456" not in rendered
+        assert "secret_values_returned" in rendered
+
+        values = service.secret_broker.values()
+        assert values["ACAM_HML_CONNECTION"] == raw_secret
+        assert values["ACAM_API_KEY"] == "PROJECT-API-KEY-SECRET-123"
+        assert values["ENV_TOKEN"] == "ENV-SECRET-456"
+
+        owned = tmp_path / ".easychange"
+        for file in owned.rglob("*"):
+            if not file.is_file():
+                continue
+            payload = file.read_bytes()
+            assert raw_secret.encode("utf-8") not in payload, file
+            assert b"PROJECT-API-KEY-SECRET-123" not in payload, file
+            assert b"ENV-SECRET-456" not in payload, file
+    finally:
+        service.close()
+
+
+def test_workspace_secret_source_is_workspace_scoped_and_scalar_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    outside = tmp_path.parent / "outside-secret.txt"
+    outside.write_text("OUTSIDE-SECRET", encoding="utf-8")
+    (tmp_path / "nested.json").write_text(
+        '{"credential":{"object":{"not":"scalar"}}}',
+        encoding="utf-8",
+    )
+
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        escaped = service._execute_structured({
+            "op": "operation",
+            "type": "secret_broker_import_source",
+            "source_name": "ESCAPED_SECRET",
+            "path": "../outside-secret.txt",
+            "source_format": "raw",
+        })
+        nonscalar = service._execute_structured({
+            "op": "operation",
+            "type": "secret_broker_import_source",
+            "source_name": "OBJECT_SECRET",
+            "path": "nested.json",
+            "source_format": "json",
+            "key": "credential.object",
+        })
+
+        assert escaped.ok is False
+        assert "Path escapes workspace" in str(escaped.error)
+        assert nonscalar.ok is False
+        assert "SECRET_SOURCE_VALUE_MUST_BE_SCALAR" in str(nonscalar.error)
+        assert "OUTSIDE-SECRET" not in json.dumps(escaped.to_dict())
+        assert service.secret_broker.status()["count"] == 0
+    finally:
+        service.close()
+
+
+def test_workspace_secret_source_can_feed_runtime_env_ref(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    marker = "REMOTE-LOCAL-SECRET-789"
+    (tmp_path / "runtime.env").write_text(
+        "ACAM_PASSWORD=" + marker + "\n",
+        encoding="utf-8",
+    )
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        imported = service._execute_structured({
+            "op": "operation",
+            "type": "secret_broker_import_source",
+            "source_name": "ACAM_PASSWORD",
+            "path": "runtime.env",
+            "source_format": "env",
+            "key": "ACAM_PASSWORD",
+        })
+        assert imported.ok is True
+
+        service.runtime.configure_profile(
+            "workspace-secret-runtime",
+            kind="custom",
+            test_argv=[
+                sys.executable,
+                "-c",
+                (
+                    "import os;"
+                    "print('secret-present=' + "
+                    "str(bool(os.environ.get('PASSWORD'))))"
+                ),
+            ],
+            env_refs={"PASSWORD": "MCP_HOST_ENV:ACAM_PASSWORD"},
+            inherit_env=False,
+        )
+        tested = service.runtime.smart_test("workspace-secret-runtime", timeout=30)
+        rendered = json.dumps(tested, ensure_ascii=False)
+
+        assert tested["passed"] is True
+        assert "secret-present=True" in rendered
+        assert marker not in rendered
+    finally:
+        service.close()
