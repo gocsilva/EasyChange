@@ -52,3 +52,49 @@ def test_capability_manifest_publishes_operation_safety_profiles(tmp_path):
         assert profiles["db_query"]["conditional_side_effect"] is True
     finally:
         service.close()
+
+
+
+def test_capabilities_publish_adaptive_optical_transport_contract(tmp_path):
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        manifest = service.execute(":capabilities --compact").data["capability_manifest"]
+        assert manifest["feature_flags"]["adaptive_optical_dwell"] is True
+        assert manifest["feature_flags"]["mcp_optical_tuning"] is True
+        assert manifest["optical_transport"]["adaptive_enabled"] is True
+        assert manifest["optical_transport"]["consumer_contract"]["mcp_should_tune"] is True
+    finally:
+        service.close()
+
+
+def test_structured_optical_transport_configuration_persists(tmp_path):
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        configured = service._execute_structured({
+            "op": "operation",
+            "type": "optical_transport_configure",
+            "adaptive_enabled": True,
+            "min_ms": 650,
+            "max_ms": 1700,
+            "current_ms": 1050,
+            "step_ms": 125,
+            "adjusted_by": "mcp_auto",
+        })
+        assert configured.ok is True
+        assert configured.data["current_ms"] == 1050
+        queried = service._execute_structured({
+            "op": "operation",
+            "type": "optical_transport_get",
+        })
+        assert queried.ok is True
+        assert queried.data["min_ms"] == 650
+        assert queried.data["max_ms"] == 1700
+        assert queried.data["last_adjusted_by"] == "mcp_auto"
+    finally:
+        service.close()
+
+    reopened = CommandService(Workspace.open(tmp_path))
+    try:
+        assert reopened.optical_transport_config()["current_ms"] == 1050
+    finally:
+        reopened.close()

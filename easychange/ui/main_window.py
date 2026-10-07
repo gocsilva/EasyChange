@@ -7,8 +7,8 @@ from easychange.remote.optical_protocol import encode_result_bundle
 
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QApplication, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-                               QMessageBox, QPushButton,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+                               QMessageBox, QPushButton, QSpinBox,
                                QPlainTextEdit, QSplitter, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
@@ -70,7 +70,7 @@ class MainWindow(QMainWindow):
     _OPTICAL_BURST_COLUMNS = 4
     # A burst page must remain visible for more than two typical HDMI capture
     # periods. This reduces missed pages under paint/capture/decode jitter.
-    _OPTICAL_BURST_INTERVAL_MS = 520
+    _OPTICAL_BURST_INTERVAL_MS = 900
     # Bound the initial optical broadcast. Very large results remain durable in
     # ResultStore and are fetched selectively by optical_chunks. The old code
     # built/cached one QPixmap per result chunk and could consume hundreds of
@@ -124,6 +124,46 @@ class MainWindow(QMainWindow):
         header_row.addWidget(self.header, 1)
         header_row.addWidget(self.select_workspace_button)
         header_row.addWidget(self.cleanup_easychange_button)
+
+        self.optical_controls = QWidget()
+        self.optical_controls.setObjectName("opticalTransportControls")
+        optical_layout = QHBoxLayout(self.optical_controls)
+        optical_layout.setContentsMargins(0, 0, 0, 0)
+        optical_layout.setSpacing(6)
+        self.optical_status = QLabel()
+        self.optical_status.setObjectName("opticalTransportStatus")
+        self.optical_status.setToolTip(
+            "EC2 usa dwell adaptativo. O MCP deve aumentar o tempo quando HDMI/decoder "
+            "estiverem lentos ou houver RESULT_INCOMPLETE e reduzir gradualmente quando "
+            "as entregas estiverem saudáveis."
+        )
+        self.optical_adaptive = QCheckBox("EC2 adaptativo (MCP ajusta)")
+        self.optical_adaptive.setObjectName("opticalAdaptiveEnabled")
+        self.optical_min = QSpinBox()
+        self.optical_min.setObjectName("opticalMinMs")
+        self.optical_min.setRange(300, 5000)
+        self.optical_min.setPrefix("mín ")
+        self.optical_min.setSuffix(" ms")
+        self.optical_current = QSpinBox()
+        self.optical_current.setObjectName("opticalCurrentMs")
+        self.optical_current.setRange(300, 5000)
+        self.optical_current.setPrefix("atual ")
+        self.optical_current.setSuffix(" ms")
+        self.optical_max = QSpinBox()
+        self.optical_max.setObjectName("opticalMaxMs")
+        self.optical_max.setRange(300, 5000)
+        self.optical_max.setPrefix("máx ")
+        self.optical_max.setSuffix(" ms")
+        optical_layout.addWidget(self.optical_status, 1)
+        optical_layout.addWidget(self.optical_adaptive)
+        optical_layout.addWidget(self.optical_min)
+        optical_layout.addWidget(self.optical_current)
+        optical_layout.addWidget(self.optical_max)
+        self._sync_optical_transport_controls()
+        self.optical_adaptive.toggled.connect(self._save_optical_transport_controls)
+        self.optical_min.editingFinished.connect(self._save_optical_transport_controls)
+        self.optical_current.editingFinished.connect(self._save_optical_transport_controls)
+        self.optical_max.editingFinished.connect(self._save_optical_transport_controls)
 
         self.tree = QTreeWidget(); self.tree.setHeaderLabel("FILES")
         if not self._machine:
@@ -219,7 +259,7 @@ class MainWindow(QMainWindow):
         self.command = QLineEdit(); self.command.setPlaceholderText("COMMAND > :remote-guide | Ctrl+K | Enter")
         self.command.setMaxLength(65535)
         self.command.installEventFilter(self)
-        layout.addLayout(header_row); layout.addWidget(self.workspace_split, 1); layout.addWidget(self.result_panel); layout.addWidget(self.command)
+        layout.addLayout(header_row); layout.addWidget(self.optical_controls); layout.addWidget(self.workspace_split, 1); layout.addWidget(self.result_panel); layout.addWidget(self.command)
         self.setCentralWidget(central)
         self.command.returnPressed.connect(self.execute_command)
         self.tree.itemActivated.connect(self.open_selected)
@@ -550,6 +590,61 @@ class MainWindow(QMainWindow):
         self._refresh_header()
         self.focus_command()
 
+
+    def _sync_optical_transport_controls(self) -> dict:
+        config = self.service.optical_transport_config()
+        controls = (
+            self.optical_adaptive,
+            self.optical_min,
+            self.optical_current,
+            self.optical_max,
+        )
+        for control in controls:
+            control.blockSignals(True)
+        try:
+            self.optical_adaptive.setChecked(bool(config["adaptive_enabled"]))
+            self.optical_min.setValue(int(config["min_ms"]))
+            self.optical_max.setValue(int(config["max_ms"]))
+            self.optical_current.setRange(int(config["min_ms"]), int(config["max_ms"]))
+            self.optical_current.setValue(int(config["current_ms"]))
+        finally:
+            for control in controls:
+                control.blockSignals(False)
+        if config["adaptive_enabled"]:
+            self.optical_status.setText(
+                f"EC2 ADAPTATIVO • {config['current_ms']} ms "
+                f"({config['min_ms']}–{config['max_ms']} ms) • "
+                "MCP ajusta conforme HDMI/decoder"
+            )
+        else:
+            self.optical_status.setText(
+                f"EC2 MANUAL • {config['current_ms']} ms "
+                f"({config['min_ms']}–{config['max_ms']} ms)"
+            )
+        self.optical_current.setEnabled(not bool(config["adaptive_enabled"]))
+        if hasattr(self, "_optical_timer"):
+            self._optical_timer.setInterval(int(config["current_ms"]))
+        return config
+
+    def _save_optical_transport_controls(self) -> None:
+        min_ms = int(self.optical_min.value())
+        max_ms = int(self.optical_max.value())
+        if min_ms > max_ms:
+            if self.sender() is self.optical_min:
+                max_ms = min_ms
+                self.optical_max.setValue(max_ms)
+            else:
+                min_ms = max_ms
+                self.optical_min.setValue(min_ms)
+        current_ms = max(min_ms, min(max_ms, int(self.optical_current.value())))
+        self.service.configure_optical_transport(
+            adaptive_enabled=bool(self.optical_adaptive.isChecked()),
+            min_ms=min_ms,
+            max_ms=max_ms,
+            current_ms=current_ms,
+            adjusted_by="easychange_ui",
+        )
+        self._sync_optical_transport_controls()
     def _apply_machine_style(self) -> None:
         self.setStyleSheet("QWidget { background:#101820; color:#f2f5f7; font-family: Consolas, monospace; }" if self._machine else "")
         self.tree.setVisible(not self._machine)
@@ -581,6 +676,7 @@ class MainWindow(QMainWindow):
             self._machine = self.service.machine
             self._apply_machine_style()
         self._refresh_header()
+        self._sync_optical_transport_controls()
         focus = self.focus_command()
         if isinstance(result.data, dict):
             result.data["easychange_focus"] = focus
@@ -612,7 +708,9 @@ class MainWindow(QMainWindow):
             # Capture p95 is ~200ms on the physical HDMI path. Keep every
             # page visible for >2 capture periods so repaint/capture/QR decode
             # jitter cannot systematically skip a rotating page.
-            self._optical_timer.setInterval(self._OPTICAL_BURST_INTERVAL_MS)
+            self._optical_timer.setInterval(
+                int(self.service.optical_transport_config()["current_ms"])
+            )
         else:
             self.split.setVisible(True)
             self.output.setVisible(True)
@@ -620,7 +718,9 @@ class MainWindow(QMainWindow):
             self.result_panel.setMaximumHeight(340 if self._machine else 200)
             # Normal multi-page mode is only used for <=4 visible slots;
             # leave each page up long enough for HDMI capture + QR decode.
-            self._optical_timer.setInterval(420)
+            self._optical_timer.setInterval(
+                int(self.service.optical_transport_config()["current_ms"])
+            )
     def _update_machine_qr(self, result) -> None:
         self._optical_timer.stop()
         self._optical_render_generation += 1

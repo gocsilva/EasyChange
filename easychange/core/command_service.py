@@ -1452,11 +1452,42 @@ class CommandService:
         if not isinstance(operations, list) or not 1 <= len(operations) <= 64:
             return Result(False, "structured", error="OPERATION_COUNT_LIMIT", code="INVALID_STRUCTURED_PAYLOAD")
 
-        # Small durable-result queries intentionally bypass project/index work.
-        # They are the recovery API used when HDMI lost the original frame.
+        # Transport timing is a tiny control-plane operation. It bypasses
+        # project/index work just like durable result recovery and is persisted
+        # only in the workspace's EasyChange session state.
         if len(operations) == 1 and isinstance(operations[0], dict):
             query_item = operations[0]
             query_kind = str(query_item.get("type") or "").casefold()
+            if query_kind in {"optical_transport_get", "optical_transport_configure"}:
+                try:
+                    if query_kind == "optical_transport_configure":
+                        data = self.configure_optical_transport(
+                            adaptive_enabled=query_item.get("adaptive_enabled"),
+                            min_ms=query_item.get("min_ms"),
+                            max_ms=query_item.get("max_ms"),
+                            current_ms=query_item.get("current_ms"),
+                            step_ms=query_item.get("step_ms"),
+                            adjusted_by=str(query_item.get("adjusted_by") or "mcp"),
+                        )
+                    else:
+                        data = self.optical_transport_config()
+                except (TypeError, ValueError) as exc:
+                    return Result(
+                        False,
+                        query_kind,
+                        error=str(exc),
+                        code="INVALID_OPTICAL_TRANSPORT_CONFIG",
+                    )
+                return Result(
+                    True,
+                    query_kind,
+                    data=data,
+                    command_id=self.ids.next("C"),
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+
+            # Small durable-result queries intentionally bypass project/index work.
+            # They are the recovery API used when HDMI lost the original frame.
             if query_kind in STRUCTURED_RECOVERY_TYPES:
                 target_sequence = str(query_item.get("sequence") or query_item.get("target_sequence") or "").upper()
                 if not re.fullmatch(r"Q[A-Z0-9_-]{4,40}", target_sequence):
@@ -2641,6 +2672,115 @@ class CommandService:
             "secret_values_returned": False,
         }
 
+
+    def optical_transport_config(self) -> dict:
+        """Return normalized EC2 optical timing configuration for this workspace."""
+        defaults = {
+            "adaptive_enabled": True,
+            "min_ms": 600,
+            "max_ms": 1800,
+            "current_ms": 900,
+            "step_ms": 100,
+        }
+        raw = self.state_store.data.get("optical_transport")
+        if not isinstance(raw, dict):
+            raw = {}
+        adaptive_enabled = bool(raw.get("adaptive_enabled", defaults["adaptive_enabled"]))
+        min_ms = int(raw.get("min_ms") or defaults["min_ms"])
+        max_ms = int(raw.get("max_ms") or defaults["max_ms"])
+        current_ms = int(raw.get("current_ms") or defaults["current_ms"])
+        step_ms = int(raw.get("step_ms") or defaults["step_ms"])
+        min_ms = max(300, min(5000, min_ms))
+        max_ms = max(300, min(5000, max_ms))
+        if min_ms > max_ms:
+            min_ms, max_ms = max_ms, min_ms
+        current_ms = max(min_ms, min(max_ms, current_ms))
+        step_ms = max(25, min(500, step_ms))
+        return {
+            "adaptive_enabled": adaptive_enabled,
+            "mode": "adaptive" if adaptive_enabled else "manual",
+            "min_ms": min_ms,
+            "max_ms": max_ms,
+            "current_ms": current_ms,
+            "step_ms": step_ms,
+            "supported_min_ms": 300,
+            "supported_max_ms": 5000,
+            "last_adjusted_by": raw.get("last_adjusted_by") or "default",
+            "last_adjusted_at": raw.get("last_adjusted_at"),
+            "consumer_contract": {
+                "mcp_should_tune": adaptive_enabled,
+                "increase_when": [
+                    "RESULT_INCOMPLETE",
+                    "frame_age_p95 approaches/exceeds dwell",
+                    "vision/decode service time approaches/exceeds dwell",
+                    "frozen/dropped HDMI frames increase",
+                ],
+                "decrease_when": [
+                    "recent optical deliveries are healthy",
+                    "capture/decode latency is comfortably below dwell",
+                ],
+                "rule": "MCP consumers should call adaptive tuning before large optical reads and after transport degradation; decrease gradually after sustained healthy delivery.",
+            },
+        }
+
+    def configure_optical_transport(
+        self,
+        *,
+        adaptive_enabled: bool | None = None,
+        min_ms: int | None = None,
+        max_ms: int | None = None,
+        current_ms: int | None = None,
+        step_ms: int | None = None,
+        adjusted_by: str = "easychange_ui",
+    ) -> dict:
+        """Persist bounded EC2 timing without YAML/database configuration."""
+        current = self.optical_transport_config()
+
+        def bounded_int(name: str, value, low: int, high: int) -> int:
+            if isinstance(value, bool):
+                raise ValueError(f"{name} must be an integer")
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{name} must be an integer") from exc
+            if not low <= parsed <= high:
+                raise ValueError(f"{name} must be between {low} and {high}")
+            return parsed
+
+        next_min = current["min_ms"] if min_ms is None else bounded_int("min_ms", min_ms, 300, 5000)
+        next_max = current["max_ms"] if max_ms is None else bounded_int("max_ms", max_ms, 300, 5000)
+        if next_min > next_max:
+            raise ValueError("min_ms must be <= max_ms")
+        next_current = (
+            current["current_ms"]
+            if current_ms is None
+            else bounded_int("current_ms", current_ms, 300, 5000)
+        )
+        if not next_min <= next_current <= next_max:
+            raise ValueError("current_ms must be within min_ms/max_ms")
+        next_step = (
+            current["step_ms"]
+            if step_ms is None
+            else bounded_int("step_ms", step_ms, 25, 500)
+        )
+        if adaptive_enabled is None:
+            next_adaptive = bool(current["adaptive_enabled"])
+        elif isinstance(adaptive_enabled, bool):
+            next_adaptive = adaptive_enabled
+        else:
+            raise ValueError("adaptive_enabled must be boolean")
+
+        self.state_store.data["optical_transport"] = {
+            "adaptive_enabled": next_adaptive,
+            "min_ms": next_min,
+            "max_ms": next_max,
+            "current_ms": next_current,
+            "step_ms": next_step,
+            "last_adjusted_by": str(adjusted_by or "unknown")[:64],
+            "last_adjusted_at": time.time(),
+        }
+        self._persist_state()
+        return self.optical_transport_config()
     def _capability_manifest(self) -> dict:
         structured = structured_capabilities()
         supported_operations = sorted(structured.get("operations") or {})
@@ -2667,6 +2807,8 @@ class CommandService:
             "browser_launch_allowed": False,
             "browser_profile_creation_allowed": False,
             "operation_profiles": True,
+            "adaptive_optical_dwell": True,
+            "mcp_optical_tuning": True,
         }
         fingerprint_source = {
             "core_version": __version__,
@@ -2678,6 +2820,17 @@ class CommandService:
             "supported_operations": supported_operations,
             "operation_profiles": structured.get("operations") or {},
             "feature_flags": feature_flags,
+            "optical_transport_contract": {
+                "adaptive": True,
+                "configurable_in_easychange_ui": True,
+                "mcp_tuning_supported": True,
+                "supported_min_ms": 300,
+                "supported_max_ms": 5000,
+                "default_min_ms": 600,
+                "default_max_ms": 1800,
+                "default_current_ms": 900,
+                "guidance": "MCP should tune dwell to measured HDMI/decode latency: increase after incomplete delivery and decrease gradually after sustained healthy delivery.",
+            },
         }
         digest = hashlib.sha256(
             json.dumps(
@@ -2698,6 +2851,7 @@ class CommandService:
             "unsupported_operations": [],
             "operation_profiles": structured.get("operations") or {},
             "feature_flags": feature_flags,
+            "optical_transport": self.optical_transport_config(),
             "max_payload": {
                 "decoded_command_bytes": 262144,
                 "structured_operations": int(structured.get("max_operations") or 64),

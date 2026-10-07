@@ -308,3 +308,30 @@ def test_optical_render_is_non_reentrant_and_incremental(tmp_path, monkeypatch):
     assert len(builds) == len(set(builds))
     assert window._optical_render_pending is None
     window.close(); app.processEvents()
+
+
+
+def test_optical_transport_controls_are_explicit_and_drive_timer(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    window.show(); app.processEvents()
+
+    config = window.service.configure_optical_transport(
+        adaptive_enabled=True,
+        min_ms=700,
+        max_ms=1600,
+        current_ms=1100,
+        adjusted_by="test",
+    )
+    window._sync_optical_transport_controls()
+    window._set_optical_burst(True)
+
+    assert config["mode"] == "adaptive"
+    assert window.optical_adaptive.isChecked() is True
+    assert "MCP ajusta conforme HDMI/decoder" in window.optical_status.text()
+    assert window.optical_min.value() == 700
+    assert window.optical_current.value() == 1100
+    assert window.optical_max.value() == 1600
+    assert window._optical_timer.interval() == 1100
+
+    window.close(); app.processEvents()

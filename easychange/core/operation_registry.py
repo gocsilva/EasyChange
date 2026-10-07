@@ -26,6 +26,7 @@ STRUCTURED_ALWAYS_SIDE_EFFECT_TYPES = frozenset({
     "db_configure", "ef_database_update", "secret_broker_import", "secret_broker_import_source",
     "ubuntu_open", "ubuntu_close", "ubuntu_cd", "ubuntu_env",
     "ubuntu_shell", "ubuntu_job_cancel",
+    "optical_transport_configure",
 })
 STRUCTURED_CONDITIONAL_SIDE_EFFECT_TYPES = frozenset({
     "db_query", "ubuntu_exec", "ubuntu_batch", "k8s_command",
@@ -37,7 +38,7 @@ TEXT_MUTATION_COMMANDS = frozenset({
 STRUCTURED_CONTINUE_SAFE_TYPES = frozenset({
     "read", "search", "locate", "study", "definition", "references",
     "discover_many", "read_regions", "read_many", "human_text_info", "human_text_read", "command_schema",
-    "secret_broker_public", "secret_broker_status",
+    "secret_broker_public", "secret_broker_status", "optical_transport_get",
     "runtime_profiles", "runtime_environment",
     "browser_state", "browser_snapshot", "browser_dom", "browser_visual", "browser_tabs",
     "browser_cdp_events", "swagger_browser_operations",
@@ -56,6 +57,7 @@ _OPERATION_FAMILIES = {
     "search": "discovery", "locate": "discovery", "study": "discovery",
     "definition": "discovery", "references": "discovery", "discover_many": "discovery",
     "command_schema": "metadata",
+    "optical_transport_get": "transport", "optical_transport_configure": "transport",
     "secret_broker_public": "secret", "secret_broker_status": "secret",
     "secret_broker_import": "secret", "secret_broker_import_source": "secret",
     "runtime_profiles": "runtime", "runtime_configure": "runtime", "runtime_environment": "runtime",
