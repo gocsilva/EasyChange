@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 from .workspace import Workspace
+from .subprocess_utils import hidden_console_kwargs
 
 
 class GitService:
@@ -13,7 +14,8 @@ class GitService:
 
     def _run(self, *args: str) -> str:
         result = subprocess.run(["git", *args], cwd=self.workspace.root_path, text=True,
-                                capture_output=True, timeout=30, check=False)
+                                capture_output=True, timeout=30, check=False,
+                                **hidden_console_kwargs())
         if result.returncode:
             raise RuntimeError((result.stderr or result.stdout).strip() or "Git command failed")
         return result.stdout.strip()
@@ -149,6 +151,7 @@ class GitService:
             stderr=subprocess.PIPE,
             timeout=45,
             check=False,
+            **hidden_console_kwargs(),
         )
         if completed.returncode:
             error = completed.stderr.decode("utf-8", errors="replace").strip()
@@ -304,6 +307,7 @@ class GitService:
                 stderr=subprocess.PIPE,
                 timeout=60,
                 check=False,
+                **hidden_console_kwargs(),
             )
             if completed.returncode:
                 stderr = (completed.stderr or b"").decode("utf-8", errors="replace")
