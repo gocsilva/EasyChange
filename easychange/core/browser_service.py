@@ -1967,6 +1967,29 @@ __BODY__
             })
         return {"session_id": session_id, "count": len(tabs), "tabs": tabs}
 
+    def _reconnect_current_target_socket(self, session_id: str):
+        session = self._session(session_id)
+        values = self._http_json(f"http://127.0.0.1:{session.port}/json/list")
+        target = next(
+            (
+                item for item in values
+                if isinstance(item, dict)
+                and str(item.get("id") or "") == str(session.target_id)
+                and item.get("webSocketDebuggerUrl")
+            ),
+            None,
+        )
+        if target is None:
+            raise LookupError(f"BROWSER_TAB_NOT_FOUND:{session.target_id}")
+        new_cdp = _WebSocket(str(target["webSocketDebuggerUrl"]), timeout=5.0)
+        for domain in ("Page.enable", "Runtime.enable", "DOM.enable"):
+            new_cdp.call(domain, timeout=3.0)
+        old = session.cdp
+        session.cdp = new_cdp
+        session.websocket_url = str(target["webSocketDebuggerUrl"])
+        old.close()
+        return new_cdp
+
     def _connect_target(self, session_id: str, target_id: str) -> dict:
         session = self._session(session_id)
         values = self._http_json(f"http://127.0.0.1:{session.port}/json/list")
@@ -2350,7 +2373,16 @@ return {html:'<!doctype html>'+String.fromCharCode(10)+root.outerHTML,url:locati
                     "height": max(1, min(30000, int(float(size.get("height") or 1000)))),
                     "scale": 1,
                 }
-            result = session.cdp.call("Page.captureScreenshot", params, timeout=30.0)
+            try:
+                result = session.cdp.call("Page.captureScreenshot", params, timeout=30.0)
+            except TimeoutError:
+                attempts.append({
+                    "quality": current_quality,
+                    "error": "TimeoutError",
+                    "recovery": "RECONNECT_CURRENT_TARGET_ONCE",
+                })
+                session.cdp = self._reconnect_current_target_socket(session_id)
+                result = session.cdp.call("Page.captureScreenshot", params, timeout=30.0)
             raw = base64.b64decode(str(result.get("data") or ""))
             attempts.append({"quality": current_quality, "bytes": len(raw)})
             if raw.startswith(b"\xff\xd8") and len(raw) <= max_bytes:

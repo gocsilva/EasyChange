@@ -1,6 +1,7 @@
 from __future__ import annotations
 import base64
 import easychange.core.browser_service as browser_module
+import easychange.core.command_service as command_module
 
 import contextlib
 import http.server
@@ -12,7 +13,9 @@ from pathlib import Path
 import pytest
 
 from easychange.core.browser_service import BrowserService
+from easychange.core.command_service import CommandService
 from easychange.core.process_service import ProcessService
+from easychange.core.workspace import Workspace
 
 
 @contextlib.contextmanager
@@ -770,3 +773,95 @@ def test_visual_keeps_screenshot_when_position_metadata_times_out(tmp_path, monk
     assert visual["position"] is None
     assert visual["position_error"].startswith("TimeoutError:")
     assert base64.b64decode(visual["data_b64"]).startswith(b"\xff\xd8")
+
+
+@pytest.mark.skipif(not BrowserService.candidates(), reason="Edge/Chrome not installed")
+def test_visual_reconnects_once_after_transient_screenshot_timeout(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    browser = BrowserService(ProcessService(workspace))
+    _attach_fake(browser, monkeypatch)
+
+    session = browser._session("T1")
+    original_call = session.cdp.call
+    state = {"timeouts": 0, "reconnects": 0}
+
+    def flaky_call(method, params=None, timeout=10.0):
+        if method == "Page.captureScreenshot" and state["timeouts"] == 0:
+            state["timeouts"] += 1
+            raise TimeoutError("transient screenshot timeout")
+        return original_call(method, params, timeout)
+
+    session.cdp.call = flaky_call
+    replacement = _FakeCdp(session.websocket_url)
+
+    def reconnect(session_id):
+        assert session_id == "T1"
+        state["reconnects"] += 1
+        return replacement
+
+    monkeypatch.setattr(browser, "_reconnect_current_target_socket", reconnect)
+    monkeypatch.setattr(
+        browser,
+        "position",
+        lambda session_id="default": {"url": "https://existing.local"},
+    )
+
+    visual = browser.visual("T1", quality=20, full_page=False, max_bytes=32768)
+
+    assert visual["bytes"] > 0
+    assert state == {"timeouts": 1, "reconnects": 1}
+    assert visual["attempts"][0]["error"] == "TimeoutError"
+    assert visual["attempts"][0]["recovery"] == "RECONNECT_CURRENT_TARGET_ONCE"
+    assert any(call[0] == "Page.captureScreenshot" for call in replacement.calls)
+
+
+def test_browser_open_gets_one_bounded_second_focus_pass_after_launch_race(tmp_path, monkeypatch):
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        monkeypatch.setattr(
+            service.browser,
+            "start",
+            lambda *args, **kwargs: {
+                "alive": True,
+                "browser_launched": True,
+                "url": "data:text/html,focus",
+            },
+        )
+        focus_calls = []
+        responses = [
+            {
+                "focus_required": True,
+                "command_focus_confirmed": False,
+                "easychange_foreground": False,
+            },
+            {
+                "focus_required": True,
+                "command_focus_confirmed": True,
+                "easychange_foreground": True,
+            },
+        ]
+
+        def restore(**kwargs):
+            focus_calls.append(dict(kwargs))
+            return dict(responses[min(len(focus_calls) - 1, 1)])
+
+        monkeypatch.setattr(service.browser, "restore_easychange_foreground", restore)
+        monkeypatch.setattr(command_module.time, "sleep", lambda seconds: None)
+
+        result = service._execute_structured({
+            "op": "operation",
+            "type": "browser_open",
+            "session_id": "focus-race",
+            "url": "data:text/html,focus",
+            "visible": False,
+            "timeout": 10,
+        })
+
+        assert result.ok is True
+        assert len(focus_calls) == 2
+        assert result.data["command_focus_confirmed"] is True
+        assert result.data["easychange_focus"]["focus_restore_second_pass"] is True
+    finally:
+        service.close()

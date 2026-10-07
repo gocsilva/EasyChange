@@ -1124,6 +1124,21 @@ class CommandService:
                     stable_checks=5 if kind == "browser_open" else 2,
                     stable_interval=0.08 if kind == "browser_open" else 0.04,
                 )
+                if (
+                    kind == "browser_open"
+                    and focus.get("focus_required")
+                    and not focus.get("command_focus_confirmed")
+                ):
+                    # A newly launched Edge/Chrome can steal foreground again
+                    # while its first window finishes activating. Wait once,
+                    # then perform one final bounded restore pass.
+                    time.sleep(0.45)
+                    focus = self.browser.restore_easychange_foreground(
+                        attempts=10,
+                        stable_checks=5,
+                        stable_interval=0.08,
+                    )
+                    focus["focus_restore_second_pass"] = True
                 data = self._scrub_browser_secret_values(data, secret_sources)
                 if isinstance(data, dict):
                     data = {
