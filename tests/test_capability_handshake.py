@@ -98,3 +98,19 @@ def test_structured_optical_transport_configuration_persists(tmp_path):
         assert reopened.optical_transport_config()["current_ms"] == 1050
     finally:
         reopened.close()
+
+
+
+def test_capabilities_explain_safe_result_rechunking(tmp_path):
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        manifest = service.execute(":capabilities --compact").data["capability_manifest"]
+        assert manifest["feature_flags"]["adaptive_result_rechunking"] is True
+        contract = manifest["result_chunk_recovery_contract"]
+        assert contract["adaptive_rechunking"] is True
+        assert contract["index_geometry_depends_on_chunk_bytes"] is True
+        assert manifest["max_result"]["logical_chunk_bytes_min"] == 256
+        assert manifest["max_result"]["logical_chunk_bytes_max"] == 4096
+        assert manifest["max_result"]["logical_chunk_rechunkable"] is True
+    finally:
+        service.close()

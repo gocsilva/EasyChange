@@ -2787,6 +2787,7 @@ class CommandService:
         feature_flags = {
             "durable_results": True,
             "durable_result_chunks": True,
+            "adaptive_result_rechunking": True,
             "durable_jobs": True,
             "selective_optical_chunks": True,
             "compressed_long_commands": True,
@@ -2831,6 +2832,13 @@ class CommandService:
                 "default_current_ms": 900,
                 "guidance": "MCP should tune dwell to measured HDMI/decode latency: increase after incomplete delivery and decrease gradually after sustained healthy delivery.",
             },
+            "result_chunk_recovery_contract": {
+                "adaptive_rechunking": True,
+                "chunk_bytes_min": 256,
+                "chunk_bytes_max": 4096,
+                "index_geometry_depends_on_chunk_bytes": True,
+                "guidance": "When one logical chunk fails optically, preserve its original byte interval and translate that interval to smaller chunk indexes. Do not reuse the same chunk index blindly after changing chunk_bytes.",
+            },
         }
         digest = hashlib.sha256(
             json.dumps(
@@ -2852,6 +2860,7 @@ class CommandService:
             "operation_profiles": structured.get("operations") or {},
             "feature_flags": feature_flags,
             "optical_transport": self.optical_transport_config(),
+            "result_chunk_recovery_contract": fingerprint_source["result_chunk_recovery_contract"],
             "max_payload": {
                 "decoded_command_bytes": 262144,
                 "structured_operations": int(structured.get("max_operations") or 64),
@@ -2862,7 +2871,9 @@ class CommandService:
             "max_result": {
                 "durable_results": 128,
                 "durable_ttl_seconds": 1800,
+                "logical_chunk_bytes_min": 256,
                 "logical_chunk_bytes_max": 4096,
+                "logical_chunk_rechunkable": True,
             },
             "long_text_support": True,
             "structured_payload_support": True,
