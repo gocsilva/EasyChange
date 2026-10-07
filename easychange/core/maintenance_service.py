@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import time
+import zlib
 from pathlib import Path
 
 
@@ -18,6 +19,7 @@ class MaintenanceService:
     """Safe retention/cleanup for EasyChange-owned workspace artifacts only."""
 
     RESULT_TTL_SECONDS = 30 * 60
+    ACTIVE_RESULT_TTL_SECONDS = 24 * 60 * 60
     JOB_TTL_SECONDS = 24 * 60 * 60
     PROCESS_LOG_TTL_SECONDS = 6 * 60 * 60
     TEMP_TTL_SECONDS = 60 * 60
@@ -177,6 +179,22 @@ class MaintenanceService:
         except OSError:
             return 0.0
 
+    @staticmethod
+    def _result_record(path: Path) -> dict:
+        try:
+            raw = zlib.decompress(path.read_bytes())
+            value = json.loads(raw.decode("utf-8"))
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError, zlib.error):
+            return {}
+
+    @classmethod
+    def _active_result(cls, path: Path) -> bool:
+        value = cls._result_record(path)
+        state = str(value.get("state") or "").upper()
+        execution = str(value.get("execution_state") or "").upper()
+        return state == "RUNNING" or execution in {"STARTED", "RUNNING"}
+
     def _evidence_dirs(self) -> list[Path]:
         root = self.easy_root / "evidence"
         try:
@@ -199,6 +217,11 @@ class MaintenanceService:
         results_root = self.easy_root / "results"
         try:
             for path in results_root.glob("Q*.json.zlib"):
+                # Active durable execution truth is not disposable pressure.
+                # Deleting it can turn an already-started mutation/job into an
+                # apparently new request after restart.
+                if self._active_result(path):
+                    continue
                 candidates.append((self._mtime(path), path, "results_pressure"))
         except OSError:
             pass
@@ -374,7 +397,9 @@ class MaintenanceService:
                 if age > self.TEMP_TTL_SECONDS:
                     self._remove(path, report, "sidecar_temp", dry_run=dry_run)
 
-        # Durable results: same retention semantics as DurableResultStore.
+        # Durable results: mirror DurableResultStore semantics. Active
+        # execution receipts live on the longer active TTL and never consume
+        # the terminal LRU budget.
         results_root = self.easy_root / "results"
         try:
             results = sorted(
@@ -384,13 +409,19 @@ class MaintenanceService:
             )
         except OSError:
             results = []
-        for position, path in enumerate(results):
+        terminal_position = 0
+        for path in results:
             try:
                 age = now - path.stat().st_mtime
             except OSError:
                 continue
-            if position >= self.MAX_RESULTS or age > self.RESULT_TTL_SECONDS:
+            if self._active_result(path):
+                if age > self.ACTIVE_RESULT_TTL_SECONDS:
+                    self._remove(path, report, "active_results_stale", dry_run=dry_run)
+                continue
+            if terminal_position >= self.MAX_RESULTS or age > self.RESULT_TTL_SECONDS:
                 self._remove(path, report, "results", dry_run=dry_run)
+            terminal_position += 1
 
         # Jobs: preserve RUNNING jobs; terminal/stale jobs are bounded.
         jobs_root = self.easy_root / "jobs"
