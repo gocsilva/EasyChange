@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from easychange.remote.optical_protocol import encode_result_chunks, encode_result_header
+from easychange.remote.optical_protocol import encode_result_bundle
 
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPixmap, QShortcut
@@ -71,6 +71,11 @@ class MainWindow(QMainWindow):
     # A burst page must remain visible for more than two typical HDMI capture
     # periods. This reduces missed pages under paint/capture/decode jitter.
     _OPTICAL_BURST_INTERVAL_MS = 520
+    # Bound the initial optical broadcast. Very large results remain durable in
+    # ResultStore and are fetched selectively by optical_chunks. The old code
+    # built/cached one QPixmap per result chunk and could consume hundreds of
+    # MiB or GiB while Windows reported the GUI as "Not Responding".
+    _OPTICAL_BROADCAST_MAX_CHUNKS = 64
     # More than one 4-QR row should not rotate in compact mode.
     # Switch to the 16-slot canvas so 5-16 chunks are visible simultaneously
     # and duplicated padding adds optical redundancy.
@@ -634,14 +639,20 @@ class MainWindow(QMainWindow):
                 # an EC2H wrapper for recovery queries or they become recursive.
                 self._optical_header_payload = None
             else:
-                self._optical_payloads = encode_result_chunks(result)
+                (
+                    self._optical_payloads,
+                    prepared_header,
+                ) = encode_result_bundle(
+                    result,
+                    max_packets=self._OPTICAL_BROADCAST_MAX_CHUNKS,
+                )
             self._set_optical_burst(
                 len(self._optical_payloads) > self._OPTICAL_BURST_THRESHOLD
             )
             if self._optical_burst and direct_payloads is None:
-                self._optical_header_payload = encode_result_header(
-                    result, chunk_count=len(self._optical_payloads)
-                )
+                # Packets + header share one compression pass. The header keeps
+                # the full chunk count plus the bounded broadcast-window size.
+                self._optical_header_payload = prepared_header
             self._render_optical_page()
             _slots, page_count, _start, _data_slots, _include_header = self._optical_page_plan()
             if page_count > 1:
