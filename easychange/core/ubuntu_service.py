@@ -10,6 +10,7 @@ import subprocess
 import time
 
 from .process_service import ProcessService
+from .subprocess_utils import hidden_console_kwargs
 
 
 class UbuntuError(RuntimeError):
@@ -139,6 +140,7 @@ class UbuntuService:
             shell=False,
             timeout=5,
             check=False,
+            **hidden_console_kwargs(),
         )
         text = self._decode(completed.stdout)
         return [line.strip().replace("\x00", "") for line in text.splitlines() if line.strip()]
@@ -193,8 +195,7 @@ class UbuntuService:
                 "timeout": max(0.5, min(120.0, float(timeout))),
                 "check": False,
             }
-            if os.name == "nt":
-                run_kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            run_kwargs.update(hidden_console_kwargs())
             completed = subprocess.run(effective, **run_kwargs)
             stdout = bytes(completed.stdout or b"")
             stderr = bytes(completed.stderr or b"")
