@@ -308,3 +308,74 @@ def test_external_runtime_purge_is_scoped_to_easychange_workspace(tmp_path, monk
     assert report["ok"] is True
     assert not external_root.exists()
     assert important.read_text(encoding="utf-8") == "keep"
+
+
+
+def test_automatic_cleanup_preserves_active_durable_result_receipts(tmp_path):
+    from easychange.core.result_store import DurableResultStore
+
+    results_root = tmp_path / ".easychange" / "results"
+    store = DurableResultStore(
+        results_root,
+        ttl_seconds=60,
+        active_ttl_seconds=24 * 60 * 60,
+    )
+    active = "QMAINTACTIVE1"
+    store.mark_running(active, "a" * 64, ":build-job", mutation=True)
+    active_path = results_root / f"{active}.json.zlib"
+    old = time.time() - 120
+    os.utime(active_path, (old, old))
+
+    terminal = "QMAINTTERM1"
+    store.mark_running(terminal, "b" * 64, ":state", mutation=False)
+    store.complete(
+        terminal,
+        "b" * 64,
+        ":state",
+        {
+            "ok": True,
+            "command": "state",
+            "data": {},
+            "error": None,
+            "code": None,
+            "command_id": "C1",
+            "duration_ms": 1,
+            "sequence": terminal,
+        },
+    )
+    terminal_path = results_root / f"{terminal}.json.zlib"
+    os.utime(terminal_path, (old, old))
+
+    report = MaintenanceService(tmp_path).automatic_cleanup(now=time.time())
+
+    assert active_path.exists()
+    assert not terminal_path.exists()
+    assert report["categories"].get("active_results_stale", 0) == 0
+
+
+def test_disk_budget_never_uses_active_result_as_pressure_candidate(tmp_path, monkeypatch):
+    from easychange.core.result_store import DurableResultStore
+
+    monkeypatch.setenv("EASYCHANGE_MAX_STATE_BYTES", str(1024 * 1024))
+    root = tmp_path / ".easychange" / "results"
+    store = DurableResultStore(root)
+    sequence = "QPRESSUREACTIVE1"
+    store.mark_running(sequence, "c" * 64, ":long-mutation", mutation=True)
+    active_path = root / f"{sequence}.json.zlib"
+
+    # Make disposable evidence large enough to force the pressure path.
+    evidence = tmp_path / ".easychange" / "evidence" / "old"
+    evidence.mkdir(parents=True)
+    (evidence / "payload.bin").write_bytes(b"x" * (2 * 1024 * 1024))
+    _old(evidence, seconds=60)
+    _old(evidence / "payload.bin", seconds=60)
+
+    report = MaintenanceService(tmp_path).automatic_cleanup(
+        now=time.time(),
+        active_process_ids=set(),
+        referenced_blobs=set(),
+    )
+
+    assert active_path.exists()
+    assert not evidence.exists()
+    assert "results_pressure" not in report["categories"]
