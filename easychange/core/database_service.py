@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .workspace import Workspace
+from .subprocess_utils import hidden_console_kwargs
 
 _READ_ONLY = re.compile(r"^\s*(?:--[^\n]*\n\s*)*(select|with|pragma|explain|show|describe)\b", re.I)
 
@@ -287,6 +288,7 @@ class DatabaseService:
                 timeout=timeout,
                 check=False,
                 shell=False,
+                **hidden_console_kwargs(),
             )
 
             if completed.returncode:
