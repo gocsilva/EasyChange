@@ -1500,6 +1500,62 @@ def test_read_regions_coalesces_overlaps_and_reads_in_parallel(service, tmp_path
     assert a["returned_count"] >= 18
 
 
+
+
+def test_read_regions_budget_returns_exact_remainder_for_continuation(service, tmp_path):
+    lines = [f"line-{index:03d}-" + ("x" * 1800) for index in range(1, 81)]
+    (tmp_path / "Large.cs").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    data = service._read_regions_data(
+        [{"path": "Large.cs", "start": 1, "count": 80}],
+        max_bytes=32768,
+        merge_overlaps=True,
+    )
+
+    assert data["truncated"] is True
+    assert data["regions"]
+    returned = data["regions"][0]["returned_count"]
+    assert 0 < returned < 80
+    assert data["skipped"][0] == {
+        "path": "Large.cs",
+        "start": 1 + returned,
+        "count": 80 - returned,
+    }
+    assert data["raw_bytes"] <= data["byte_budget"] == 32768
+
+
+def test_read_regions_never_emits_single_line_above_byte_budget(service, tmp_path):
+    (tmp_path / "Minified.js").write_text("x" * 120000, encoding="utf-8")
+
+    data = service._read_regions_data(
+        [{"path": "Minified.js", "start": 1, "count": 1}],
+        max_bytes=32768,
+        merge_overlaps=True,
+    )
+
+    assert data["regions"] == []
+    assert data["raw_bytes"] == 0
+    assert data["partial"] is True
+    assert data["errors"][0]["code"] == "LINE_EXCEEDS_BYTE_BUDGET"
+    assert data["errors"][0]["byte_budget"] == 32768
+
+
+def test_read_many_never_emits_single_line_above_byte_budget(service, tmp_path):
+    (tmp_path / "Minified.json").write_text("y" * 120000, encoding="utf-8")
+
+    result = service.execute_tokens(
+        "read-many",
+        ["Minified.json", "--count", "1", "--max-bytes", "32768"],
+        raw="test read-many budget",
+    )
+
+    assert result.ok is True
+    assert result.data["files"] == []
+    assert result.data["raw_bytes"] == 0
+    assert result.data["partial"] is True
+    assert result.data["errors"][0]["code"] == "LINE_EXCEEDS_BYTE_BUDGET"
+    assert result.data["byte_budget"] == 32768
+
 def test_discover_many_can_attach_context_pack_in_same_operation(service, tmp_path):
     (tmp_path / "src").mkdir(exist_ok=True)
     lines = [
