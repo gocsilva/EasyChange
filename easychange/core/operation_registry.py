@@ -5,7 +5,8 @@ STRUCTURED_MUTATION_TYPES = frozenset({
     "replace_exact", "replace_anchor", "insert_before", "insert_after", "insert", "append",
 })
 STRUCTURED_RECOVERY_TYPES = frozenset({
-    "result_status", "mutation_status", "result_header", "result_get", "result_meta", "result_chunk",
+    "result_status", "mutation_status", "result_header", "result_get", "result_meta",
+    "result_chunk", "result_chunks",
     "optical_meta", "optical_chunk", "optical_chunks",
 })
 STRUCTURED_JOB_TYPES = frozenset({"job_start", "job_status", "job_result", "job_logs", "job_cancel"})
