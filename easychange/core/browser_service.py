@@ -1,5 +1,6 @@
 from __future__ import annotations
 import subprocess
+import re
 
 import base64
 from collections import deque
@@ -2928,34 +2929,173 @@ if(!b)return {ok:false,error:'SWAGGER_OPERATION_NOT_FOUND'};
 if(!b.classList.contains('is-open')){(b.querySelector('.opblock-summary-control')||b.querySelector('.opblock-summary'))?.click();await new Promise(r=>setTimeout(r,60));}
 const t=[...b.querySelectorAll('button')].find(x=>/try it out/i.test(x.textContent||''));if(t){t.click();await new Promise(r=>setTimeout(r,60));}
 const setv=(e,v)=>{const s=typeof v==='string'?v:JSON.stringify(v);e.focus();const p=e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;const d=Object.getOwnPropertyDescriptor(p,'value');if(d&&d.set)d.set.call(e,s);else e.value=s;e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));};
-for(const [n,v] of Object.entries(cfg.parameters||{})){const row=[...b.querySelectorAll('tr')].find(r=>(r.querySelector('.parameter__name')?.textContent||'').trim().split(/\\s+/)[0]===n);const e=row?.querySelector('input,textarea,select');if(!e)return {ok:false,error:'SWAGGER_PARAMETER_NOT_FOUND:'+n};setv(e,v);}
+for(const [n,v] of Object.entries(cfg.parameters||{})){const row=[...b.querySelectorAll('tr')].find(r=>(r.querySelector('.parameter__name')?.textContent||'').trim().split(/\s+/)[0]===n);const e=row?.querySelector('input,textarea,select');if(!e)return {ok:false,error:'SWAGGER_PARAMETER_NOT_FOUND:'+n};setv(e,v);}
 if(cfg.body!==null&&cfg.body!==undefined){const e=b.querySelector('textarea.body-param__text,textarea');if(!e)return {ok:false,error:'SWAGGER_BODY_EDITOR_NOT_FOUND'};setv(e,cfg.body);}
-const x=[...b.querySelectorAll('button')].find(x=>x.classList.contains('execute')||/^\\s*execute\\s*$/i.test(x.textContent||''));if(!x)return {ok:false,error:'SWAGGER_EXECUTE_BUTTON_NOT_FOUND'};x.click();return {ok:true};
+const x=[...b.querySelectorAll('button')].find(x=>x.classList.contains('execute')||/^\s*execute\s*$/i.test(x.textContent||''));if(!x)return {ok:false,error:'SWAGGER_EXECUTE_BUTTON_NOT_FOUND'};x.click();return {ok:true};
 })()""".replace("CONFIG", config)
+
+        session = self._session(session_id)
+        cdp = session.cdp
+        try:
+            cdp.call("Network.enable", {}, timeout=min(5.0, max(0.5, float(timeout))))
+        except Exception as exc:
+            raise BrowserError(
+                "SWAGGER_NETWORK_OBSERVATION_FAILED:"
+                + f"{type(exc).__name__}:{str(exc)[:300]}"
+            ) from exc
+
+        # Remove events from previous Swagger executions. Only a requestId
+        # observed after this point can satisfy this call.
+        cdp.drain_events(limit=512)
+
         started = self._evaluate(session_id, script, timeout=min(15.0, timeout))
         if not isinstance(started, dict) or not started.get("ok"):
-            raise BrowserError(str((started or {}).get("error") if isinstance(started, dict) else "SWAGGER_EXECUTE_FAILED"))
-        deadline = time.monotonic() + max(1.0, min(120.0, float(timeout)))
-        response = None
-        while time.monotonic() < deadline:
-            response = self._evaluate(
-                session_id,
-                """(() => {const b=[...document.querySelectorAll('.opblock')].find(x=>(x.querySelector('.opblock-summary-method')?.textContent||'').trim().toUpperCase()===METHOD&&(x.querySelector('.opblock-summary-path')?.textContent||'').trim()===PATH);if(!b)return null;const r=[...b.querySelectorAll('.response')].find(x=>(x.querySelector('.response-col_status')?.textContent||'').trim());if(!r)return null;return {status:(r.querySelector('.response-col_status')?.textContent||'').trim(),body:(r.querySelector('pre')?.textContent||'').trim().slice(0,65536),headers:(r.querySelector('.headers-wrapper')?.innerText||'').trim().slice(0,8192)};})()"""
-                .replace("METHOD", json.dumps(method))
-                .replace("PATH", json.dumps(path)),
-                timeout=5.0,
+            raise BrowserError(
+                str(
+                    (started or {}).get("error")
+                    if isinstance(started, dict)
+                    else "SWAGGER_EXECUTE_FAILED"
+                )
             )
-            if isinstance(response, dict) and str(response.get("status") or "").strip():
+
+        template_parts = [
+            urllib.parse.unquote(part)
+            for part in urllib.parse.urlsplit(path).path.strip("/").split("/")
+            if part
+        ]
+
+        def matches_request_url(url: str) -> bool:
+            try:
+                actual_parts = [
+                    urllib.parse.unquote(part)
+                    for part in urllib.parse.urlsplit(str(url or "")).path.strip("/").split("/")
+                    if part
+                ]
+            except Exception:
+                return False
+            if len(actual_parts) != len(template_parts):
+                return False
+            for expected, actual in zip(template_parts, actual_parts):
+                if expected.startswith("{") and expected.endswith("}"):
+                    if not actual:
+                        return False
+                    continue
+                if expected != actual:
+                    return False
+            return True
+
+        deadline = time.monotonic() + max(1.0, min(120.0, float(timeout)))
+        request_id = ""
+        response_meta: dict[str, Any] | None = None
+        response: dict[str, Any] | None = None
+        request_failure = ""
+
+        while time.monotonic() < deadline:
+            for event in cdp.drain_events(limit=512):
+                if not isinstance(event, dict):
+                    continue
+                event_method = str(event.get("method") or "")
+                params = event.get("params")
+                params = params if isinstance(params, dict) else {}
+
+                if event_method == "Network.requestWillBeSent":
+                    request = params.get("request")
+                    request = request if isinstance(request, dict) else {}
+                    if (
+                        str(request.get("method") or "").upper() == method
+                        and matches_request_url(str(request.get("url") or ""))
+                    ):
+                        request_id = str(params.get("requestId") or "")
+                        response_meta = None
+                        request_failure = ""
+                    continue
+
+                if not request_id or str(params.get("requestId") or "") != request_id:
+                    continue
+
+                if event_method == "Network.responseReceived":
+                    current = params.get("response")
+                    response_meta = current if isinstance(current, dict) else {}
+                    continue
+
+                if event_method == "Network.loadingFailed":
+                    request_failure = str(params.get("errorText") or "REQUEST_FAILED")
+                    break
+
+                if event_method != "Network.loadingFinished" or response_meta is None:
+                    continue
+
+                body_text = ""
+                try:
+                    payload = cdp.call(
+                        "Network.getResponseBody",
+                        {"requestId": request_id},
+                        timeout=min(10.0, max(0.5, float(timeout))),
+                    )
+                    raw_body = payload.get("body") if isinstance(payload, dict) else ""
+                    encoded = (
+                        bool(payload.get("base64Encoded"))
+                        if isinstance(payload, dict)
+                        else False
+                    )
+                    if encoded:
+                        body_text = base64.b64decode(str(raw_body or "")).decode(
+                            "utf-8", errors="replace"
+                        )
+                    else:
+                        body_text = str(raw_body or "")
+                except Exception:
+                    body_text = ""
+
+                status_value = response_meta.get("status")
+                try:
+                    status_number = float(status_value)
+                    status_text = (
+                        str(int(status_number))
+                        if status_number.is_integer()
+                        else str(status_number)
+                    )
+                except (TypeError, ValueError):
+                    status_text = str(status_value or "")
+
+                headers_value = response_meta.get("headers")
+                if isinstance(headers_value, dict):
+                    header_lines = [
+                        f"{key}: {value}"
+                        for key, value in sorted(
+                            headers_value.items(),
+                            key=lambda item: str(item[0]).casefold(),
+                        )
+                    ]
+                    headers_text = "\n".join(header_lines)
+                else:
+                    headers_text = ""
+
+                response = {
+                    "status": status_text,
+                    "body": body_text[:65536],
+                    "headers": headers_text[:8192],
+                }
                 break
-            time.sleep(0.08)
-        if not isinstance(response, dict):
+
+            if request_failure:
+                raise BrowserError(
+                    "SWAGGER_REQUEST_FAILED:" + request_failure[:500]
+                )
+            if response is not None:
+                break
+            time.sleep(0.04)
+
+        if response is None:
             raise TimeoutError("SWAGGER_RESPONSE_TIMEOUT")
+
         return {
             "schema": "easychange.swagger-execution/1",
             "session_id": self._safe_id(session_id),
             "method": method,
             "path": path,
             "response": self._redact_value(response),
+            "response_correlation": "CDP_NETWORK_REQUEST_ID",
             "existing_browser_auth_preserved": True,
             "sensitive_input_used": sensitive_input,
             "auth_values_exposed": False,

@@ -1146,3 +1146,111 @@ def test_compact_success_bootstrap_diagnostics_exclude_large_tails_and_argv():
     assert "argv" not in compact
     assert "stdout_tail" not in compact
     assert "stderr_tail" not in compact
+
+
+
+def test_swagger_execute_correlates_only_new_cdp_request(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    _attach_fake(browser, monkeypatch)
+
+    class SwaggerCdp:
+        def __init__(self):
+            self.calls = []
+            self.drains = 0
+
+        def call(self, method, params=None, timeout=10.0):
+            params = dict(params or {})
+            self.calls.append((method, params))
+            if method == "Network.enable":
+                return {}
+            if method == "Runtime.evaluate":
+                return {"result": {"value": {"ok": True}}}
+            if method == "Network.getResponseBody":
+                assert params["requestId"] == "REQ-NEW"
+                return {
+                    "body": '{"source":"fresh","numCtrlIF":"IF-NEW"}',
+                    "base64Encoded": False,
+                }
+            return {}
+
+        def drain_events(self, limit=100):
+            del limit
+            self.drains += 1
+            if self.drains == 1:
+                return [
+                    {
+                        "method": "Network.requestWillBeSent",
+                        "params": {
+                            "requestId": "REQ-OLD",
+                            "request": {
+                                "method": "GET",
+                                "url": "https://localhost:65230/cambio/easypay/acam/v1/acam225/IF-OLD",
+                            },
+                        },
+                    },
+                    {
+                        "method": "Network.responseReceived",
+                        "params": {
+                            "requestId": "REQ-OLD",
+                            "response": {"status": 200, "headers": {}},
+                        },
+                    },
+                    {
+                        "method": "Network.loadingFinished",
+                        "params": {"requestId": "REQ-OLD"},
+                    },
+                ]
+            if self.drains == 2:
+                return [
+                    {
+                        "method": "Network.requestWillBeSent",
+                        "params": {
+                            "requestId": "REQ-NEW",
+                            "request": {
+                                "method": "GET",
+                                "url": "https://localhost:65230/cambio/easypay/acam/v1/acam225/IF-NEW",
+                            },
+                        },
+                    },
+                    {
+                        "method": "Network.responseReceived",
+                        "params": {
+                            "requestId": "REQ-NEW",
+                            "response": {
+                                "status": 404,
+                                "headers": {"content-type": "application/json"},
+                            },
+                        },
+                    },
+                    {
+                        "method": "Network.loadingFinished",
+                        "params": {"requestId": "REQ-NEW"},
+                    },
+                ]
+            return []
+
+        def close(self):
+            return None
+
+    fake = SwaggerCdp()
+    browser._session("T1").cdp = fake
+
+    result = browser.swagger_execute(
+        "T1",
+        method="GET",
+        path="/cambio/easypay/acam/v1/acam225/{identificador}",
+        parameters={
+            "identificador": "IF-NEW",
+            "x-bs2-correlation-id": "CORR-NEW",
+        },
+        timeout=1.0,
+    )
+
+    assert result["response_correlation"] == "CDP_NETWORK_REQUEST_ID"
+    assert result["response"]["status"] == "404"
+    assert '"source":"fresh"' in result["response"]["body"]
+    assert "IF-OLD" not in result["response"]["body"]
+    body_calls = [call for call in fake.calls if call[0] == "Network.getResponseBody"]
+    assert body_calls == [
+        ("Network.getResponseBody", {"requestId": "REQ-NEW"})
+    ]
