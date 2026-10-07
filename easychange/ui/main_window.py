@@ -68,6 +68,9 @@ class MainWindow(QMainWindow):
     _OPTICAL_NORMAL_SLOTS = 4
     _OPTICAL_BURST_SLOTS = 16
     _OPTICAL_BURST_COLUMNS = 4
+    # A burst page must remain visible for more than two typical HDMI capture
+    # periods. This reduces missed pages under paint/capture/decode jitter.
+    _OPTICAL_BURST_INTERVAL_MS = 520
     # More than one 4-QR row should not rotate in compact mode.
     # Switch to the 16-slot canvas so 5-16 chunks are visible simultaneously
     # and duplicated padding adds optical redundancy.
@@ -585,9 +588,10 @@ class MainWindow(QMainWindow):
             self.output.setVisible(False)
             self.result_panel.setMinimumHeight(660)
             self.result_panel.setMaximumHeight(16777215)
-            # Capture p95 is ~200ms on the physical HDMI path; keep a
-            # page visible long enough to guarantee at least one fresh frame.
-            self._optical_timer.setInterval(320)
+            # Capture p95 is ~200ms on the physical HDMI path. Keep every
+            # page visible for >2 capture periods so repaint/capture/QR decode
+            # jitter cannot systematically skip a rotating page.
+            self._optical_timer.setInterval(self._OPTICAL_BURST_INTERVAL_MS)
         else:
             self.split.setVisible(True)
             self.output.setVisible(True)
@@ -625,29 +629,56 @@ class MainWindow(QMainWindow):
                     result, chunk_count=len(self._optical_payloads)
                 )
             self._render_optical_page()
-            slots = self._OPTICAL_BURST_SLOTS if self._optical_burst else self._OPTICAL_NORMAL_SLOTS
-            data_slots = max(1, slots - (1 if self._optical_header_payload else 0))
-            if len(self._optical_payloads) > data_slots:
+            _slots, page_count, _start, _data_slots, _include_header = self._optical_page_plan()
+            if page_count > 1:
                 self._optical_timer.start()
         except (ImportError, ValueError, RuntimeError):
             self._set_optical_burst(False)
             # Compact EC1 text remains a correlation fallback.
             return
 
+    def _optical_page_plan(self) -> tuple[int, int, int, int, bool]:
+        """Return slots, page_count, start, data_slots, include_header.
+
+        In burst mode the EC2H status header is repeated once per cycle, on page
+        zero only. Subsequent pages use all 16 cells for EC2 data. The previous
+        layout spent one slot on the same header on every page, increasing page
+        count and packet-loss exposure for large results.
+        """
+        requested_slots = (
+            self._OPTICAL_BURST_SLOTS
+            if self._optical_burst
+            else self._OPTICAL_NORMAL_SLOTS
+        )
+        slots = min(requested_slots, len(self.machine_qrs))
+        total = len(self._optical_payloads)
+        has_header = bool(self._optical_header_payload)
+
+        if self._optical_burst and has_header:
+            first_capacity = max(1, slots - 1)
+            tail = max(0, total - first_capacity)
+            page_count = 1 + ((tail + slots - 1) // slots if tail else 0)
+            page = self._optical_page % max(1, page_count)
+            if page == 0:
+                return slots, page_count, 0, first_capacity, True
+            start = first_capacity + (page - 1) * slots
+            return slots, page_count, start, slots, False
+
+        header_slots = 1 if has_header else 0
+        data_slots = max(1, slots - header_slots)
+        page_count = max(1, (total + data_slots - 1) // data_slots)
+        page = self._optical_page % page_count
+        return slots, page_count, page * data_slots, data_slots, has_header
+
     def _render_optical_page(self) -> None:
         if not self._machine or not self._optical_payloads:
             return
         import qrcode
 
-        requested_slots = self._OPTICAL_BURST_SLOTS if self._optical_burst else self._OPTICAL_NORMAL_SLOTS
-        slots = min(requested_slots, len(self.machine_qrs))
-        header_slots = 1 if self._optical_header_payload else 0
-        data_slots = max(1, slots - header_slots)
-        page_count = max(1, (len(self._optical_payloads) + data_slots - 1) // data_slots)
+        slots, page_count, start, data_slots, include_header = self._optical_page_plan()
         page = self._optical_page % page_count
-        start = page * data_slots
         payloads = self._optical_payloads[start:start + data_slots]
-        if self._optical_header_payload:
+        if include_header and self._optical_header_payload:
             payloads = [self._optical_header_payload, *payloads]
         # In burst mode keep all optical cells populated even on the final
         # partial page. Repeating already-present chunks costs no protocol state
