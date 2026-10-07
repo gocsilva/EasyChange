@@ -1146,6 +1146,17 @@ class BrowserService:
             if existing is not None:
                 try:
                     state = self.state(key)
+                except Exception:
+                    # Only an actually stale/dead session is discarded. Target
+                    # selection errors below are caller-visible and must not
+                    # silently tear down a healthy session and attach elsewhere.
+                    try:
+                        existing.cdp.close()
+                        existing.browser_cdp.close()
+                    except Exception:
+                        pass
+                    self._sessions.pop(key, None)
+                else:
                     if state.get("alive"):
                         if target_id and str(existing.target_id) != str(target_id):
                             self._connect_target(key, str(target_id))
@@ -1164,13 +1175,6 @@ class BrowserService:
                                     f"BROWSER_TAB_NOT_FOUND_FOR_URL:{url_contains[:300]}"
                                 )
                         return {**self.state(key), "reused": True}
-                except Exception:
-                    try:
-                        existing.cdp.close()
-                        existing.browser_cdp.close()
-                    except Exception:
-                        pass
-                    self._sessions.pop(key, None)
 
             discovered = [] if port else self._discover_devtools_ports()
             discovered_by_port = {int(item["port"]): item for item in discovered}
