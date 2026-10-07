@@ -60,6 +60,8 @@ class DurableResultStore:
             float(active_ttl_seconds),
         )
         self._lock = threading.RLock()
+        self._writes_since_cleanup = 0
+        self._last_cleanup_monotonic = time.monotonic()
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, sequence: str) -> Path:
@@ -81,7 +83,14 @@ class DurableResultStore:
         temporary = target.with_suffix(target.suffix + ".tmp")
         temporary.write_bytes(self._encode(value))
         temporary.replace(target)
-        self._cleanup()
+
+        self._writes_since_cleanup += 1
+        now = time.monotonic()
+        if (
+            self._writes_since_cleanup >= 8
+            or now - self._last_cleanup_monotonic >= 30.0
+        ):
+            self._cleanup()
 
     @staticmethod
     def _active_record(value: dict[str, Any]) -> bool:
@@ -91,6 +100,8 @@ class DurableResultStore:
 
     def _cleanup(self) -> None:
         now = time.time()
+        self._last_cleanup_monotonic = time.monotonic()
+        self._writes_since_cleanup = 0
         try:
             files = sorted(
                 self.root.glob("Q*.json.zlib"),
@@ -100,28 +111,26 @@ class DurableResultStore:
         except OSError:
             return
 
-        terminal_seen = 0
-        for path in files:
+        # Recent retained results need no decode at all. Decode only expired or
+        # overflow candidates so large-result cleanup is proportional to data
+        # actually eligible for removal, not every stored payload.
+        for rank, path in enumerate(files):
             try:
                 stat = path.stat()
                 age = now - stat.st_mtime
+                if rank < self.max_results and age <= self.ttl_seconds:
+                    continue
                 try:
                     value = self._decode(path.read_bytes())
                 except (OSError, ValueError, json.JSONDecodeError, zlib.error):
-                    # Corrupt EasyChange-owned result files carry no execution
-                    # truth. Retain briefly for diagnostics, then remove.
-                    if age > self.ttl_seconds:
+                    if age > self.ttl_seconds or rank >= self.max_results:
                         path.unlink(missing_ok=True)
                     continue
-
                 if self._active_record(value):
                     if age > self.active_ttl_seconds:
                         path.unlink(missing_ok=True)
                     continue
-
-                terminal_seen += 1
-                if terminal_seen > self.max_results or age > self.ttl_seconds:
-                    path.unlink(missing_ok=True)
+                path.unlink(missing_ok=True)
             except OSError:
                 continue
 
