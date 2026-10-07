@@ -1477,8 +1477,13 @@ class CommandService:
                         elif query_kind == "optical_chunks":
                             try:
                                 raw_indexes = query_item.get("chunk_indexes")
-                                if not isinstance(raw_indexes, list) or not 1 <= len(raw_indexes) <= 32:
-                                    raise ValueError("CHUNK_INDEXES_REQUIRES_1_TO_32_ITEMS")
+                                # Direct optical recovery has no EC2H header and
+                                # therefore exactly one 4x4 page (16 data cells).
+                                # Accepting 17-32 forced recovery responses to
+                                # rotate, recreating the packet-loss failure that
+                                # selective recovery is meant to eliminate.
+                                if not isinstance(raw_indexes, list) or not 1 <= len(raw_indexes) <= 16:
+                                    raise ValueError("CHUNK_INDEXES_REQUIRES_1_TO_16_ITEMS")
                                 indexes = []
                                 for raw_index in raw_indexes:
                                     if isinstance(raw_index, bool):
