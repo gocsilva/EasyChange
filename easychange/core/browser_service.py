@@ -1899,6 +1899,45 @@ class BrowserService:
             raise BrowserBootstrapError(last_exc.code, diagnostics)
         raise BrowserError("CDP_BROWSER_OPEN_FALLBACK_EXHAUSTED")
 
+    def health_summary(self) -> dict:
+        """Cheap browser-transport health without issuing any new CDP command."""
+        with self._lock:
+            sessions = list(self._sessions.items())
+        details: dict[str, dict] = {}
+        degraded: list[str] = []
+        for session_id, session in sessions:
+            page = session.cdp.event_status()
+            browser = session.browser_cdp.event_status()
+            healthy = bool(
+                page.get("reader_alive")
+                and browser.get("reader_alive")
+                and not page.get("reader_error")
+                and not browser.get("reader_error")
+            )
+            if not healthy:
+                degraded.append(session_id)
+            details[session_id] = {
+                "healthy": healthy,
+                "page_reader_alive": bool(page.get("reader_alive")),
+                "browser_reader_alive": bool(browser.get("reader_alive")),
+                "page_pending_calls": int(page.get("pending_calls") or 0),
+                "browser_pending_calls": int(browser.get("pending_calls") or 0),
+                "page_events_dropped": int(page.get("events_dropped") or 0),
+                "browser_events_dropped": int(browser.get("events_dropped") or 0),
+                "page_late_responses_dropped": int(page.get("late_responses_dropped") or 0),
+                "browser_late_responses_dropped": int(browser.get("late_responses_dropped") or 0),
+                "page_reader_error": page.get("reader_error"),
+                "browser_reader_error": browser.get("reader_error"),
+            }
+        return {
+            "healthy": not degraded,
+            "state": "IDLE" if not sessions else ("READY" if not degraded else "DEGRADED"),
+            "session_count": len(sessions),
+            "degraded_sessions": degraded,
+            "sessions": details,
+            "network_probe_performed": False,
+        }
+
     def _session(self, session_id: str) -> BrowserSession:
         key = self._safe_id(session_id)
         value = self._sessions.get(key)
