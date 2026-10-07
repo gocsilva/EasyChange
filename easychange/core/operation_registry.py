@@ -23,7 +23,7 @@ STRUCTURED_ALWAYS_SIDE_EFFECT_TYPES = frozenset({
     "browser_open", "browser_attach", "browser_detach", "browser_actions",
     "browser_show", "browser_hide", "browser_navigate", "browser_evaluate",
     "browser_cdp_call", "browser_cdp_batch", "swagger_browser_execute",
-    "db_configure", "ef_database_update", "secret_broker_import",
+    "db_configure", "ef_database_update", "secret_broker_import", "secret_broker_import_source",
     "ubuntu_open", "ubuntu_close", "ubuntu_cd", "ubuntu_env",
     "ubuntu_shell", "ubuntu_job_cancel",
 })
@@ -56,7 +56,8 @@ _OPERATION_FAMILIES = {
     "search": "discovery", "locate": "discovery", "study": "discovery",
     "definition": "discovery", "references": "discovery", "discover_many": "discovery",
     "command_schema": "metadata",
-    "secret_broker_public": "secret", "secret_broker_status": "secret", "secret_broker_import": "secret",
+    "secret_broker_public": "secret", "secret_broker_status": "secret",
+    "secret_broker_import": "secret", "secret_broker_import_source": "secret",
     "runtime_profiles": "runtime", "runtime_configure": "runtime", "runtime_environment": "runtime",
     "run_project": "runtime", "process_exec": "runtime", "git_diff": "git",
     "browser_open": "browser", "browser_attach": "browser", "browser_detach": "browser",
