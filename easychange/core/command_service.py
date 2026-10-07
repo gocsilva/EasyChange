@@ -8,6 +8,7 @@ from .safe_edit import SafeEditError, plan_file_mutations, text_hash
 from .result_store import DurableResultStore
 from .secret_broker import SecretBroker
 from .browser_service import BrowserService
+from .ubuntu_service import UbuntuService
 
 import shlex
 import time
@@ -32,6 +33,7 @@ from .process_service import ProcessService
 from .operation_registry import (
     STRUCTURED_CONTINUE_SAFE_TYPES, STRUCTURED_JOB_TYPES, STRUCTURED_MUTATION_TYPES,
     STRUCTURED_RECOVERY_TYPES, TEXT_MUTATION_COMMANDS, structured_capabilities,
+    structured_operation_is_mutation,
 )
 from .result import Result
 from .transport_codec import decode_command
@@ -69,6 +71,7 @@ class CommandService:
         self.git = GitService(workspace)
         self.processes = ProcessService(workspace.root_path)
         self.browser = BrowserService(self.processes)
+        self.ubuntu = UbuntuService(self.processes)
         self.human_text = HumanTextService(self.processes.workspace_state_root)
         self.secret_broker = SecretBroker()
         self.runtime = ProjectRuntimeService(
@@ -252,8 +255,9 @@ class CommandService:
             structured_op = str(structured.get("op") or "").casefold()
             structured_items = structured.get("operations") if structured_op == "batch" else [structured]
             is_mutation = any(
-                isinstance(item, dict) and str(item.get("type") or "").casefold() in mutation_types
+                structured_operation_is_mutation(item)
                 for item in (structured_items if isinstance(structured_items, list) else [])
+                if isinstance(item, dict)
             )
         else:
             first = command.strip().split(maxsplit=1)[0].lstrip(":").casefold() if command.strip() else ""
@@ -1002,6 +1006,217 @@ class CommandService:
                 for key, item in value.items()
             }
         return value
+    def _execute_ubuntu_operation(self, item: dict) -> Result:
+        kind = str(item.get("type") or "").casefold()
+        secret_sources: dict[str, str] = {}
+        used_secret_refs: list[str] = []
+        started = time.monotonic()
+        try:
+            item, used_secret_refs, secret_sources = self._resolve_browser_secret_refs(item)
+            kind = str(item.get("type") or "").casefold()
+            session_id = str(item.get("session_id") or "hml")
+            wait_ms = max(0, min(10000, int(item.get("wait_ms") or 1800)))
+            max_bytes = max(1024, min(1024 * 1024, int(item.get("max_bytes") or 65536)))
+
+            if kind == "ubuntu_open":
+                data = self.ubuntu.open(
+                    session_id,
+                    distro=str(item.get("distro") or ""),
+                    cwd=str(item.get("cwd") or "/mnt/c"),
+                    env=item.get("env") if isinstance(item.get("env"), dict) else {},
+                    kubeconfig=str(item.get("kubeconfig") or ""),
+                    namespace=str(item.get("namespace") or "hml"),
+                    context=str(item.get("context") or ""),
+                    environment=str(item.get("environment") or "hml"),
+                    verify_kubectl=bool(item.get("verify_kubectl", True)),
+                )
+            elif kind == "ubuntu_state":
+                data = self.ubuntu.state(session_id, probe=bool(item.get("probe", False)))
+            elif kind == "ubuntu_close":
+                data = self.ubuntu.close(session_id)
+            elif kind == "ubuntu_cd":
+                data = self.ubuntu.cd(session_id, str(item.get("cwd") or ""))
+            elif kind == "ubuntu_env":
+                data = self.ubuntu.update_env(
+                    session_id,
+                    set_values=item.get("set") if isinstance(item.get("set"), dict) else {},
+                    unset=item.get("unset") if isinstance(item.get("unset"), list) else [],
+                )
+            elif kind == "ubuntu_exec":
+                argv = item.get("argv")
+                if not isinstance(argv, list):
+                    raise ValueError("UBUNTU_ARGV_REQUIRES_1_TO_64_STRINGS")
+                data = self.ubuntu.exec(
+                    session_id,
+                    [str(value) for value in argv],
+                    job_id=str(item.get("job_id") or self.ids.next("J")),
+                    wait_ms=wait_ms,
+                    max_bytes=max_bytes,
+                    allow_mutation=bool(item.get("allow_mutation", False)),
+                    confirm_context=str(item.get("confirm_context") or ""),
+                )
+            elif kind == "ubuntu_shell":
+                data = self.ubuntu.shell(
+                    session_id,
+                    str(item.get("command") or ""),
+                    job_id=str(item.get("job_id") or self.ids.next("J")),
+                    wait_ms=wait_ms,
+                    max_bytes=max_bytes,
+                    allow_mutation=bool(item.get("allow_mutation", False)),
+                )
+            elif kind == "ubuntu_batch":
+                commands = item.get("commands")
+                if not isinstance(commands, list):
+                    raise ValueError("UBUNTU_BATCH_REQUIRES_1_TO_32_COMMANDS")
+                data = self.ubuntu.batch(
+                    session_id,
+                    commands,
+                    continue_on_error=bool(item.get("continue_on_error", False)),
+                    timeout=max(0.5, min(120.0, float(item.get("timeout") or 15.0))),
+                    max_bytes=max_bytes,
+                )
+            elif kind == "ubuntu_job_status":
+                data = self.ubuntu.job_status(session_id, str(item.get("job_id") or ""))
+            elif kind == "ubuntu_job_logs":
+                data = self.ubuntu.job_logs(
+                    session_id,
+                    str(item.get("job_id") or ""),
+                    stream=str(item.get("stream") or "stdout"),
+                    cursor=max(0, int(item.get("cursor") or 0)),
+                    max_bytes=max_bytes,
+                )
+            elif kind == "ubuntu_job_cancel":
+                data = self.ubuntu.job_cancel(session_id, str(item.get("job_id") or ""))
+            elif kind == "k8s_context":
+                data = self.ubuntu.context(session_id)
+            elif kind == "k8s_get":
+                resource = str(item.get("resource") or "").strip()
+                if not resource:
+                    raise ValueError("K8S_RESOURCE_REQUIRED")
+                args = ["get", resource]
+                name = str(item.get("name") or "").strip()
+                if name:
+                    args.append(name)
+                selector = str(item.get("selector") or "").strip()
+                if selector:
+                    args.extend(["--selector", selector])
+                field_selector = str(item.get("field_selector") or "").strip()
+                if field_selector:
+                    args.extend(["--field-selector", field_selector])
+                output = str(item.get("output") or "wide").strip()
+                if output:
+                    args.extend(["-o", output])
+                data = self.ubuntu.kubectl(
+                    session_id, args,
+                    job_id=str(item.get("job_id") or self.ids.next("J")),
+                    namespace=str(item.get("namespace") or ""),
+                    allow_mutation=False, wait_ms=wait_ms, max_bytes=max_bytes,
+                )
+            elif kind == "k8s_describe":
+                resource = str(item.get("resource") or "").strip()
+                if not resource:
+                    raise ValueError("K8S_RESOURCE_REQUIRED")
+                args = ["describe", resource]
+                name = str(item.get("name") or "").strip()
+                if name:
+                    args.append(name)
+                data = self.ubuntu.kubectl(
+                    session_id, args,
+                    job_id=str(item.get("job_id") or self.ids.next("J")),
+                    namespace=str(item.get("namespace") or ""),
+                    allow_mutation=False, wait_ms=wait_ms, max_bytes=max_bytes,
+                )
+            elif kind == "k8s_logs":
+                target = str(item.get("target") or "").strip()
+                if not target:
+                    raise ValueError("K8S_LOG_TARGET_REQUIRED")
+                args = ["logs", target]
+                container = str(item.get("container") or "").strip()
+                if container:
+                    args.extend(["--container", container])
+                tail = int(item.get("tail") if item.get("tail") is not None else 200)
+                if tail >= 0:
+                    args.append(f"--tail={min(100000, tail)}")
+                since = str(item.get("since") or "").strip()
+                if since:
+                    args.extend(["--since", since])
+                if bool(item.get("timestamps", True)):
+                    args.append("--timestamps")
+                if bool(item.get("previous", False)):
+                    args.append("--previous")
+                data = self.ubuntu.kubectl(
+                    session_id, args,
+                    job_id=str(item.get("job_id") or self.ids.next("J")),
+                    namespace=str(item.get("namespace") or ""),
+                    allow_mutation=False, wait_ms=wait_ms, max_bytes=max_bytes,
+                )
+            elif kind == "k8s_events":
+                args = ["get", "events", "--sort-by=.lastTimestamp"]
+                field_selector = str(item.get("field_selector") or "").strip()
+                if field_selector:
+                    args.extend(["--field-selector", field_selector])
+                data = self.ubuntu.kubectl(
+                    session_id, args,
+                    job_id=str(item.get("job_id") or self.ids.next("J")),
+                    namespace=str(item.get("namespace") or ""),
+                    allow_mutation=False, wait_ms=wait_ms, max_bytes=max_bytes,
+                )
+            elif kind == "k8s_command":
+                args = item.get("args")
+                if not isinstance(args, list):
+                    raise ValueError("KUBECTL_ARGS_REQUIRES_1_TO_64_STRINGS")
+                data = self.ubuntu.kubectl(
+                    session_id,
+                    [str(value) for value in args],
+                    job_id=str(item.get("job_id") or self.ids.next("J")),
+                    namespace=str(item.get("namespace") or ""),
+                    allow_mutation=bool(item.get("allow_mutation", False)),
+                    confirm_context=str(item.get("confirm_context") or ""),
+                    wait_ms=wait_ms,
+                    max_bytes=max_bytes,
+                )
+            else:
+                raise ValueError(f"UNSUPPORTED_UBUNTU_OPERATION:{kind}")
+
+            data = self._scrub_browser_secret_values(data, secret_sources)
+            if isinstance(data, dict):
+                data = {
+                    **data,
+                    "secret_refs_used": used_secret_refs,
+                    "secret_values_returned": False,
+                    "execution_target": "REMOTE_PC_WSL",
+                    "control_plane": "EASYCHANGE_STRUCTURED",
+                    "result_transport": data.get("result_transport") or "EC2_RESULT_STORE_CHUNKS",
+                }
+            terminal = bool(data.get("terminal")) if isinstance(data, dict) else False
+            return_code = data.get("return_code") if isinstance(data, dict) else None
+            ok = not terminal or return_code in (None, 0)
+            return Result(
+                ok,
+                kind,
+                data=data,
+                error=None if ok else str((data or {}).get("stderr") or "REMOTE_COMMAND_FAILED")[:1000],
+                code=None if ok else "REMOTE_COMMAND_FAILED",
+                command_id=self.ids.next("C"),
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+        except Exception as exc:
+            error = self._scrub_browser_secret_values(str(exc), secret_sources)
+            return Result(
+                False,
+                kind or "ubuntu",
+                error=error,
+                code=str(getattr(exc, "code", "") or type(exc).__name__),
+                data={
+                    "secret_refs_used": used_secret_refs,
+                    "secret_values_returned": False,
+                    "execution_target": "REMOTE_PC_WSL",
+                    "control_plane": "EASYCHANGE_STRUCTURED",
+                },
+                command_id=self.ids.next("C"),
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+
     def _execute_browser_operation(self, item: dict) -> Result:
             kind = str(item.get("type") or "").casefold()
             secret_sources: dict[str, str] = {}
@@ -1292,6 +1507,21 @@ class CommandService:
                     return Result(False, query_kind, error="RESULT_NOT_FOUND", code="RESULT_NOT_FOUND")
                 return Result(True, query_kind, data=data, command_id=self.ids.next("C"),
                               duration_ms=int((time.monotonic() - started) * 1000))
+
+        # Ubuntu/WSL/Kubernetes operations execute inside EasyChange on the
+        # REMOTE_PC. Results use the same sequenced durable EC2/result-store
+        # contract as browser operations, but never depend on terminal focus,
+        # OCR, clipboard or a visible shell window.
+        if len(operations) == 1 and isinstance(operations[0], dict):
+            ubuntu_item = operations[0]
+            ubuntu_kind = str(ubuntu_item.get("type") or "").casefold()
+            if ubuntu_kind in {
+                "ubuntu_open", "ubuntu_state", "ubuntu_close", "ubuntu_cd", "ubuntu_env",
+                "ubuntu_exec", "ubuntu_shell", "ubuntu_batch",
+                "ubuntu_job_status", "ubuntu_job_logs", "ubuntu_job_cancel",
+                "k8s_context", "k8s_get", "k8s_describe", "k8s_logs", "k8s_events", "k8s_command",
+            }:
+                return self._execute_ubuntu_operation(ubuntu_item)
 
         # Browser operations use the same sequenced structured/result-store
         # contract as all other EasyChange tools. BrowserService reuses an existing

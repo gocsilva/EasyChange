@@ -432,6 +432,7 @@ class ProcessService:
         env: dict[str, str] | None = None,
         redact_values: list[str] | tuple[str, ...] | None = None,
         metadata: dict | None = None,
+        no_window: bool = False,
     ) -> dict:
         requested_argv = [str(item) for item in (argv or [])]
         if not requested_argv or not requested_argv[0]:
@@ -467,6 +468,7 @@ class ProcessService:
                 job_id,
                 env=env,
                 redact_values=redact_values,
+                no_window=bool(no_window),
             )
         except Exception as exc:
             failed = {
@@ -1236,6 +1238,7 @@ class ProcessService:
         *,
         env: dict[str, str] | None = None,
         redact_values: list[str] | tuple[str, ...] | None = None,
+        no_window: bool = False,
     ) -> dict:
         requested_argv, exec_argv, launch_env, cleanup_paths = self._prepare_launch(
             argv, env=env
@@ -1247,6 +1250,9 @@ class ProcessService:
         stdout_path, stderr_path = self.root / f"{process_id}.out", self.root / f"{process_id}.err"
         secure_values = tuple(str(value) for value in (redact_values or ()) if str(value))
         pump_threads: tuple[threading.Thread, ...] = ()
+        popen_extra: dict = {}
+        if bool(no_window) and os.name == "nt":
+            popen_extra["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if secure_values:
             proc = subprocess.Popen(
                 exec_argv,
@@ -1257,6 +1263,7 @@ class ProcessService:
                 shell=False,
                 env=launch_env,
                 bufsize=0,
+                **popen_extra,
             )
             assert proc.stdout is not None and proc.stderr is not None
             pump_threads = (
@@ -1282,6 +1289,7 @@ class ProcessService:
                     exec_argv, cwd=self.cwd, stdin=subprocess.DEVNULL,
                     stdout=stdout_file, stderr=stderr_file, shell=False,
                     env=launch_env,
+                    **popen_extra,
                 )
             finally:
                 stdout_file.close()

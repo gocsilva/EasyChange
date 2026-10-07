@@ -9,6 +9,12 @@ STRUCTURED_RECOVERY_TYPES = frozenset({
     "optical_meta", "optical_chunk", "optical_chunks",
 })
 STRUCTURED_JOB_TYPES = frozenset({"job_start", "job_status", "job_result", "job_logs", "job_cancel"})
+STRUCTURED_UBUNTU_TYPES = frozenset({
+    "ubuntu_open", "ubuntu_state", "ubuntu_close", "ubuntu_cd", "ubuntu_env",
+    "ubuntu_exec", "ubuntu_shell", "ubuntu_batch",
+    "ubuntu_job_status", "ubuntu_job_logs", "ubuntu_job_cancel",
+    "k8s_context", "k8s_get", "k8s_describe", "k8s_logs", "k8s_events", "k8s_command",
+})
 TEXT_MUTATION_COMMANDS = frozenset({
     "write", "save", "force-write", "append", "insert", "replace", "replace-line",
     "replace-range", "delete", "rename", "move", "mkdir", "new", "batch",
@@ -20,6 +26,8 @@ STRUCTURED_CONTINUE_SAFE_TYPES = frozenset({
     "runtime_profiles", "runtime_environment",
     "browser_state", "browser_snapshot", "browser_dom", "browser_visual", "browser_tabs",
     "browser_cdp_events", "swagger_browser_operations",
+    "ubuntu_state", "ubuntu_job_status", "ubuntu_job_logs",
+    "k8s_context", "k8s_get", "k8s_describe", "k8s_logs", "k8s_events",
     "git_diff", "process_logs", "test_job_result", "test_job_logs", "build_job_result", "build_job_logs",
     "ef_migrations_list", "ef_script",
     "db_connections", "db_schema", *STRUCTURED_RECOVERY_TYPES,
@@ -50,9 +58,31 @@ _OPERATION_FAMILIES = {
     "db_connections": "database", "db_configure": "database", "db_schema": "database",
     "db_query": "database",
     "ef_migrations_list": "database", "ef_database_update": "database", "ef_script": "database",
+    **{name: "ubuntu" for name in STRUCTURED_UBUNTU_TYPES if name.startswith("ubuntu_")},
+    **{name: "kubernetes" for name in STRUCTURED_UBUNTU_TYPES if name.startswith("k8s_")},
     "validate": "validation",
 }
 
+def structured_operation_is_mutation(item: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+    kind = str(item.get("type") or "").casefold()
+    if kind in STRUCTURED_MUTATION_TYPES:
+        return True
+    if kind in {"ubuntu_cd", "ubuntu_env", "ubuntu_close", "ubuntu_shell", "ubuntu_job_cancel"}:
+        return True
+    if kind in {"ubuntu_exec", "k8s_command"}:
+        return bool(item.get("allow_mutation", False))
+    if kind == "ubuntu_batch":
+        commands = item.get("commands")
+        if not isinstance(commands, list):
+            return False
+        return any(
+            isinstance(command, dict)
+            and (bool(command.get("allow_mutation", False)) or bool(str(command.get("command") or "").strip()))
+            for command in commands
+        )
+    return False
 def structured_operation_profile(kind: str) -> dict:
     normalized = str(kind or "").casefold()
     return {
