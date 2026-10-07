@@ -132,10 +132,12 @@ class _WebSocket:
         self._reader_error: str | None = None
         self._closed = False
         self._handshake()
-        # The continuous reader owns recv() after the HTTP upgrade. A short
-        # socket timeout lets close() stop the daemon promptly without turning
-        # idle event streams into failures.
-        self.sock.settimeout(0.5)
+        # The continuous reader owns recv() after the HTTP upgrade. Keep it
+        # blocking: a short socket timeout can fire in the middle of a large
+        # WebSocket frame (notably Page.captureScreenshot), discard the partial
+        # frame state and desynchronize every subsequent message. close() calls
+        # shutdown(), which wakes the blocking reader without polling.
+        self.sock.settimeout(None)
         self._reader = threading.Thread(
             target=self._reader_loop,
             name="easychange-cdp-reader",
