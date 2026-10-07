@@ -360,10 +360,26 @@ class ProjectRuntimeService:
                 "urls": urls,
                 "swagger_candidates": self._swagger_candidates(urls),
             })
-        solution = next(iter(sorted(self.workspace.root_path.glob("*.sln"))), None)
+        solutions = [
+            path for path in sorted(
+                [
+                    *self.workspace.root_path.rglob("*.sln"),
+                    *self.workspace.root_path.rglob("*.slnx"),
+                ],
+                key=lambda value: (
+                    len(value.relative_to(self.workspace.root_path).parts),
+                    value.relative_to(self.workspace.root_path).as_posix().casefold(),
+                ),
+            )
+            if not any(
+                part in _SKIP
+                for part in path.relative_to(self.workspace.root_path).parts
+            )
+        ]
+        solution = solutions[0] if len(solutions) == 1 else None
         all_restored = bool(projects) and all((path.parent / "obj" / "project.assets.json").exists() for path in projects)
         if output and solution:
-            workspace_test = ["dotnet", "test", solution.name]
+            workspace_test = ["dotnet", "test", _rel(self.workspace.root_path, solution)]
             if all_restored:
                 workspace_test.append("--no-restore")
             for item in output:
