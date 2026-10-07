@@ -55,13 +55,14 @@ class UbuntuService:
         "config", "rollout", "apply", "create", "delete", "edit", "patch",
         "replace", "scale", "annotate", "label", "taint", "cordon", "uncordon",
         "drain", "exec", "attach", "cp", "port-forward", "proxy", "run",
-        "expose", "autoscale", "set",
+        "expose", "autoscale", "set", "debug", "certificate",
+        "completion", "options", "help",
     }
     _MUTATING_KUBECTL = {
         "apply", "create", "delete", "edit", "patch", "replace", "scale",
         "annotate", "label", "taint", "cordon", "uncordon", "drain", "exec",
         "attach", "cp", "port-forward", "proxy", "run", "expose", "autoscale",
-        "set",
+        "set", "debug", "certificate",
     }
     _FORBIDDEN_KUBECTL_FLAGS = {
         "--token", "--password", "--username", "--client-key",
@@ -596,6 +597,19 @@ class UbuntuService:
                                     "KUBECTL_MUTATION_REQUIRES_EXACT_CONTEXT_CONFIRMATION:"
                                     + session.context
                                 )
+                            mutation_namespace = (
+                                self._requested_namespace(requested)
+                                or str(item.get("namespace") or "").strip()
+                            )
+                            if (
+                                mutation_namespace
+                                and session.namespace
+                                and mutation_namespace != session.namespace
+                            ):
+                                raise UbuntuError(
+                                    "KUBECTL_MUTATION_NAMESPACE_OVERRIDE_FORBIDDEN:"
+                                    + session.namespace
+                                )
                         effective_args, _ = self._effective_kubectl_args(
                             session,
                             requested,
@@ -714,6 +728,11 @@ class UbuntuService:
     @classmethod
     def _kubectl_mutating(cls, args: list[str]) -> bool:
         verb, subverb = cls._kubectl_verb(args)
+        # Unknown/plugin kubectl verbs fail closed. A plugin can execute
+        # arbitrary code or mutate the cluster, so it must never inherit the
+        # read-only fast path merely because its name is new to EasyChange.
+        if not verb:
+            return True
         if verb in cls._MUTATING_KUBECTL:
             return True
         if verb == "rollout":
@@ -723,6 +742,19 @@ class UbuntuService:
         if verb == "auth":
             return subverb != "can-i"
         return False
+
+    @staticmethod
+    def _requested_namespace(args: list[str]) -> str:
+        values = [str(item) for item in args]
+        for index, value in enumerate(values):
+            lowered = value.casefold()
+            if lowered in {"-n", "--namespace"} and index + 1 < len(values):
+                return str(values[index + 1]).strip()
+            if lowered.startswith("--namespace="):
+                return value.split("=", 1)[1].strip()
+            if lowered.startswith("-n="):
+                return value.split("=", 1)[1].strip()
+        return ""
 
     @classmethod
     def _guard_secret_read(cls, args: list[str]) -> None:
@@ -809,6 +841,19 @@ class UbuntuService:
                 raise UbuntuError(
                     "KUBECTL_MUTATION_REQUIRES_EXACT_CONTEXT_CONFIRMATION:"
                     + session.context
+                )
+            mutation_namespace = (
+                self._requested_namespace(requested)
+                or str(namespace or "").strip()
+            )
+            if (
+                mutation_namespace
+                and session.namespace
+                and mutation_namespace != session.namespace
+            ):
+                raise UbuntuError(
+                    "KUBECTL_MUTATION_NAMESPACE_OVERRIDE_FORBIDDEN:"
+                    + session.namespace
                 )
         effective, ns = self._effective_kubectl_args(session, requested, namespace)
         result = self._exec_job(
