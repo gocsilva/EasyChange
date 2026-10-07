@@ -121,3 +121,75 @@ def test_same_sequence_mutation_replays_receipt_without_duplicate_write(tmp_path
         assert status["mutation_state"] == "APPLIED"
     finally:
         service.close()
+
+
+
+def test_active_result_store_record_survives_terminal_ttl_and_count_pressure(tmp_path, monkeypatch):
+    import os
+    import time
+
+    root = tmp_path / "results"
+    store = DurableResultStore(
+        root,
+        max_results=16,
+        ttl_seconds=60,
+        active_ttl_seconds=24 * 60 * 60,
+    )
+    active = "QACTIVE01"
+    store.mark_running(active, "a" * 64, ":build-job", mutation=True)
+
+    old = time.time() - 120
+    active_path = root / f"{active}.json.zlib"
+    os.utime(active_path, (old, old))
+
+    for index in range(24):
+        sequence = f"QTERM{index:04d}"
+        store.mark_running(sequence, "b" * 64, ":state", mutation=False)
+        store.complete(
+            sequence,
+            "b" * 64,
+            ":state",
+            {
+                "ok": True,
+                "command": "state",
+                "data": {"index": index},
+                "error": None,
+                "code": None,
+                "command_id": f"C{index}",
+                "duration_ms": 1,
+                "sequence": sequence,
+            },
+        )
+
+    store._cleanup()
+
+    retained = store.get(active)
+    assert retained is not None
+    assert retained["state"] == "RUNNING"
+    assert retained["mutation"] is True
+
+
+def test_active_result_store_record_expires_only_after_active_ttl(tmp_path, monkeypatch):
+    import os
+    import time
+
+    root = tmp_path / "results"
+    store = DurableResultStore(
+        root,
+        ttl_seconds=60,
+        active_ttl_seconds=3600,
+    )
+    sequence = "QACTIVE02"
+    store.mark_running(sequence, "c" * 64, ":test-job", mutation=False)
+    target = root / f"{sequence}.json.zlib"
+
+    old = time.time() - 3700
+    os.utime(target, (old, old))
+    value = store._decode(target.read_bytes())
+    value["started_at"] = old
+    value["created_at"] = old
+    target.write_bytes(store._encode(value))
+    os.utime(target, (old, old))
+
+    assert store.get(sequence) is None
+    assert not target.exists()
