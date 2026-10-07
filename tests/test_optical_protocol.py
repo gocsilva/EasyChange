@@ -172,3 +172,57 @@ def test_structured_primary_duplication_is_compacted_on_wire_and_restored():
     chunks = encode_result_chunks(result)
     restored = decode_result_chunks(chunks)
     assert restored == result
+
+
+
+def test_ec2_sparse_indexes_materialize_only_requested_packets():
+    import json
+
+    result = Result(
+        True,
+        "read",
+        {"text": "".join(
+            f"row-{i:05d}-{(i * 2654435761) & 0xffffffff:08x};"
+            for i in range(3000)
+        )},
+        sequence="QSPARSE1",
+    )
+    full = encode_result_chunks(result, chunk_chars=120)
+    selected = encode_result_chunks(
+        result,
+        chunk_chars=120,
+        indexes=[0, 7, len(full) - 1],
+    )
+
+    decoded = [json.loads(packet) for packet in selected]
+    assert [packet["i"] for packet in decoded] == [0, 7, len(full) - 1]
+    assert all(packet["n"] == len(full) for packet in decoded)
+    assert selected == [full[0], full[7], full[-1]]
+
+
+def test_ec2_bundle_preserves_full_count_and_advertises_broadcast_window():
+    import json
+    from easychange.remote.optical_protocol import encode_result_bundle
+
+    result = Result(
+        True,
+        "read",
+        {"text": "".join(
+            f"value-{i:05d}-{(i * 11400714819323198485) & 0xffffffffffffffff:016x};"
+            for i in range(5000)
+        )},
+        sequence="QBUNDLE1",
+    )
+    full = encode_result_chunks(result, chunk_chars=120)
+    packets, header_text = encode_result_bundle(
+        result,
+        chunk_chars=120,
+        max_packets=31,
+    )
+    header = json.loads(header_text)
+
+    assert packets == full[:31]
+    assert header["p"] == "EC2H"
+    assert header["n"] == len(full)
+    assert header["w"] == min(31, len(full))
+    assert header["s"] == "QBUNDLE1"
