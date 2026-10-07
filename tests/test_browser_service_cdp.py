@@ -349,6 +349,8 @@ def _bare_async_websocket():
     ws._state_lock = threading.RLock()
     ws._response_ready = threading.Condition(ws._state_lock)
     ws._responses = {}
+    ws._pending_ids = set()
+    ws._late_responses_dropped = 0
     ws._events = deque()
     ws._event_limit = 512
     ws._events_dropped = 0
@@ -427,6 +429,75 @@ def test_cdp_websocket_reader_collects_event_without_pump(monkeypatch):
     assert events[0]["method"] == "Network.responseReceived"
     assert ws._reader_error == "CdpError:CDP_WEBSOCKET_CLOSED"
 
+
+
+
+def test_cdp_websocket_late_response_is_dropped_after_timeout(monkeypatch):
+    ws = _bare_async_websocket()
+    sent = []
+
+    def send(payload, opcode=1):
+        request = json.loads(payload.decode("utf-8"))
+        sent.append(request)
+
+    monkeypatch.setattr(ws, "_send_frame", send)
+
+    with pytest.raises(TimeoutError, match="CDP_TIMEOUT"):
+        ws.call("Runtime.evaluate", {"expression": "slow()"}, timeout=0.01)
+
+    assert ws._pending_ids == set()
+    assert ws._responses == {}
+
+    ws._dispatch_message({
+        "id": sent[0]["id"],
+        "result": {"value": "late"},
+    })
+
+    assert ws._responses == {}
+    assert ws.event_status()["late_responses_dropped"] == 1
+
+
+def test_cdp_events_continuous_reader_skips_legacy_pump(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+
+    class ContinuousChannel:
+        def __init__(self):
+            self.calls = []
+
+        def event_status(self):
+            return {
+                "reader_alive": True,
+                "pending_events": 1,
+                "events_dropped": 0,
+                "pending_calls": 0,
+                "late_responses_dropped": 0,
+                "reader_error": None,
+            }
+
+        def call(self, method, params=None, timeout=2.0):
+            self.calls.append((method, params, timeout))
+            return {}
+
+        def drain_events(self, limit):
+            return [{
+                "method": "Network.loadingFinished",
+                "params": {"requestId": "R1"},
+            }]
+
+    channel = ContinuousChannel()
+    monkeypatch.setattr(
+        browser,
+        "_cdp_channel",
+        lambda session_id, requested: (channel, "page"),
+    )
+
+    result = browser.cdp_events("EVENTS", channel="page", limit=10, pump=True)
+
+    assert channel.calls == []
+    assert result["continuous_reader"] is True
+    assert result["pump_requested"] is True
+    assert result["pump_performed"] is False
+    assert result["count"] == 1
 
 def test_wait_ready_rejects_chrome_error_page(tmp_path, monkeypatch):
     browser = _new_browser(tmp_path, monkeypatch)
