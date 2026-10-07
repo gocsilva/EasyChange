@@ -314,6 +314,71 @@ class DurableResultStore:
         return {"sequence": sequence, "total_chunks": total, "chunk_bytes": size,
                 "result_bytes": len(raw), "result_hash": hashlib.sha256(raw).hexdigest()}
 
+    def chunks(
+        self,
+        sequence: str,
+        indexes: list[int],
+        *,
+        chunk_bytes: int = 640,
+        max_chunks: int = 8,
+    ) -> dict[str, Any] | None:
+        """Return several logical result chunks from one decoded durable payload.
+
+        This avoids re-reading/decompressing/serializing the complete stored
+        result once per chunk during MCP recovery. The returned batch is bounded
+        so its own EC2 response remains reasonably small.
+        """
+        if not isinstance(indexes, list) or not indexes:
+            raise ValueError("RESULT_CHUNK_INDEXES_REQUIRED")
+        limit = max(1, min(16, int(max_chunks)))
+        unique: list[int] = []
+        for raw_index in indexes:
+            if isinstance(raw_index, bool):
+                raise ValueError("INVALID_RESULT_CHUNK_INDEX")
+            index = int(raw_index)
+            if index not in unique:
+                unique.append(index)
+        if len(unique) > limit:
+            raise ValueError(f"RESULT_CHUNK_BATCH_LIMIT:{limit}")
+
+        payload = self._result_payload(sequence)
+        if payload is None:
+            return None
+        _, raw = payload
+        size = max(256, min(4096, int(chunk_bytes)))
+        total = max(1, (len(raw) + size - 1) // size)
+        result_hash = hashlib.sha256(raw).hexdigest()
+        chunks: list[dict[str, Any]] = []
+        for index in unique:
+            if index < 0 or index >= total:
+                raise IndexError("RESULT_CHUNK_OUT_OF_RANGE")
+            chunk_payload = raw[index * size:(index + 1) * size]
+            chunks.append({
+                "sequence": sequence,
+                "total_chunks": total,
+                "chunk_bytes": size,
+                "result_bytes": len(raw),
+                "result_hash": result_hash,
+                "chunk_index": index,
+                "payload_bytes": len(chunk_payload),
+                "crc32": f"{binascii.crc32(chunk_payload) & 0xFFFFFFFF:08x}",
+                "payload_b64": base64.urlsafe_b64encode(chunk_payload).decode("ascii").rstrip("="),
+                "has_more": index + 1 < total,
+                "next_chunk_index": index + 1 if index + 1 < total else None,
+                "previous_chunk_index": index - 1 if index > 0 else None,
+            })
+        return {
+            "sequence": sequence,
+            "requested_indexes": unique,
+            "returned_indexes": [item["chunk_index"] for item in chunks],
+            "total_chunks": total,
+            "chunk_bytes": size,
+            "result_bytes": len(raw),
+            "result_hash": result_hash,
+            "chunks": chunks,
+            "complete": len(chunks) == len(unique),
+        }
+
     def chunk(self, sequence: str, index: int, *, chunk_bytes: int = 640) -> dict[str, Any] | None:
         payload = self._result_payload(sequence)
         if payload is None:
