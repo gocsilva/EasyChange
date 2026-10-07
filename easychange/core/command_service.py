@@ -448,14 +448,15 @@ class CommandService:
             }
             result.data = {**(result.data or {}), "mutation_receipt": receipt}
             self.result_store.update_mutation_state(sequence, str(receipt.get("lifecycle_state") or "FAILED"), mutation_receipt=receipt)
+        result_value = result.to_wire_dict()
         stored = self.result_store.complete(
             sequence,
             digest,
             command,
-            result.to_dict(),
+            result_value,
             mutation_receipt=receipt if isinstance(receipt, dict) else None,
         )
-        serialized = json.dumps(result.to_dict(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        serialized_bytes = int(stored.get("result_bytes") or 0)
 
         with self._guard:
             journal = dict(self.state_store.data.get("ec_results", {}))
@@ -469,11 +470,11 @@ class CommandService:
                 "code": result.code,
                 "error": (result.error or "")[:512] or None,
                 "duration_ms": result.duration_ms,
-                "result_hash": stored.get("result_hash") or hashlib.sha256(serialized).hexdigest(),
+                "result_hash": stored.get("result_hash"),
                 "finished_at": stored.get("finished_at"),
             }
             self.state_store.data["ec_results"] = dict(list(journal.items())[-128:])
-            self._remember_ec_result(sequence, result, len(serialized))
+            self._remember_ec_result(sequence, result, serialized_bytes)
             self._persist_state(result)
         return result
 
@@ -1499,23 +1500,19 @@ class CommandService:
                         data = None
                     else:
                         from ..remote.optical_protocol import encode_result_chunks
-                        packets = encode_result_chunks(original_result)
                         if query_kind == "optical_meta":
-                            first = json.loads(packets[0])
+                            first = json.loads(
+                                encode_result_chunks(original_result, max_packets=1)[0]
+                            )
                             data = {
                                 "target_sequence": target_sequence,
-                                "total_chunks": len(packets),
+                                "total_chunks": int(first.get("n") or 0),
                                 "result_hash": first.get("h"),
                                 "crc32": first.get("c"),
                             }
                         elif query_kind == "optical_chunks":
                             try:
                                 raw_indexes = query_item.get("chunk_indexes")
-                                # Direct optical recovery has no EC2H header and
-                                # therefore exactly one 4x4 page (16 data cells).
-                                # Accepting 17-32 forced recovery responses to
-                                # rotate, recreating the packet-loss failure that
-                                # selective recovery is meant to eliminate.
                                 if not isinstance(raw_indexes, list) or not 1 <= len(raw_indexes) <= 16:
                                     raise ValueError("CHUNK_INDEXES_REQUIRES_1_TO_16_ITEMS")
                                 indexes = []
@@ -1523,33 +1520,41 @@ class CommandService:
                                     if isinstance(raw_index, bool):
                                         raise ValueError("INVALID_CHUNK_INDEX")
                                     index = int(raw_index)
-                                    if index < 0 or index >= len(packets):
+                                    if index < 0:
                                         raise IndexError("OPTICAL_CHUNK_OUT_OF_RANGE")
                                     if index not in indexes:
                                         indexes.append(index)
-                                selected_packets = [json.loads(packets[index]) for index in indexes]
+                                selected_packets = [
+                                    json.loads(packet)
+                                    for packet in encode_result_chunks(
+                                        original_result, indexes=indexes
+                                    )
+                                ]
                                 data = {
                                     "target_sequence": target_sequence,
                                     "requested": indexes,
-                                    "total_chunks": len(packets),
+                                    "total_chunks": int(selected_packets[0].get("n") or 0),
                                     "packets": selected_packets,
                                     "chunk_crc32": {
                                         str(packet["i"]): f"{binascii.crc32(str(packet.get('d') or '').encode('ascii')) & 0xffffffff:08x}"
                                         for packet in selected_packets
                                     },
-                                    "complete": True,
+                                    "complete": len(selected_packets) == len(indexes),
                                 }
                             except (TypeError, ValueError, IndexError) as exc:
                                 return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_CHUNK")
                         else:
                             try:
                                 chunk_index = int(query_item.get("chunk_index"))
-                                if chunk_index < 0 or chunk_index >= len(packets):
-                                    raise IndexError("OPTICAL_CHUNK_OUT_OF_RANGE")
+                                packet = json.loads(
+                                    encode_result_chunks(
+                                        original_result, indexes=[chunk_index]
+                                    )[0]
+                                )
                                 data = {
                                     "target_sequence": target_sequence,
                                     "chunk_index": chunk_index,
-                                    "packet": json.loads(packets[chunk_index]),
+                                    "packet": packet,
                                 }
                             except (TypeError, ValueError, IndexError) as exc:
                                 return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_CHUNK")
