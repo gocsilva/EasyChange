@@ -2,7 +2,8 @@ import json
 
 from easychange.core.result import Result
 from easychange.remote.optical_protocol import (
-    adaptive_chunk_chars, decode_result_chunks, encode_result_chunks, encode_result_header,
+    adaptive_chunk_chars, decode_result_chunks, encode_durable_result_header,
+    encode_result_chunks, encode_result_header,
 )
 
 
@@ -303,3 +304,25 @@ def test_ec2_bundle_keeps_all_small_result_chunks_with_overflow_policy():
 
     assert packets == full
     assert header["w"] == len(full)
+
+
+
+def test_durable_terminal_header_is_payload_free_and_marks_durable_only():
+    payload = encode_durable_result_header({
+        "sequence": "QFASTHDR1",
+        "finished": True,
+        "success": True,
+        "return_code": None,
+        "payload_length": 123456,
+        "sha256": "a" * 64,
+        "mutation": True,
+        "mutation_state": "APPLIED",
+        "command_id": "CFAST1",
+    })
+    header = json.loads(payload)
+    assert header == {
+        "p": "EC2H", "v": 1, "s": "QFASTHDR1", "f": True,
+        "ok": True, "rc": None, "l": 123456, "n": 0,
+        "h": "a" * 64, "m": "APPLIED", "cid": "CFAST1",
+        "w": 0, "d": 1,
+    }

@@ -141,6 +141,34 @@ def _header_json(
     return json.dumps(header, ensure_ascii=False, separators=(",", ":"))
 
 
+
+def encode_durable_result_header(header: dict[str, Any]) -> str:
+    """Encode a terminal EC2H receipt without serializing/compressing the payload.
+
+    This is intentionally durable-only: n/w stay zero until the background
+    optical bundle knows the real compressed EC2 packet count.
+    """
+    if not isinstance(header, dict):
+        raise ValueError("durable result header object required")
+    sequence = str(header.get("sequence") or "")
+    if not sequence:
+        raise ValueError("durable result sequence required")
+    if not bool(header.get("finished")):
+        raise ValueError("durable result is not terminal")
+    try:
+        payload_length = max(0, int(header.get("payload_length") or 0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid durable result payload length") from exc
+    mutation_state = (
+        header.get("mutation_state") if bool(header.get("mutation")) else None
+    )
+    return json.dumps({
+        "p": HEADER_PROTOCOL, "v": 1, "s": sequence, "f": True,
+        "ok": bool(header.get("success")), "rc": header.get("return_code"),
+        "l": payload_length, "n": 0, "h": str(header.get("sha256") or ""),
+        "m": mutation_state, "cid": header.get("command_id"),
+        "w": 0, "d": 1,
+    }, ensure_ascii=False, separators=(",", ":"))
 def encode_result_chunks(
     result: Any,
     *,

@@ -4,7 +4,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from easychange.remote.optical_protocol import encode_result_bundle
+from easychange.remote.optical_protocol import encode_durable_result_header, encode_result_bundle
 
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPixmap, QShortcut
@@ -761,6 +761,27 @@ class MainWindow(QMainWindow):
             self._optical_timer.setInterval(
                 int(self.service.optical_transport_config()["current_ms"])
             )
+
+    def _show_terminal_optical_header_fast(self, result) -> bool:
+        """Paint a durable terminal receipt before EC2 payload encoding finishes."""
+        sequence = str(getattr(result, "sequence", "") or "")
+        if not sequence:
+            return False
+        try:
+            header = self.service.result_store.header(sequence)
+            if not isinstance(header, dict) or not bool(header.get("finished")):
+                return False
+            payload = encode_durable_result_header(header)
+            pixmap = self._build_optical_pixmap(payload)
+        except (OSError, TypeError, ValueError, RuntimeError):
+            return False
+
+        self._optical_header_payload = payload
+        self._optical_pixmaps[payload] = pixmap
+        label = self.machine_qrs[0]
+        label.setPixmap(pixmap)
+        label.setVisible(True)
+        return True
     def _update_machine_qr(self, result) -> None:
         self._optical_timer.stop()
         self._optical_render_generation += 1
@@ -797,6 +818,11 @@ class MainWindow(QMainWindow):
             )
             self._render_optical_page()
             return
+
+        # CommandService has already durably completed sequenced results before
+        # returning to the UI. Surface that tiny terminal receipt immediately;
+        # payload serialization/compression remains on the EC2 worker.
+        self._show_terminal_optical_header_fast(result)
 
         generation = self._optical_render_generation
         try:
@@ -848,8 +874,12 @@ class MainWindow(QMainWindow):
                 )
             except (TypeError, ValueError, json.JSONDecodeError):
                 overflow_handoff = False
-        if self._optical_burst or overflow_handoff:
-            self._optical_header_payload = bundle_header
+        # Replace the durable-only receipt with the full optical header only
+        # when the page plan actually needs one. For small results the normal
+        # EC2 payload replaces the provisional receipt on the next commit.
+        self._optical_header_payload = (
+            bundle_header if (self._optical_burst or overflow_handoff) else None
+        )
         self._render_optical_page()
     def _optical_page_plan(self) -> tuple[int, int, int, int, bool]:
         requested_slots = (

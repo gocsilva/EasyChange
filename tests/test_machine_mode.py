@@ -446,3 +446,54 @@ def test_human_gui_defers_file_tree_population_until_after_construction(monkeypa
     finally:
         window.close()
         app.processEvents()
+
+
+
+def test_terminal_ec2h_is_visible_before_background_bundle_finishes(tmp_path, monkeypatch):
+    import threading
+    from easychange.core.result import Result
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    sequence = "QFASTHDR2"
+    result = Result(True, "state", {"value": "ready"}, command_id="CFAST2", sequence=sequence)
+
+    window.service.result_store.mark_running(
+        sequence, "b" * 64, ":state", mutation=False
+    )
+    window.service.result_store.complete(
+        sequence, "b" * 64, ":state", result.to_wire_dict()
+    )
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_encode(value, **kwargs):
+        started.set()
+        assert release.wait(2.0)
+        return (
+            ['{"p":"EC2","s":"QFASTHDR2","i":0,"n":1,"h":"x","c":"y","x":"z","d":"a"}'],
+            '{"p":"EC2H","v":1,"s":"QFASTHDR2","f":true,"ok":true,"rc":null,"l":1,"n":1,"h":"x","m":null,"cid":"CFAST2","w":1}',
+        )
+
+    monkeypatch.setattr("easychange.ui.main_window.encode_result_bundle", slow_encode)
+    window._update_machine_qr(result)
+
+    assert started.wait(1.0)
+    assert window._optical_encode_future is not None
+    assert window._optical_encode_future.done() is False
+    assert window.machine_qr.pixmap() is not None
+    provisional = json.loads(window._optical_header_payload)
+    assert provisional["p"] == "EC2H"
+    assert provisional["s"] == sequence
+    assert provisional["d"] == 1
+    assert provisional["n"] == 0
+    assert provisional["w"] == 0
+
+    release.set()
+    _drain_optical(window, app)
+    assert len(window._optical_payloads) == 1
+    assert window._optical_header_payload is None
+
+    window.close()
+    app.processEvents()
