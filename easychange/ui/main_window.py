@@ -78,6 +78,7 @@ class MainWindow(QMainWindow):
     # a second initial page only added ~1 dwell interval and more QR decode work
     # before the same durable handoff.
     _OPTICAL_BROADCAST_MAX_CHUNKS = 15
+    _OPTICAL_OVERFLOW_BROADCAST_CHUNKS = 3
     # More than one 4-QR row should not rotate in compact mode.
     # Switch to the 16-slot canvas so 5-16 chunks are visible simultaneously
     # and duplicated padding adds optical redundancy.
@@ -764,6 +765,7 @@ class MainWindow(QMainWindow):
                 encode_result_bundle,
                 result,
                 max_packets=self._OPTICAL_BROADCAST_MAX_CHUNKS,
+                overflow_packets=self._OPTICAL_OVERFLOW_BROADCAST_CHUNKS,
             )
         except RuntimeError:
             self._set_optical_burst(False)
@@ -798,7 +800,16 @@ class MainWindow(QMainWindow):
         self._set_optical_burst(
             len(self._optical_payloads) > self._OPTICAL_BURST_THRESHOLD
         )
-        if self._optical_burst:
+        overflow_handoff = False
+        if bundle_header:
+            try:
+                header = json.loads(bundle_header)
+                overflow_handoff = bool(
+                    int(header.get("n") or 0) > int(header.get("w") or 0) > 0
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                overflow_handoff = False
+        if self._optical_burst or overflow_handoff:
             self._optical_header_payload = bundle_header
         self._render_optical_page()
     def _optical_page_plan(self) -> tuple[int, int, int, int, bool]:

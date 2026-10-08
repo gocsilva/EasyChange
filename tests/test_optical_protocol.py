@@ -1,3 +1,5 @@
+import json
+
 from easychange.core.result import Result
 from easychange.remote.optical_protocol import (
     adaptive_chunk_chars, decode_result_chunks, encode_result_chunks, encode_result_header,
@@ -248,3 +250,56 @@ def test_optical_level3_roundtrip_remains_lossless():
     decoded = decode_result_chunks(chunks)
     assert decoded["sequence"] == "QLEVEL3"
     assert decoded["data"]["text"] == "payload-" * 5000
+
+
+
+def test_ec2_bundle_uses_compact_overflow_window_only_when_result_exceeds_cap():
+    from easychange.core.result import Result
+    from easychange.remote.optical_protocol import encode_result_bundle, encode_result_chunks
+
+    result = Result(
+        True,
+        "read",
+        {"text": "".join(
+            f"value-{i:05d}-{(i * 11400714819323198485) & 0xffffffffffffffff:016x};"
+            for i in range(5000)
+        )},
+        sequence="QOVERFLOW1",
+    )
+    full = encode_result_chunks(result, chunk_chars=120)
+    packets, header_text = encode_result_bundle(
+        result,
+        chunk_chars=120,
+        max_packets=15,
+        overflow_packets=3,
+    )
+    header = json.loads(header_text)
+
+    assert len(full) > 15
+    assert packets == full[:3]
+    assert header["n"] == len(full)
+    assert header["w"] == 3
+
+
+def test_ec2_bundle_keeps_all_small_result_chunks_with_overflow_policy():
+    from easychange.core.result import Result
+    from easychange.remote.optical_protocol import encode_result_bundle, encode_result_chunks
+
+    result = Result(
+        True,
+        "state",
+        {"value": "small"},
+        sequence="QSMALL1",
+    )
+    full = encode_result_chunks(result, chunk_chars=120)
+    assert len(full) <= 15
+    packets, header_text = encode_result_bundle(
+        result,
+        chunk_chars=120,
+        max_packets=15,
+        overflow_packets=3,
+    )
+    header = json.loads(header_text)
+
+    assert packets == full
+    assert header["w"] == len(full)

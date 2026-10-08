@@ -1933,3 +1933,59 @@ def test_result_get_uses_cached_payload_before_durable_record_decode(tmp_path, m
         ),
     )
     assert store.result(sequence) == expected
+
+
+
+def test_result_store_optional_chunk_compression_round_trips(tmp_path):
+    import base64
+    import binascii
+    import json
+    import zlib
+    from easychange.core.result_store import DurableResultStore
+
+    store = DurableResultStore(tmp_path / "results")
+    sequence = "QCOMPCHUNK1"
+    result = {
+        "ok": True,
+        "command": "study",
+        "data": {"text": ("public class Example { return value; }\n" * 500)},
+        "sequence": sequence,
+    }
+    store.mark_running(sequence, "a" * 64, ":study", mutation=False)
+    store.complete(sequence, "a" * 64, ":study", result)
+
+    batch = store.chunks(
+        sequence,
+        [0, 1],
+        chunk_bytes=4096,
+        compress_payload=True,
+    )
+    assert batch["compressed_requested"] is True
+    assert batch["compressed_chunks"] >= 1
+    for chunk in batch["chunks"]:
+        wire = base64.urlsafe_b64decode(
+            chunk["payload_b64"] + "=" * (-len(chunk["payload_b64"]) % 4)
+        )
+        raw = zlib.decompress(wire) if chunk["payload_encoding"] == "zlib+base64" else wire
+        assert len(raw) == chunk["payload_bytes"]
+        assert f"{binascii.crc32(raw) & 0xffffffff:08x}" == chunk["crc32"]
+
+
+def test_result_store_does_not_expand_uncompressible_chunk(tmp_path):
+    import hashlib
+    from easychange.core.result_store import DurableResultStore
+
+    store = DurableResultStore(tmp_path / "results")
+    sequence = "QRANDOMCHUNK1"
+    noisy = "".join(hashlib.sha256(f"{i}".encode()).hexdigest() for i in range(300))
+    result = {"ok": True, "data": {"text": noisy}, "sequence": sequence}
+    store.mark_running(sequence, "b" * 64, ":read", mutation=False)
+    store.complete(sequence, "b" * 64, ":read", result)
+
+    chunk = store.chunk(
+        sequence,
+        0,
+        chunk_bytes=1024,
+        compress_payload=True,
+    )
+    assert chunk["wire_bytes"] <= chunk["payload_bytes"]

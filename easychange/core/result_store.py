@@ -508,6 +508,26 @@ class DurableResultStore:
         return {"sequence": sequence, "total_chunks": total, "chunk_bytes": size,
                 "result_bytes": len(raw), "result_hash": digest}
 
+
+    @staticmethod
+    def _chunk_payload_wire(chunk_payload: bytes, *, compress_payload: bool) -> dict[str, Any]:
+        raw_crc = f"{binascii.crc32(chunk_payload) & 0xFFFFFFFF:08x}"
+        wire = chunk_payload
+        encoding = "base64"
+        if compress_payload and len(chunk_payload) >= 256:
+            compressed = zlib.compress(chunk_payload, level=1)
+            # Keep raw when compression does not offset the encoding metadata.
+            if len(compressed) + 16 < len(chunk_payload):
+                wire = compressed
+                encoding = "zlib+base64"
+        return {
+            "payload_bytes": len(chunk_payload),
+            "wire_bytes": len(wire),
+            "payload_encoding": encoding,
+            "crc32": raw_crc,
+            "payload_b64": base64.urlsafe_b64encode(wire).decode("ascii").rstrip("="),
+        }
+
     def chunks(
         self,
         sequence: str,
@@ -515,6 +535,7 @@ class DurableResultStore:
         *,
         chunk_bytes: int = 640,
         max_chunks: int = 8,
+        compress_payload: bool = False,
     ) -> dict[str, Any] | None:
         """Return several logical result chunks from one decoded durable payload.
 
@@ -553,9 +574,10 @@ class DurableResultStore:
                 "result_bytes": len(raw),
                 "result_hash": result_hash,
                 "chunk_index": index,
-                "payload_bytes": len(chunk_payload),
-                "crc32": f"{binascii.crc32(chunk_payload) & 0xFFFFFFFF:08x}",
-                "payload_b64": base64.urlsafe_b64encode(chunk_payload).decode("ascii").rstrip("="),
+                **self._chunk_payload_wire(
+                    chunk_payload,
+                    compress_payload=bool(compress_payload),
+                ),
                 "has_more": index + 1 < total,
                 "next_chunk_index": index + 1 if index + 1 < total else None,
                 "previous_chunk_index": index - 1 if index > 0 else None,
@@ -568,11 +590,22 @@ class DurableResultStore:
             "chunk_bytes": size,
             "result_bytes": len(raw),
             "result_hash": result_hash,
+            "compressed_requested": bool(compress_payload),
+            "compressed_chunks": sum(
+                1 for item in chunks if item.get("payload_encoding") == "zlib+base64"
+            ),
             "chunks": chunks,
             "complete": len(chunks) == len(unique),
         }
 
-    def chunk(self, sequence: str, index: int, *, chunk_bytes: int = 640) -> dict[str, Any] | None:
+    def chunk(
+        self,
+        sequence: str,
+        index: int,
+        *,
+        chunk_bytes: int = 640,
+        compress_payload: bool = False,
+    ) -> dict[str, Any] | None:
         payload = self._result_payload(sequence)
         if payload is None:
             return None
@@ -585,9 +618,11 @@ class DurableResultStore:
         return {
             "sequence": sequence, "total_chunks": total, "chunk_bytes": size,
             "result_bytes": len(raw), "result_hash": digest,
-            "chunk_index": index, "payload_bytes": len(chunk_payload),
-            "crc32": f"{binascii.crc32(chunk_payload) & 0xFFFFFFFF:08x}",
-            "payload_b64": base64.urlsafe_b64encode(chunk_payload).decode("ascii").rstrip("="),
+            "chunk_index": index,
+            **self._chunk_payload_wire(
+                chunk_payload,
+                compress_payload=bool(compress_payload),
+            ),
             "has_more": index + 1 < total,
             "next_chunk_index": index + 1 if index + 1 < total else None,
             "previous_chunk_index": index - 1 if index > 0 else None,

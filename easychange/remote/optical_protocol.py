@@ -193,12 +193,20 @@ def encode_result_bundle(
     *,
     chunk_chars: int | None = None,
     max_packets: int | None = None,
+    overflow_packets: int | None = None,
 ) -> tuple[list[str], str]:
     """Encode broadcast packets and EC2H in one serialization/compression pass."""
     value, raw, token, size, total, digest, crc, sequence = _transport_components(
         result, chunk_chars=chunk_chars
     )
-    materialized = total if max_packets is None else max(1, min(total, int(max_packets)))
+    if max_packets is None:
+        materialized = total
+    else:
+        cap = max(1, min(total, int(max_packets)))
+        if overflow_packets is not None and total > int(max_packets):
+            materialized = max(1, min(cap, int(overflow_packets)))
+        else:
+            materialized = cap
     packets: list[str] = []
     for index in range(materialized):
         piece = token[index * size:(index + 1) * size]

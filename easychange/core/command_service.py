@@ -1518,6 +1518,7 @@ class CommandService:
                             target_sequence,
                             int(query_item.get("chunk_index")),
                             chunk_bytes=int(query_item.get("chunk_bytes") or 320),
+                            compress_payload=bool(query_item.get("compressed")),
                         )
                     except (TypeError, ValueError, IndexError) as exc:
                         return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_CHUNK")
@@ -1531,6 +1532,7 @@ class CommandService:
                             raw_indexes,
                             chunk_bytes=int(query_item.get("chunk_bytes") or 1536),
                             max_chunks=8,
+                            compress_payload=bool(query_item.get("compressed")),
                         )
                     except (TypeError, ValueError, IndexError) as exc:
                         return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_CHUNK")
@@ -2876,8 +2878,9 @@ class CommandService:
                 "configurable_in_easychange_ui": True,
                 "mcp_tuning_supported": True,
                 "initial_broadcast_max_chunks": 15,
+                "overflow_broadcast_chunks": 3,
                 "initial_broadcast_pages": 1,
-                "delivery_strategy": "one_page_then_durable_result_store",
+                "delivery_strategy": "direct_up_to_15_chunks_else_header_plus_3_then_durable_result_store",
                 "supported_min_ms": 300,
                 "supported_max_ms": 5000,
                 "default_min_ms": 600,
@@ -2892,6 +2895,9 @@ class CommandService:
             },
             "result_chunk_recovery_contract": {
                 "adaptive_rechunking": True,
+                "compressed_chunks_supported": True,
+                "compressed_request_field": "compressed",
+                "compressed_encoding": "zlib+base64",
                 "chunk_bytes_min": 256,
                 "chunk_bytes_max": 4096,
                 "index_geometry_depends_on_chunk_bytes": True,
@@ -2934,6 +2940,7 @@ class CommandService:
                 "logical_chunk_bytes_min": 256,
                 "logical_chunk_bytes_max": 4096,
                 "logical_chunk_rechunkable": True,
+                "logical_chunk_compression": "optional-zlib+base64",
             },
             "long_text_support": True,
             "structured_payload_support": True,

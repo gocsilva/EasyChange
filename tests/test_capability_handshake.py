@@ -136,7 +136,8 @@ def test_capabilities_advertise_one_page_then_durable_delivery(tmp_path):
         manifest = service.execute(":capabilities --compact").data["capability_manifest"]
         contract = manifest["optical_transport_contract"]
         assert contract["initial_broadcast_max_chunks"] == 15
+        assert contract["overflow_broadcast_chunks"] == 3
         assert contract["initial_broadcast_pages"] == 1
-        assert contract["delivery_strategy"] == "one_page_then_durable_result_store"
+        assert contract["delivery_strategy"] == "direct_up_to_15_chunks_else_header_plus_3_then_durable_result_store"
     finally:
         service.close()

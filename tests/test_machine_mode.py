@@ -43,7 +43,7 @@ def test_machine_mode_keeps_command_focus_and_renders_sequence_qr(tmp_path):
 
 
 
-def test_machine_mode_uses_16_slot_optical_burst_for_large_results(tmp_path):
+def test_machine_mode_uses_compact_overflow_handoff_for_large_results(tmp_path):
     app = QApplication.instance() or QApplication([])
     source = tmp_path / "large.py"
     source.write_text(
@@ -56,12 +56,13 @@ def test_machine_mode_uses_16_slot_optical_burst_for_large_results(tmp_path):
     _drain_optical(window, app)
     assert not window.tree.isVisible()
     assert len(window.machine_qrs) == 16
-    assert len(window._optical_payloads) > 8
-    assert window._optical_burst is True
-    assert not window.split.isVisible()
-    assert not window.output.isVisible()
-    visible = min(16, len(window._optical_payloads))
-    assert all(label.pixmap() is not None for label in window.machine_qrs[:visible])
+    assert len(window._optical_payloads) == 3
+    assert window._optical_header_payload is not None
+    assert window._optical_burst is False
+    assert sum(
+        1 for label in window.machine_qrs
+        if label.pixmap() is not None and not label.pixmap().isNull()
+    ) == 4
     assert all(label.width() == 160 and label.height() == 160 for label in window.machine_qrs)
     window.close(); app.processEvents()
 
