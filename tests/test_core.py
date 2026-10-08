@@ -1817,3 +1817,119 @@ def test_indexer_background_worker_budget_is_responsiveness_bounded(tmp_path):
         assert indexer.status()["last_refresh"]["workers"] == indexer_module._INDEX_WORKERS
     finally:
         indexer.close()
+
+
+
+def test_result_payload_cache_reuses_serialization_for_meta_and_chunks(tmp_path, monkeypatch):
+    import json as json_module
+    from easychange.core.result_store import DurableResultStore
+
+    store = DurableResultStore(tmp_path / "results")
+    sequence = "QCACHEPAYLOAD1"
+    result = {
+        "ok": True,
+        "command": "study",
+        "data": {"text": "x" * 20000},
+        "sequence": sequence,
+    }
+    store.mark_running(sequence, "a" * 64, ":study", mutation=False)
+    store.complete(sequence, "a" * 64, ":study", result)
+
+    calls = {"dumps": 0}
+    original = json_module.dumps
+    def counted(*args, **kwargs):
+        calls["dumps"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr("easychange.core.result_store.json.dumps", counted)
+    meta = store.chunk_meta(sequence, chunk_bytes=1024)
+    chunks = store.chunks(sequence, [0, 1], chunk_bytes=1024)
+    chunk = store.chunk(sequence, 0, chunk_bytes=1024)
+
+    assert meta["result_hash"] == chunks["result_hash"] == chunk["result_hash"]
+    assert calls["dumps"] == 0
+    assert store._payload_cache_bytes > 0
+
+
+def test_result_store_fast_compression_round_trips(tmp_path):
+    from easychange.core.result_store import DurableResultStore
+
+    store = DurableResultStore(tmp_path / "results")
+    value = {"sequence": "QCOMPRESS1", "result": {"text": "abc" * 10000}}
+    encoded = store._encode(value)
+    assert len(encoded) < len(str(value).encode("utf-8"))
+    assert store._decode(encoded) == value
+
+
+
+def test_terminal_header_cache_avoids_redecoding_large_result(tmp_path, monkeypatch):
+    from easychange.core.result_store import DurableResultStore
+
+    store = DurableResultStore(tmp_path / "results")
+    sequence = "QHEADERFAST1"
+    result = {
+        "ok": True,
+        "command": "study",
+        "data": {"text": "x" * 200000},
+        "sequence": sequence,
+    }
+    store.mark_running(sequence, "a" * 64, ":study", mutation=False)
+    store.complete(sequence, "a" * 64, ":study", result)
+
+    def fail_decode(raw):
+        raise AssertionError("terminal header cache should avoid durable decode")
+
+    monkeypatch.setattr(store, "_decode", fail_decode)
+    header = store.header(sequence, chunk_bytes=1024)
+
+    assert header["finished"] is True
+    assert header["payload_length"] > 100000
+    assert header["chunk_count"] >= 100
+    assert header["sha256"]
+
+
+def test_terminal_header_cache_updates_mutation_state(tmp_path):
+    from easychange.core.result_store import DurableResultStore
+
+    store = DurableResultStore(tmp_path / "results")
+    sequence = "QHEADERMUT1"
+    store.mark_running(sequence, "a" * 64, ":patch", mutation=True)
+    store.complete(
+        sequence,
+        "a" * 64,
+        ":patch",
+        {"ok": True, "command": "patch", "data": {}, "sequence": sequence},
+        mutation_receipt={"lifecycle_state": "APPLIED"},
+    )
+    assert store.header(sequence)["mutation_state"] == "APPLIED"
+    store.update_mutation_state(
+        sequence,
+        "VALIDATED",
+        mutation_receipt={"lifecycle_state": "VALIDATED"},
+    )
+    assert store.header(sequence)["mutation_state"] == "VALIDATED"
+
+
+
+def test_result_get_uses_cached_payload_before_durable_record_decode(tmp_path, monkeypatch):
+    from easychange.core.result_store import DurableResultStore
+
+    store = DurableResultStore(tmp_path / "results")
+    sequence = "QRESULTFAST1"
+    expected = {
+        "ok": True,
+        "command": "study",
+        "data": {"text": "x" * 100000},
+        "sequence": sequence,
+    }
+    store.mark_running(sequence, "a" * 64, ":study", mutation=False)
+    store.complete(sequence, "a" * 64, ":study", expected)
+
+    monkeypatch.setattr(
+        store,
+        "get",
+        lambda sequence: (_ for _ in ()).throw(
+            AssertionError("cached result_get must not decode durable record")
+        ),
+    )
+    assert store.result(sequence) == expected

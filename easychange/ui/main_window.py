@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from easychange.remote.optical_protocol import encode_result_bundle
@@ -228,6 +229,11 @@ class MainWindow(QMainWindow):
         self._optical_burst = False
         self._optical_render_generation = 0
         self._optical_render_pending: dict | None = None
+        self._optical_encode_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="easychange-ec2",
+        )
+        self._optical_encode_future = None
         self._optical_timer = QTimer(self)
         self._optical_timer.setInterval(420)
         self._optical_timer.timeout.connect(self._render_optical_page)
@@ -736,25 +742,65 @@ class MainWindow(QMainWindow):
         if not self._machine:
             self._set_optical_burst(False)
             return
-        try:
-            direct_payloads = _direct_recovery_optical_payloads(result)
-            bundle_header = None
-            if direct_payloads is not None:
-                self._optical_payloads = direct_payloads
-            else:
-                self._optical_payloads, bundle_header = encode_result_bundle(
-                    result, max_packets=self._OPTICAL_BROADCAST_MAX_CHUNKS
-                )
+
+        previous = self._optical_encode_future
+        if previous is not None and not previous.done():
+            previous.cancel()
+        self._optical_encode_future = None
+
+        direct_payloads = _direct_recovery_optical_payloads(result)
+        if direct_payloads is not None:
+            self._optical_encode_future = None
+            self._optical_payloads = direct_payloads
             self._set_optical_burst(
                 len(self._optical_payloads) > self._OPTICAL_BURST_THRESHOLD
             )
-            if self._optical_burst and direct_payloads is None:
-                self._optical_header_payload = bundle_header
             self._render_optical_page()
+            return
+
+        generation = self._optical_render_generation
+        try:
+            future = self._optical_encode_executor.submit(
+                encode_result_bundle,
+                result,
+                max_packets=self._OPTICAL_BROADCAST_MAX_CHUNKS,
+            )
+        except RuntimeError:
+            self._set_optical_burst(False)
+            return
+        self._optical_encode_future = future
+        QTimer.singleShot(
+            0,
+            lambda g=generation, f=future: self._poll_optical_bundle(g, f),
+        )
+
+
+    def _poll_optical_bundle(self, generation: int, future) -> None:
+        if generation != self._optical_render_generation:
+            return
+        if future is not self._optical_encode_future:
+            return
+        if not future.done():
+            QTimer.singleShot(
+                5,
+                lambda g=generation, f=future: self._poll_optical_bundle(g, f),
+            )
+            return
+        self._optical_encode_future = None
+        try:
+            payloads, bundle_header = future.result()
         except (ImportError, ValueError, RuntimeError):
             self._set_optical_burst(False)
             return
-
+        if generation != self._optical_render_generation:
+            return
+        self._optical_payloads = list(payloads)
+        self._set_optical_burst(
+            len(self._optical_payloads) > self._OPTICAL_BURST_THRESHOLD
+        )
+        if self._optical_burst:
+            self._optical_header_payload = bundle_header
+        self._render_optical_page()
     def _optical_page_plan(self) -> tuple[int, int, int, int, bool]:
         requested_slots = (
             self._OPTICAL_BURST_SLOTS if self._optical_burst
@@ -909,6 +955,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._flush_human_text()
+        future = self._optical_encode_future
+        if future is not None and not future.done():
+            future.cancel()
+        self._optical_encode_executor.shutdown(wait=False, cancel_futures=True)
         self.service.close()
         super().closeEvent(event)
 

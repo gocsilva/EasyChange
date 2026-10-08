@@ -11,6 +11,7 @@ from typing import Any
 PROTOCOL = "EC2"
 HEADER_PROTOCOL = "EC2H"
 DEFAULT_CHUNK_CHARS = 180
+OPTICAL_COMPRESSION_LEVEL = 3
 
 
 def _result_value(result: Any) -> dict[str, Any]:
@@ -74,7 +75,10 @@ def _expand_transport_value(value: dict[str, Any]) -> dict[str, Any]:
 
 def _encode_raw(value: dict[str, Any]) -> tuple[bytes, bytes, str]:
     raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    compressed = zlib.compress(raw, level=6)
+    # Only the first optical page is broadcast for large results; the rest
+    # is recovered from the durable ResultStore. Level 3 cuts bundle preparation
+    # CPU substantially versus level 6 while keeping QR density nearly identical.
+    compressed = zlib.compress(raw, level=OPTICAL_COMPRESSION_LEVEL)
     token = base64.urlsafe_b64encode(compressed).decode("ascii").rstrip("=")
     return raw, compressed, token
 

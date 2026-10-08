@@ -7,17 +7,22 @@ import pytest
 pytest.importorskip("PySide6")
 pytest.importorskip("qrcode")
 
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from easychange.core.workspace import Workspace
 from easychange.ui.main_window import MainWindow
 
 
-def _drain_optical(window, app, limit: int = 256) -> None:
+def _drain_optical(window, app, limit: int = 512) -> None:
     for _ in range(limit):
         app.processEvents()
-        if window._optical_render_pending is None:
+        if (
+            window._optical_encode_future is None
+            and window._optical_render_pending is None
+        ):
             return
+        QTest.qWait(1)
     raise AssertionError("optical renderer did not quiesce")
 
 
@@ -341,3 +346,52 @@ def test_optical_transport_controls_are_explicit_and_drive_timer(tmp_path):
 def test_machine_mode_large_result_broadcast_is_one_page():
     assert MainWindow._OPTICAL_BROADCAST_MAX_CHUNKS == 15
     assert MainWindow._OPTICAL_BURST_SLOTS == 16
+
+
+
+def test_optical_bundle_encoding_does_not_block_ui_thread(tmp_path, monkeypatch):
+    import threading
+    from easychange.core.result import Result
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_encode(result, **kwargs):
+        started.set()
+        assert release.wait(2.0)
+        return (
+            [
+                json.dumps(
+                    {"p": "EC2", "s": "QASYNC1", "i": 0, "n": 1, "d": "x"},
+                    separators=(",", ":"),
+                )
+            ],
+            '{"p":"EC2H","s":"QASYNC1","n":1}',
+        )
+
+    monkeypatch.setattr(
+        "easychange.ui.main_window.encode_result_bundle",
+        slow_encode,
+    )
+
+    window._update_machine_qr(
+        Result(True, "study", {"x": "y" * 1000}, sequence="QASYNC1")
+    )
+    assert started.wait(1.0)
+    assert window._optical_encode_future is not None
+    assert window._optical_encode_future.done() is False
+    assert window._optical_payloads == []
+
+    # The UI thread is still free to process events while the worker is blocked.
+    app.processEvents()
+    assert window.command.isEnabled()
+
+    release.set()
+    _drain_optical(window, app)
+    assert len(window._optical_payloads) == 1
+    assert window.machine_qr.pixmap() is not None
+
+    window.close()
+    app.processEvents()

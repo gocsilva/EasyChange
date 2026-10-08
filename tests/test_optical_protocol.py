@@ -226,3 +226,25 @@ def test_ec2_bundle_preserves_full_count_and_advertises_broadcast_window():
     assert header["n"] == len(full)
     assert header["w"] == min(31, len(full))
     assert header["s"] == "QBUNDLE1"
+
+
+
+def test_optical_transport_uses_balanced_compression_level():
+    import easychange.remote.optical_protocol as protocol
+    assert protocol.OPTICAL_COMPRESSION_LEVEL == 3
+
+
+def test_optical_level3_roundtrip_remains_lossless():
+    from easychange.core.result import Result
+    from easychange.remote.optical_protocol import decode_result_chunks, encode_result_chunks
+
+    result = Result(
+        True,
+        "study",
+        {"text": "payload-" * 5000},
+        sequence="QLEVEL3",
+    )
+    chunks = encode_result_chunks(result)
+    decoded = decode_result_chunks(chunks)
+    assert decoded["sequence"] == "QLEVEL3"
+    assert decoded["data"]["text"] == "payload-" * 5000
