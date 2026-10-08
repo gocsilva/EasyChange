@@ -88,7 +88,10 @@ class MainWindow(QMainWindow):
 
     def __init__(self, workspace: Workspace, *, machine_mode: bool | None = None, hid_mode: bool = False) -> None:
         super().__init__()
-        self.service = CommandService(workspace)
+        self.service = CommandService(
+            workspace,
+            defer_initial_maintenance=True,
+        )
         self.service.browser.set_focus_window_handle_provider(lambda: int(self.winId()))
         self._machine = self.service.machine if machine_mode is None else machine_mode
         self.service.machine = self._machine
@@ -1012,4 +1015,8 @@ def run(workspace_path: str = ".", *, machine_mode: bool | None = None, hid_mode
     else:
         # Let Qt paint the human GUI before enumerating workspace files.
         window._schedule_tree_population(delay_ms=75)
+    # Automatic cleanup is housekeeping, not a precondition for showing the
+    # window or accepting commands. Start it only after Qt has had a chance to
+    # paint the GUI.
+    QTimer.singleShot(100, window.service.start_deferred_maintenance)
     return app.exec()

@@ -379,3 +379,24 @@ def test_disk_budget_never_uses_active_result_as_pressure_candidate(tmp_path, mo
     assert active_path.exists()
     assert not evidence.exists()
     assert "results_pressure" not in report["categories"]
+
+
+
+def test_maintenance_uses_per_result_retention_without_changing_global_default(tmp_path):
+    from easychange.core.result_store import DurableResultStore
+
+    results_root = tmp_path / ".easychange" / "results"
+    store = DurableResultStore(
+        results_root,
+        ttl_seconds=60,
+        active_ttl_seconds=3600,
+    )
+    sequence = "QRETENTIONMETA1"
+    record = store.mark_running(
+        sequence,
+        "a" * 64,
+        ":state",
+        mutation=False,
+    )
+    assert record["retention_ttl_seconds"] == 60
+    assert record["active_retention_ttl_seconds"] == 3600

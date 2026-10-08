@@ -282,6 +282,8 @@ class DurableResultStore:
                 "result_bytes": None,
                 "result": None,
                 "mutation_receipt": None,
+                "retention_ttl_seconds": self.ttl_seconds,
+                "active_retention_ttl_seconds": self.active_ttl_seconds,
             }
             self._write(sequence, value)
             return value

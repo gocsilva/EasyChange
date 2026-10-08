@@ -62,7 +62,12 @@ class ProcessFailure(RuntimeError):
 
 class CommandService:
     """Thread-safe deterministic control plane for CLI diagnostics and HID-driven Machine GUI."""
-    def __init__(self, workspace: Workspace) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        *,
+        defer_initial_maintenance: bool = False,
+    ) -> None:
         self.workspace = workspace
         self.state_store = MachineSession(workspace.root_path / ".easychange" / "session.json", str(workspace.root_path))
         self.session_id = self.state_store.data["session_id"]
@@ -145,9 +150,28 @@ class CommandService:
         self._maintenance_interval_seconds = 300.0
         self._maintenance_last = 0.0
         self._maintenance_report: dict = {}
-        self._run_maintenance(force=True)
+        self._maintenance_guard = threading.RLock()
+        self._maintenance_thread: threading.Thread | None = None
+        if defer_initial_maintenance:
+            # GUI startup treats automatic cleanup as idle/background work. Mark
+            # it scheduled so the first command does not synchronously perform
+            # the same scan before the background worker starts.
+            self._maintenance_last = time.monotonic()
+            self._maintenance_report = {
+                "mode": "automatic",
+                "pending": True,
+                "deferred": True,
+            }
+        else:
+            self._run_maintenance(force=True)
 
-    def _run_maintenance(self, *, force: bool = False, dry_run: bool = False, scan_workspace_temps: bool = False) -> dict:
+    def _run_maintenance(
+        self,
+        *,
+        force: bool = False,
+        dry_run: bool = False,
+        scan_workspace_temps: bool = False,
+    ) -> dict:
         now = time.monotonic()
         if (
             not force
@@ -155,30 +179,41 @@ class CommandService:
             and now - self._maintenance_last < self._maintenance_interval_seconds
         ):
             return dict(self._maintenance_report)
-        process_state = self.processes.maintenance(keep_finished=8)
-        report = self.maintenance.automatic_cleanup(
-            referenced_blobs=self.journal_store.referenced_blobs(),
-            active_process_ids=self.processes.active_process_ids(),
-            dry_run=dry_run,
-            scan_workspace_temps=scan_workspace_temps,
-        )
-        report["process_memory"] = process_state
-        report["memory_bounds"] = {
-            "history_items": len(self.history),
-            "history_limit": 100,
-            "journal_entries": self.journal_store.count,
-            "journal_recent_metadata": len(self.journal),
-            "journal_recent_metadata_limit": 64,
-            "ec_result_cache_items": len(self._ec_result_cache),
-            "ec_result_cache_bytes": sum(self._ec_result_cache_sizes.values()),
-            "ec_result_cache_item_limit": self._ec_result_cache_max_items,
-            "ec_result_cache_byte_limit": self._ec_result_cache_max_bytes,
-            "navigation_results": len(self.results),
-            "navigation_results_limit": 512,
-        }
-        self._maintenance_last = now
-        self._maintenance_report = report
-        return dict(report)
+
+        with self._maintenance_guard:
+            now = time.monotonic()
+            if (
+                not force
+                and self._maintenance_report
+                and now - self._maintenance_last < self._maintenance_interval_seconds
+            ):
+                return dict(self._maintenance_report)
+
+            process_state = self.processes.maintenance(keep_finished=8)
+            report = self.maintenance.automatic_cleanup(
+                referenced_blobs=self.journal_store.referenced_blobs(),
+                active_process_ids=self.processes.active_process_ids(),
+                dry_run=dry_run,
+                scan_workspace_temps=scan_workspace_temps,
+            )
+            report["process_memory"] = process_state
+            report["memory_bounds"] = {
+                "history_items": len(self.history),
+                "history_limit": 100,
+                "journal_entries": self.journal_store.count,
+                "journal_recent_metadata": len(self.journal),
+                "journal_recent_metadata_limit": 64,
+                "ec_result_cache_items": len(self._ec_result_cache),
+                "ec_result_cache_bytes": sum(self._ec_result_cache_sizes.values()),
+                "ec_result_cache_item_limit": self._ec_result_cache_max_items,
+                "ec_result_cache_byte_limit": self._ec_result_cache_max_bytes,
+                "navigation_results": len(self.results),
+                "navigation_results_limit": 512,
+            }
+            report["pending"] = False
+            self._maintenance_last = time.monotonic()
+            self._maintenance_report = report
+            return dict(report)
 
     def maintenance_report(self) -> dict:
         return {
@@ -199,7 +234,41 @@ class CommandService:
             },
         }
 
+    def start_deferred_maintenance(self) -> bool:
+        """Run the initial automatic cleanup off the caller/UI thread once."""
+        current = self._maintenance_thread
+        if current is not None and current.is_alive():
+            return False
+
+        def worker() -> None:
+            try:
+                self._run_maintenance(force=True)
+            except (OSError, ValueError, RuntimeError) as exc:
+                with self._maintenance_guard:
+                    self._maintenance_last = time.monotonic()
+                    self._maintenance_report = {
+                        "mode": "automatic",
+                        "pending": False,
+                        "deferred": True,
+                        "error": type(exc).__name__,
+                    }
+
+        thread = threading.Thread(
+            target=worker,
+            name="easychange-maintenance",
+            daemon=True,
+        )
+        self._maintenance_thread = thread
+        thread.start()
+        return True
     def close(self) -> None:
+        maintenance_thread = self._maintenance_thread
+        if (
+            maintenance_thread is not None
+            and maintenance_thread.is_alive()
+            and maintenance_thread is not threading.current_thread()
+        ):
+            maintenance_thread.join(timeout=2.0)
         if self.watcher:
             self.watcher.stop()
         self.processes.stop_all()

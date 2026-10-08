@@ -2116,3 +2116,55 @@ def test_file_list_fallback_stops_before_walking_entire_tree(monkeypatch, tmp_pa
 
     assert [item["path"] for item in items] == ["first/a.py", "first/b.py"]
     assert yielded == ["first"]
+
+
+
+def test_command_service_can_defer_initial_maintenance(tmp_path, monkeypatch):
+    from easychange.core.maintenance_service import MaintenanceService
+
+    calls = []
+    monkeypatch.setattr(
+        MaintenanceService,
+        "automatic_cleanup",
+        lambda self, **kwargs: calls.append(kwargs) or {
+            "mode": "automatic",
+            "removed_files": 0,
+        },
+    )
+    service = CommandService(
+        Workspace.open(tmp_path),
+        defer_initial_maintenance=True,
+    )
+    try:
+        assert calls == []
+        assert service._maintenance_report["pending"] is True
+        assert service.start_deferred_maintenance() is True
+        service._maintenance_thread.join(timeout=2.0)
+        assert len(calls) == 1
+        assert service._maintenance_report["pending"] is False
+    finally:
+        service.close()
+
+
+def test_deferred_maintenance_placeholder_prevents_first_command_cleanup(tmp_path, monkeypatch):
+    from easychange.core.maintenance_service import MaintenanceService
+
+    calls = []
+    monkeypatch.setattr(
+        MaintenanceService,
+        "automatic_cleanup",
+        lambda self, **kwargs: calls.append(kwargs) or {
+            "mode": "automatic",
+            "removed_files": 0,
+        },
+    )
+    service = CommandService(
+        Workspace.open(tmp_path),
+        defer_initial_maintenance=True,
+    )
+    try:
+        result = service.execute(":state")
+        assert result.ok is True
+        assert calls == []
+    finally:
+        service.close()

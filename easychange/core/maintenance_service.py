@@ -189,11 +189,37 @@ class MaintenanceService:
             return {}
 
     @classmethod
-    def _active_result(cls, path: Path) -> bool:
-        value = cls._result_record(path)
+    @staticmethod
+    def _result_is_active_record(value: dict) -> bool:
         state = str(value.get("state") or "").upper()
         execution = str(value.get("execution_state") or "").upper()
         return state == "RUNNING" or execution in {"STARTED", "RUNNING"}
+
+    @classmethod
+    def _result_retention_seconds(
+        cls,
+        value: dict,
+        *,
+        active: bool,
+    ) -> float:
+        key = (
+            "active_retention_ttl_seconds"
+            if active
+            else "retention_ttl_seconds"
+        )
+        fallback = (
+            cls.ACTIVE_RESULT_TTL_SECONDS
+            if active
+            else cls.RESULT_TTL_SECONDS
+        )
+        try:
+            configured = float(value.get(key) or fallback)
+        except (TypeError, ValueError):
+            configured = float(fallback)
+        return max(1.0, configured)
+    @classmethod
+    def _active_result(cls, path: Path) -> bool:
+        return cls._result_is_active_record(cls._result_record(path))
 
     def _evidence_dirs(self) -> list[Path]:
         root = self.easy_root / "evidence"
@@ -415,11 +441,14 @@ class MaintenanceService:
                 age = now - path.stat().st_mtime
             except OSError:
                 continue
-            if self._active_result(path):
-                if age > self.ACTIVE_RESULT_TTL_SECONDS:
+            record = self._result_record(path)
+            active = self._result_is_active_record(record)
+            ttl = self._result_retention_seconds(record, active=active)
+            if active:
+                if age > ttl:
                     self._remove(path, report, "active_results_stale", dry_run=dry_run)
                 continue
-            if terminal_position >= self.MAX_RESULTS or age > self.RESULT_TTL_SECONDS:
+            if terminal_position >= self.MAX_RESULTS or age > ttl:
                 self._remove(path, report, "results", dry_run=dry_run)
             terminal_position += 1
 
