@@ -271,8 +271,12 @@ class MainWindow(QMainWindow):
         self.workspace_split.setStretchFactor(0, 3)
         self.workspace_split.setStretchFactor(1, 2)
 
-        self.command = QLineEdit(); self.command.setPlaceholderText("COMMAND > :remote-guide | Ctrl+K | Enter")
-        self.command.setMaxLength(65535)
+        self.command = QLineEdit()
+        # Qt defaults QLineEdit.maxLength to 32767 and silently truncates longer
+        # HID input. Keep a high defensive ceiling even though large machine
+        # payloads now use :u1 segmented staging.
+        self.command.setMaxLength(4 * 1024 * 1024)
+        self.command.setPlaceholderText("COMMAND > :remote-guide | Ctrl+K | Enter")
         self.command.installEventFilter(self)
         layout.addLayout(header_row); layout.addWidget(self.optical_controls); layout.addWidget(self.workspace_split, 1); layout.addWidget(self.result_panel); layout.addWidget(self.command)
         self.setCentralWidget(central)
@@ -776,6 +780,13 @@ class MainWindow(QMainWindow):
         if previous is not None and not previous.done():
             previous.cancel()
         self._optical_encode_future = None
+
+        if (
+            isinstance(getattr(result, "data", None), dict)
+            and result.data.get("suppress_optical_broadcast")
+        ):
+            self._set_optical_burst(False)
+            return
 
         direct_payloads = _direct_recovery_optical_payloads(result)
         if direct_payloads is not None:

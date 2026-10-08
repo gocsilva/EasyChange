@@ -9,6 +9,7 @@ from .result_store import DurableResultStore
 from .secret_broker import SecretBroker
 from .browser_service import BrowserService
 from .ubuntu_service import UbuntuService
+from .inbound_transfer import InboundCommandStore, InboundTransferError
 
 import shlex
 import time
@@ -146,6 +147,9 @@ class CommandService:
         self._ec_result_cache_max_items = 8
         self._ec_result_cache_max_bytes = 8 * 1024 * 1024
         self.result_store = DurableResultStore(workspace.root_path / ".easychange" / "results")
+        self.inbound_transfers = InboundCommandStore(
+            workspace.root_path / ".easychange" / "inbound"
+        )
         self.maintenance = MaintenanceService(workspace.root_path)
         self._maintenance_interval_seconds = 300.0
         self._maintenance_last = 0.0
@@ -277,9 +281,90 @@ class CommandService:
         self.locks.release_owner(self.instance_id, self.session_id)
         self._persist_state(self.last_result)
 
+    def _execute_inbound_upload_control(
+        self,
+        command: str,
+        *,
+        sequence: str | None = None,
+    ) -> Result:
+        raw = str(command or "").strip()
+        parts = raw.split()
+        suppress = False
+        try:
+            if len(parts) < 3 or parts[0].casefold() != ":u1":
+                raise InboundTransferError("INVALID_INBOUND_UPLOAD_COMMAND")
+            action = parts[1].casefold()
+            if action == "begin":
+                if len(parts) != 7:
+                    raise InboundTransferError("INVALID_INBOUND_BEGIN")
+                data = self.inbound_transfers.begin(
+                    parts[2],
+                    raw_bytes=int(parts[3]),
+                    compressed_bytes=int(parts[4]),
+                    chunk_count=int(parts[5]),
+                    sha256=parts[6],
+                )
+                suppress = True
+            elif action == "chunk":
+                chunk_parts = raw.split(" ", 5)
+                if len(chunk_parts) != 6:
+                    raise InboundTransferError("INVALID_INBOUND_CHUNK")
+                data = self.inbound_transfers.put_chunk(
+                    chunk_parts[2],
+                    index=int(chunk_parts[3]),
+                    crc32=chunk_parts[4],
+                    token=chunk_parts[5],
+                )
+                suppress = True
+            elif action == "status":
+                if len(parts) != 3:
+                    raise InboundTransferError("INVALID_INBOUND_STATUS")
+                data = self.inbound_transfers.status(parts[2])
+            elif action == "abort":
+                if len(parts) != 3:
+                    raise InboundTransferError("INVALID_INBOUND_ABORT")
+                data = self.inbound_transfers.abort(parts[2])
+                suppress = True
+            elif action == "commit":
+                raise InboundTransferError("INBOUND_COMMIT_REQUIRES_SEQUENCE")
+            else:
+                raise InboundTransferError("INVALID_INBOUND_UPLOAD_ACTION")
+
+            if suppress:
+                data = {**data, "suppress_optical_broadcast": True}
+            return Result(
+                True,
+                "u1",
+                data=data,
+                command_id=self.ids.next("C"),
+                sequence=sequence,
+            )
+        except (TypeError, ValueError, InboundTransferError) as exc:
+            code = (
+                exc.code
+                if isinstance(exc, InboundTransferError)
+                else "INVALID_INBOUND_UPLOAD_COMMAND"
+            )
+            data = dict(exc.data) if isinstance(exc, InboundTransferError) else {}
+            if suppress or (
+                len(parts) >= 2
+                and parts[1].casefold() in {"begin", "chunk", "abort"}
+            ):
+                data["suppress_optical_broadcast"] = True
+            return Result(
+                False,
+                "u1",
+                data=data,
+                error=str(exc),
+                code=code,
+                command_id=self.ids.next("C"),
+                sequence=sequence,
+            )
     def execute(self, command: str) -> Result:
         raw = command.strip()
         if not raw: return Result(False, "", error="Empty command", code="INVALID_COMMAND")
+        if raw.casefold().startswith(":u1 "):
+            return self._execute_inbound_upload_control(raw)
         # EC1 is the physical HID request/response envelope. Journal RUNNING
         # before dispatch so a lost ACK can never cause a blind mutation replay.
         match = re.match(r"^:ec\s+(Q[A-Z0-9_-]{4,40})\s+([\s\S]+)$", raw, re.IGNORECASE)
@@ -310,6 +395,30 @@ class CommandService:
 
         codec = None
         structured = None
+        inbound_upload = None
+        if command.casefold().startswith(":u1 status "):
+            return self._execute_inbound_upload_control(command, sequence=sequence)
+        if command.casefold().startswith(":u1 commit "):
+            parts = command.split()
+            if len(parts) != 3:
+                return Result(
+                    False,
+                    "u1",
+                    error="INVALID_INBOUND_COMMIT",
+                    code="INVALID_INBOUND_COMMIT",
+                    sequence=sequence,
+                )
+            try:
+                command, inbound_upload = self.inbound_transfers.assemble(parts[2])
+            except InboundTransferError as exc:
+                return Result(
+                    False,
+                    "u1",
+                    data=dict(exc.data),
+                    error=str(exc),
+                    code=exc.code,
+                    sequence=sequence,
+                )
         if command.casefold().startswith(":z1 "):
             try:
                 command, codec = decode_command(command)
@@ -500,6 +609,11 @@ class CommandService:
         result.sequence = sequence
         if codec:
             result.data = {**(result.data or {}), "transport_codec": codec}
+        if inbound_upload:
+            result.data = {
+                **(result.data or {}),
+                "inbound_upload": dict(inbound_upload),
+            }
 
         receipt = result.data.get("mutation_receipt") if isinstance(result.data, dict) else None
         if is_mutation and not isinstance(receipt, dict):
