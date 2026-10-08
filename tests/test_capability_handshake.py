@@ -141,3 +141,17 @@ def test_capabilities_advertise_one_page_then_durable_delivery(tmp_path):
         assert contract["delivery_strategy"] == "direct_up_to_15_chunks_else_header_plus_3_then_durable_result_store"
     finally:
         service.close()
+
+
+
+def test_capabilities_advertise_compressed_result_stream(tmp_path):
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        manifest = service.execute(":capabilities --compact").data["capability_manifest"]
+        contract = manifest["result_chunk_recovery_contract"]
+        assert contract["compressed_stream_supported"] is True
+        assert contract["compressed_stream_encoding"] == "zlib-json-v1"
+        assert "result_stream_meta" in contract["compressed_stream_operations"]
+        assert manifest["max_result"]["compressed_stream_default_chunk_bytes"] == 2048
+    finally:
+        service.close()

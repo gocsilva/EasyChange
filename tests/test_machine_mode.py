@@ -63,7 +63,11 @@ def test_machine_mode_uses_compact_overflow_handoff_for_large_results(tmp_path):
         1 for label in window.machine_qrs
         if label.pixmap() is not None and not label.pixmap().isNull()
     ) == 4
-    assert all(label.width() == 160 and label.height() == 160 for label in window.machine_qrs)
+    assert all(
+        label.width() == window._OPTICAL_COMPACT_QR_SIZE
+        and label.height() == window._OPTICAL_COMPACT_QR_SIZE
+        for label in window.machine_qrs
+    )
     window.close(); app.processEvents()
 
 
@@ -396,3 +400,25 @@ def test_optical_bundle_encoding_does_not_block_ui_thread(tmp_path, monkeypatch)
 
     window.close()
     app.processEvents()
+
+
+
+def test_optical_qr_size_switches_between_compact_and_burst(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    window.show(); app.processEvents()
+
+    window._set_optical_burst(False)
+    assert all(
+        label.width() == window._OPTICAL_COMPACT_QR_SIZE
+        and label.height() == window._OPTICAL_COMPACT_QR_SIZE
+        for label in window.machine_qrs
+    )
+
+    window._set_optical_burst(True)
+    assert all(
+        label.width() == window._OPTICAL_BURST_QR_SIZE
+        and label.height() == window._OPTICAL_BURST_QR_SIZE
+        for label in window.machine_qrs
+    )
+    window.close(); app.processEvents()

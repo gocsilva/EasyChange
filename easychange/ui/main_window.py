@@ -69,6 +69,8 @@ class MainWindow(QMainWindow):
     _OPTICAL_NORMAL_SLOTS = 4
     _OPTICAL_BURST_SLOTS = 16
     _OPTICAL_BURST_COLUMNS = 4
+    _OPTICAL_COMPACT_QR_SIZE = 220
+    _OPTICAL_BURST_QR_SIZE = 160
     # A burst page must remain visible for more than two typical HDMI capture
     # periods. This reduces missed pages under paint/capture/decode jitter.
     _OPTICAL_BURST_INTERVAL_MS = 900
@@ -217,7 +219,10 @@ class MainWindow(QMainWindow):
         for index in range(self._OPTICAL_BURST_SLOTS):
             label = QLabel()
             label.setObjectName("machineResultQr" if index == 0 else f"machineResultQr{index + 1}")
-            label.setFixedSize(160, 160)
+            label.setFixedSize(
+                self._OPTICAL_COMPACT_QR_SIZE,
+                self._OPTICAL_COMPACT_QR_SIZE,
+            )
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.hide()
             self.machine_qrs.append(label)
@@ -708,6 +713,14 @@ class MainWindow(QMainWindow):
     def _set_optical_burst(self, enabled: bool) -> None:
         enabled = bool(enabled and self._machine)
         self._optical_burst = enabled
+        qr_size = (
+            self._OPTICAL_BURST_QR_SIZE
+            if enabled
+            else self._OPTICAL_COMPACT_QR_SIZE
+        )
+        for label in self.machine_qrs:
+            if label.width() != qr_size or label.height() != qr_size:
+                label.setFixedSize(qr_size, qr_size)
         if enabled:
             self.split.setVisible(False)
             self.output.setVisible(False)

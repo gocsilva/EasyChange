@@ -1536,6 +1536,36 @@ class CommandService:
                         )
                     except (TypeError, ValueError, IndexError) as exc:
                         return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_CHUNK")
+                elif query_kind == "result_stream_meta":
+                    data = self.result_store.stream_meta(
+                        target_sequence,
+                        chunk_bytes=int(query_item.get("chunk_bytes") or 2048),
+                        max_ratio=float(query_item.get("max_ratio") or 0.85),
+                    )
+                elif query_kind == "result_stream_chunk":
+                    try:
+                        data = self.result_store.stream_chunk(
+                            target_sequence,
+                            int(query_item.get("chunk_index")),
+                            chunk_bytes=int(query_item.get("chunk_bytes") or 2048),
+                            max_ratio=float(query_item.get("max_ratio") or 0.85),
+                        )
+                    except (TypeError, ValueError, IndexError) as exc:
+                        return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_STREAM_CHUNK")
+                elif query_kind == "result_stream_chunks":
+                    try:
+                        raw_indexes = query_item.get("chunk_indexes")
+                        if not isinstance(raw_indexes, list) or not 1 <= len(raw_indexes) <= 8:
+                            raise ValueError("RESULT_STREAM_CHUNK_INDEXES_REQUIRES_1_TO_8_ITEMS")
+                        data = self.result_store.stream_chunks(
+                            target_sequence,
+                            raw_indexes,
+                            chunk_bytes=int(query_item.get("chunk_bytes") or 2048),
+                            max_chunks=8,
+                            max_ratio=float(query_item.get("max_ratio") or 0.85),
+                        )
+                    except (TypeError, ValueError, IndexError) as exc:
+                        return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_STREAM_CHUNK")
                 else:
                     original_result = self.result_store.result(target_sequence)
                     if original_result is None:
@@ -2898,6 +2928,11 @@ class CommandService:
                 "compressed_chunks_supported": True,
                 "compressed_request_field": "compressed",
                 "compressed_encoding": "zlib+base64",
+                "compressed_stream_supported": True,
+                "compressed_stream_operations": [
+                    "result_stream_meta", "result_stream_chunk", "result_stream_chunks"
+                ],
+                "compressed_stream_encoding": "zlib-json-v1",
                 "chunk_bytes_min": 256,
                 "chunk_bytes_max": 4096,
                 "index_geometry_depends_on_chunk_bytes": True,
@@ -2941,6 +2976,9 @@ class CommandService:
                 "logical_chunk_bytes_max": 4096,
                 "logical_chunk_rechunkable": True,
                 "logical_chunk_compression": "optional-zlib+base64",
+                "compressed_stream_recovery": "zlib-json-v1",
+                "compressed_stream_default_chunk_bytes": 2048,
+                "compressed_stream_default_max_ratio": 0.85,
             },
             "long_text_support": True,
             "structured_payload_support": True,

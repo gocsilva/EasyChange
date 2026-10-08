@@ -1989,3 +1989,64 @@ def test_result_store_does_not_expand_uncompressible_chunk(tmp_path):
         compress_payload=True,
     )
     assert chunk["wire_bytes"] <= chunk["payload_bytes"]
+
+
+
+def test_result_store_compressed_stream_reduces_repetitive_result(tmp_path):
+    import base64
+    import binascii
+    import hashlib
+    import json
+    import zlib
+    from easychange.core.result_store import DurableResultStore
+
+    store = DurableResultStore(tmp_path / "results")
+    sequence = "QSTREAM1"
+    result = {
+        "ok": True,
+        "command": "study",
+        "data": {"text": ("public class Example { return value; }\n" * 4000)},
+        "sequence": sequence,
+    }
+    store.mark_running(sequence, "c" * 64, ":study", mutation=False)
+    store.complete(sequence, "c" * 64, ":study", result)
+
+    meta = store.stream_meta(sequence, chunk_bytes=2048, max_ratio=0.85)
+    assert meta["eligible"] is True
+    assert meta["stream_bytes"] < meta["result_bytes"] * 0.85
+    indexes = list(range(meta["total_chunks"]))
+    recovered = bytearray()
+    for offset in range(0, len(indexes), 8):
+        batch = store.stream_chunks(
+            sequence,
+            indexes[offset:offset + 8],
+            chunk_bytes=2048,
+            max_ratio=0.85,
+        )
+        for chunk in batch["chunks"]:
+            wire = base64.urlsafe_b64decode(
+                chunk["payload_b64"] + "=" * (-len(chunk["payload_b64"]) % 4)
+            )
+            assert f"{binascii.crc32(wire) & 0xffffffff:08x}" == chunk["crc32"]
+            recovered.extend(wire)
+    stream = bytes(recovered)
+    assert hashlib.sha256(stream).hexdigest() == meta["stream_hash"]
+    raw = zlib.decompress(stream)
+    assert hashlib.sha256(raw).hexdigest() == meta["result_hash"]
+    assert json.loads(raw.decode("utf-8")) == result
+
+
+def test_result_store_stream_declines_poor_compression(tmp_path):
+    import hashlib
+    from easychange.core.result_store import DurableResultStore
+
+    store = DurableResultStore(tmp_path / "results")
+    sequence = "QSTREAMNO1"
+    noisy = "".join(hashlib.sha256(f"noise-{i}".encode()).hexdigest() for i in range(12000))
+    result = {"ok": True, "data": {"text": noisy}, "sequence": sequence}
+    store.mark_running(sequence, "d" * 64, ":read", mutation=False)
+    store.complete(sequence, "d" * 64, ":read", result)
+
+    meta = store.stream_meta(sequence, chunk_bytes=2048, max_ratio=0.50)
+    assert meta["eligible"] is False
+    assert meta["total_chunks"] == 0

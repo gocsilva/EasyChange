@@ -69,6 +69,10 @@ class DurableResultStore:
         self._payload_cache_max_bytes = 16 * 1024 * 1024
         self._terminal_header_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._terminal_header_cache_max = 128
+        self._stream_cache: OrderedDict[str, tuple[float, bytes, str, str, int]] = OrderedDict()
+        self._stream_cache_bytes = 0
+        self._stream_cache_max_entries = 16
+        self._stream_cache_max_bytes = 16 * 1024 * 1024
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, sequence: str) -> Path:
@@ -498,6 +502,198 @@ class DurableResultStore:
         with self._lock:
             self._payload_cache_put(sequence, raw, digest)
         return result, raw, digest
+
+    def _stream_cache_put(
+        self,
+        sequence: str,
+        stream: bytes,
+        stream_hash: str,
+        result_hash: str,
+        result_bytes: int,
+    ) -> None:
+        size = len(stream)
+        if size <= 0 or size > self._stream_cache_max_bytes:
+            return
+        previous = self._stream_cache.pop(sequence, None)
+        if previous is not None:
+            self._stream_cache_bytes -= len(previous[1])
+        while (
+            self._stream_cache
+            and (
+                len(self._stream_cache) >= self._stream_cache_max_entries
+                or self._stream_cache_bytes + size > self._stream_cache_max_bytes
+            )
+        ):
+            _, stale = self._stream_cache.popitem(last=False)
+            self._stream_cache_bytes -= len(stale[1])
+        self._stream_cache[sequence] = (
+            time.monotonic(),
+            stream,
+            stream_hash,
+            result_hash,
+            int(result_bytes),
+        )
+        self._stream_cache_bytes += size
+
+    def _stream_cache_get(
+        self,
+        sequence: str,
+    ) -> tuple[bytes, str, str, int] | None:
+        cached = self._stream_cache.get(sequence)
+        if cached is None:
+            return None
+        created, stream, stream_hash, result_hash, result_bytes = cached
+        if time.monotonic() - created > self.ttl_seconds or not self._path(sequence).exists():
+            self._stream_cache.pop(sequence, None)
+            self._stream_cache_bytes -= len(stream)
+            return None
+        self._stream_cache.move_to_end(sequence)
+        return stream, stream_hash, result_hash, result_bytes
+
+    def _result_stream_payload(
+        self,
+        sequence: str,
+    ) -> tuple[bytes, str, str, int] | None:
+        with self._lock:
+            cached = self._stream_cache_get(sequence)
+            if cached is not None:
+                return cached
+        payload = self._result_payload(sequence)
+        if payload is None:
+            return None
+        _, raw, result_hash = payload
+        stream = zlib.compress(raw, level=1)
+        stream_hash = hashlib.sha256(stream).hexdigest()
+        with self._lock:
+            self._stream_cache_put(
+                sequence,
+                stream,
+                stream_hash,
+                result_hash,
+                len(raw),
+            )
+        return stream, stream_hash, result_hash, len(raw)
+
+    def stream_meta(
+        self,
+        sequence: str,
+        *,
+        chunk_bytes: int = 2048,
+        max_ratio: float = 0.85,
+    ) -> dict[str, Any] | None:
+        payload = self._result_stream_payload(sequence)
+        if payload is None:
+            return None
+        stream, stream_hash, result_hash, result_bytes = payload
+        size = max(256, min(4096, int(chunk_bytes)))
+        ratio_limit = max(0.10, min(1.0, float(max_ratio)))
+        ratio = (len(stream) / result_bytes) if result_bytes else 1.0
+        eligible = bool(result_bytes >= 4096 and ratio <= ratio_limit)
+        total = max(1, (len(stream) + size - 1) // size) if eligible else 0
+        return {
+            "sequence": sequence,
+            "eligible": eligible,
+            "encoding": "zlib-json-v1",
+            "chunk_bytes": size,
+            "total_chunks": total,
+            "stream_bytes": len(stream),
+            "stream_hash": stream_hash,
+            "result_bytes": result_bytes,
+            "result_hash": result_hash,
+            "compression_ratio": round(ratio, 6),
+            "max_ratio": ratio_limit,
+        }
+
+    def stream_chunks(
+        self,
+        sequence: str,
+        indexes: list[int],
+        *,
+        chunk_bytes: int = 2048,
+        max_chunks: int = 8,
+        max_ratio: float = 0.85,
+    ) -> dict[str, Any] | None:
+        meta = self.stream_meta(
+            sequence,
+            chunk_bytes=chunk_bytes,
+            max_ratio=max_ratio,
+        )
+        if meta is None:
+            return None
+        if not meta["eligible"]:
+            return {**meta, "requested_indexes": [], "chunks": [], "complete": False}
+        if not isinstance(indexes, list) or not indexes:
+            raise ValueError("RESULT_STREAM_CHUNK_INDEXES_REQUIRED")
+        limit = max(1, min(16, int(max_chunks)))
+        unique: list[int] = []
+        for raw_index in indexes:
+            if isinstance(raw_index, bool):
+                raise ValueError("INVALID_RESULT_STREAM_CHUNK_INDEX")
+            index = int(raw_index)
+            if index not in unique:
+                unique.append(index)
+        if len(unique) > limit:
+            raise ValueError(f"RESULT_STREAM_CHUNK_BATCH_LIMIT:{limit}")
+
+        payload = self._result_stream_payload(sequence)
+        if payload is None:
+            return None
+        stream, stream_hash, result_hash, result_bytes = payload
+        size = int(meta["chunk_bytes"])
+        total = int(meta["total_chunks"])
+        chunks: list[dict[str, Any]] = []
+        for index in unique:
+            if index < 0 or index >= total:
+                raise IndexError("RESULT_STREAM_CHUNK_OUT_OF_RANGE")
+            piece = stream[index * size:(index + 1) * size]
+            chunks.append({
+                "sequence": sequence,
+                "encoding": "zlib-json-v1",
+                "total_chunks": total,
+                "chunk_bytes": size,
+                "stream_bytes": len(stream),
+                "stream_hash": stream_hash,
+                "result_bytes": result_bytes,
+                "result_hash": result_hash,
+                "chunk_index": index,
+                "payload_bytes": len(piece),
+                "crc32": f"{binascii.crc32(piece) & 0xFFFFFFFF:08x}",
+                "payload_b64": base64.urlsafe_b64encode(piece).decode("ascii").rstrip("="),
+            })
+        return {
+            **meta,
+            "requested_indexes": unique,
+            "returned_indexes": [item["chunk_index"] for item in chunks],
+            "chunks": chunks,
+            "complete": len(chunks) == len(unique),
+        }
+
+    def stream_chunk(
+        self,
+        sequence: str,
+        index: int,
+        *,
+        chunk_bytes: int = 2048,
+        max_ratio: float = 0.85,
+    ) -> dict[str, Any] | None:
+        batch = self.stream_chunks(
+            sequence,
+            [int(index)],
+            chunk_bytes=chunk_bytes,
+            max_chunks=1,
+            max_ratio=max_ratio,
+        )
+        if batch is None:
+            return None
+        chunks = batch.get("chunks")
+        return chunks[0] if isinstance(chunks, list) and chunks else {
+            key: batch.get(key)
+            for key in (
+                "sequence", "eligible", "encoding", "chunk_bytes",
+                "total_chunks", "stream_bytes", "stream_hash",
+                "result_bytes", "result_hash", "compression_ratio", "max_ratio",
+            )
+        }
     def chunk_meta(self, sequence: str, *, chunk_bytes: int = 640) -> dict[str, Any] | None:
         payload = self._result_payload(sequence)
         if payload is None:
