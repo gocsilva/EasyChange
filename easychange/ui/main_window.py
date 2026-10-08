@@ -890,13 +890,13 @@ class MainWindow(QMainWindow):
         total = len(self._optical_payloads)
         has_header = bool(self._optical_header_payload)
         if self._optical_burst and has_header:
-            first_capacity = max(1, slots - 1)
-            tail = max(0, total - first_capacity)
-            page_count = 1 + ((tail + slots - 1) // slots if tail else 0)
-            page = self._optical_page % max(1, page_count)
-            if page == 0:
-                return slots, page_count, 0, first_capacity, True
-            return slots, page_count, first_capacity + (page - 1) * slots, slots, False
+            # Keep the terminal receipt visible on EVERY burst page. When the
+            # consumer attaches mid-rotation it can immediately correlate the
+            # sequence rather than entering a durable-header requery/replay.
+            data_slots = max(1, slots - 1)
+            page_count = max(1, (total + data_slots - 1) // data_slots)
+            page = self._optical_page % page_count
+            return slots, page_count, page * data_slots, data_slots, True
         header_slots = 1 if has_header else 0
         data_slots = max(1, slots - header_slots)
         page_count = max(1, (total + data_slots - 1) // data_slots)

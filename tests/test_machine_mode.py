@@ -200,7 +200,7 @@ def test_machine_mode_restore_callback_respects_minimized_window(tmp_path, monke
 
 
 
-def test_burst_header_only_consumes_slot_on_first_page(tmp_path):
+def test_burst_header_remains_visible_on_every_page(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
     window.show(); app.processEvents()
@@ -211,7 +211,7 @@ def test_burst_header_only_consumes_slot_on_first_page(tmp_path):
     window._optical_page = 0
     slots, page_count, start, data_slots, include_header = window._optical_page_plan()
     assert slots == 16
-    assert page_count == 2
+    assert page_count == 3
     assert start == 0
     assert data_slots == 15
     assert include_header is True
@@ -219,10 +219,10 @@ def test_burst_header_only_consumes_slot_on_first_page(tmp_path):
     window._optical_page = 1
     slots, page_count, start, data_slots, include_header = window._optical_page_plan()
     assert slots == 16
-    assert page_count == 2
+    assert page_count == 3
     assert start == 15
-    assert data_slots == 16
-    assert include_header is False
+    assert data_slots == 15
+    assert include_header is True
     window.close(); app.processEvents()
 
 
@@ -252,7 +252,7 @@ def test_large_burst_page_plan_covers_each_payload_exactly_once_per_cycle(tmp_pa
     for page in range(page_count):
         window._optical_page = page
         _slots, _count, start, data_slots, include_header = window._optical_page_plan()
-        assert include_header is (page == 0)
+        assert include_header is True
         seen.extend(range(start, min(start + data_slots, len(window._optical_payloads))))
 
     assert seen == list(range(len(window._optical_payloads)))
