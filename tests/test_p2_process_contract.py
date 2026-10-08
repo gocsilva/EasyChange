@@ -118,3 +118,101 @@ def test_running_job_updates_heartbeat(tmp_path, monkeypatch):
 
     assert status["state"] == "RUNNING"
     assert after >= before
+
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native PID probe")
+def test_windows_pid_probe_never_spawns_tasklist(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+
+    def forbidden_subprocess(*args, **kwargs):
+        raise AssertionError("PID liveness probe must not spawn tasklist/subprocess")
+
+    monkeypatch.setattr(subprocess, "run", forbidden_subprocess)
+
+    assert ProcessService._pid_alive(os.getpid()) is True
+    assert ProcessService._pid_alive(99999999) is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native PID probe")
+def test_startup_reconcile_many_running_manifests_spawns_zero_probe_processes(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    seed = ProcessService(tmp_path)
+
+    now = time.time()
+    for index in range(250):
+        job_id = f"JSTALE{index:04d}"
+        (seed.jobs_root / f"{job_id}.json").write_text(
+            json.dumps({
+                "job_id": job_id,
+                "process_id": job_id,
+                "pid": 90000000 + index,
+                "argv": [sys.executable, "-c", "pass"],
+                "state": "RUNNING",
+                "created_at": now - 3600,
+                "started_at": now - 3600,
+                "heartbeat_at": now - 3600,
+                "finished_at": None,
+                "returncode": None,
+            }),
+            encoding="utf-8",
+        )
+
+    calls = {"subprocess": 0}
+
+    def forbidden_subprocess(*args, **kwargs):
+        calls["subprocess"] += 1
+        raise AssertionError("startup PID reconciliation must not spawn subprocesses")
+
+    monkeypatch.setattr(subprocess, "run", forbidden_subprocess)
+    service = ProcessService(tmp_path)
+
+    assert calls["subprocess"] == 0
+    orphaned = [
+        service.job_status(f"JSTALE{index:04d}")["state"]
+        for index in range(250)
+    ]
+    assert orphaned == ["ORPHANED"] * 250
+
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows startup reconciliation tuning")
+def test_large_startup_reconcile_is_bounded_and_background(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    seed = ProcessService(tmp_path)
+    seed.stop_all()
+
+    now = time.time()
+    for index in range(300):
+        job_id = f"JLAZY{index:04d}"
+        (seed.jobs_root / f"{job_id}.json").write_text(
+            json.dumps({
+                "job_id": job_id,
+                "process_id": job_id,
+                "pid": 91000000 + index,
+                "argv": ["fake.exe"],
+                "state": "RUNNING",
+                "created_at": now - index,
+                "started_at": now - index,
+                "heartbeat_at": now - index,
+                "finished_at": None,
+                "returncode": None,
+            }),
+            encoding="utf-8",
+        )
+
+    started = time.perf_counter()
+    service = ProcessService(tmp_path)
+    constructor_ms = (time.perf_counter() - started) * 1000.0
+    try:
+        assert service._startup_reconcile["checked"] <= service.STARTUP_RECONCILE_SYNC_LIMIT
+        assert service._reconcile_thread is not None
+        assert constructor_ms < 1500.0
+
+        # Correctness is still immediate for any job explicitly queried, even
+        # if the background sweep has not reached it yet.
+        status = service.job_status("JLAZY0299")
+        assert status["state"] == "ORPHANED"
+        assert status["pid_alive"] is False
+    finally:
+        service.stop_all()

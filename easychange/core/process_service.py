@@ -135,6 +135,8 @@ class ProcessService:
     MAX_DURABLE_JOBS = 128
     DEFAULT_MAX_RUNTIME_BYTES = 256 * 1024 * 1024
     JOB_HEARTBEAT_INTERVAL_SECONDS = 5
+    STARTUP_RECONCILE_SYNC_LIMIT = 16
+    STARTUP_RECONCILE_MAX_MANIFESTS = 2048
 
     @staticmethod
     def _runtime_budget() -> int:
@@ -170,8 +172,18 @@ class ProcessService:
         self._migrate_legacy_jobs()
         self._processes: dict[str, RunningProcess] = {}
         self.last_execution: dict | None = None
-        self._reconcile_durable_jobs()
+        self._job_write_lock = threading.RLock()
+        self._reconcile_stop = threading.Event()
+        self._reconcile_thread: threading.Thread | None = None
+        # Keep GUI construction bounded. Recent stale jobs are reconciled
+        # immediately; the remaining retained manifests are repaired lazily.
+        self._startup_reconcile = self._reconcile_durable_jobs(
+            limit=self.STARTUP_RECONCILE_SYNC_LIMIT,
+            durable=False,
+        )
+        self._start_background_reconcile()
 
+    @staticmethod
     @staticmethod
     def _pid_alive(pid: int | None) -> bool:
         try:
@@ -181,21 +193,45 @@ class ProcessService:
         if value <= 0:
             return False
         if os.name == "nt":
+            # Do not spawn tasklist.exe for every durable RUNNING manifest.
+            # On workspaces with many retained jobs that produced a startup
+            # process storm and could make the Qt GUI appear hung. Probe the
+            # process handle directly instead.
             try:
-                completed = subprocess.run(
-                    ["tasklist", "/FI", f"PID eq {value}", "/FO", "CSV", "/NH"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2,
-                    check=False,
-                    **hidden_console_kwargs(),
+                import ctypes
+
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                open_process = kernel32.OpenProcess
+                open_process.argtypes = [
+                    ctypes.c_ulong,
+                    ctypes.c_int,
+                    ctypes.c_ulong,
+                ]
+                open_process.restype = ctypes.c_void_p
+                wait_for_single_object = kernel32.WaitForSingleObject
+                wait_for_single_object.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+                wait_for_single_object.restype = ctypes.c_ulong
+                close_handle = kernel32.CloseHandle
+                close_handle.argtypes = [ctypes.c_void_p]
+                close_handle.restype = ctypes.c_int
+
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                SYNCHRONIZE = 0x00100000
+                WAIT_TIMEOUT = 0x00000102
+
+                handle = open_process(
+                    PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                    0,
+                    value,
                 )
-            except (OSError, subprocess.SubprocessError):
+                if not handle:
+                    return False
+                try:
+                    return wait_for_single_object(handle, 0) == WAIT_TIMEOUT
+                finally:
+                    close_handle(handle)
+            except (AttributeError, OSError, ValueError):
                 return False
-            output = (completed.stdout or "").strip()
-            if not output or output.casefold().startswith("info:"):
-                return False
-            return f'"{value}"' in output or f',{value},' in output
         try:
             os.kill(value, 0)
             return True
@@ -284,7 +320,13 @@ class ProcessService:
             except OSError:
                 pass
 
-    def _mark_job_orphaned(self, current: dict, *, reason: str) -> dict:
+    def _mark_job_orphaned(
+        self,
+        current: dict,
+        *,
+        reason: str,
+        durable: bool = True,
+    ) -> dict:
         now = time.time()
         updated = {
             **current,
@@ -298,9 +340,19 @@ class ProcessService:
         }
         started = float(updated.get("started_at") or now)
         updated["duration_ms"] = int(max(0.0, now - started) * 1000)
-        return self._write_job(str(updated["job_id"]), updated)
+        return self._write_job(
+            str(updated["job_id"]),
+            updated,
+            durable=durable,
+        )
 
-    def _reconcile_durable_jobs(self) -> dict:
+    def _reconcile_durable_jobs(
+        self,
+        *,
+        limit: int | None = None,
+        durable: bool = False,
+        background: bool = False,
+    ) -> dict:
         reconciled = 0
         orphaned = 0
         running = 0
@@ -308,22 +360,68 @@ class ProcessService:
             manifests = list(self.jobs_root.glob("*.json"))
         except OSError:
             manifests = []
-        for path in manifests[:2048]:
+        try:
+            manifests.sort(
+                key=lambda path: path.stat().st_mtime_ns,
+                reverse=True,
+            )
+        except OSError:
+            pass
+
+        bounded = (
+            manifests[: max(0, int(limit))]
+            if limit is not None
+            else manifests[: self.STARTUP_RECONCILE_MAX_MANIFESTS]
+        )
+        for index, path in enumerate(bounded):
+            if background and self._reconcile_stop.is_set():
+                break
             current = self._read_job(path.stem)
             if not current or str(current.get("state") or "").upper() != "RUNNING":
                 continue
             if self._pid_alive(current.get("pid")):
                 running += 1
                 continue
-            self._mark_job_orphaned(current, reason="PROCESS_NOT_ALIVE")
+            self._mark_job_orphaned(
+                current,
+                reason="PROCESS_NOT_ALIVE",
+                durable=durable,
+            )
             reconciled += 1
             orphaned += 1
+            if background and index and index % 32 == 0:
+                # Yield between small batches so disk-heavy cleanup can never
+                # monopolize the process while the Qt event loop is active.
+                time.sleep(0.001)
         return {
-            "checked": len(manifests),
+            "checked": len(bounded),
+            "available": len(manifests),
             "reconciled": reconciled,
             "orphaned": orphaned,
             "running_unattached": running,
+            "background": bool(background),
         }
+
+    def _start_background_reconcile(self) -> None:
+        if self._reconcile_thread and self._reconcile_thread.is_alive():
+            return
+
+        def worker() -> None:
+            try:
+                self._reconcile_durable_jobs(
+                    limit=self.STARTUP_RECONCILE_MAX_MANIFESTS,
+                    durable=False,
+                    background=True,
+                )
+            except (OSError, RuntimeError, ValueError):
+                pass
+
+        self._reconcile_thread = threading.Thread(
+            target=worker,
+            name="easychange-job-reconcile",
+            daemon=True,
+        )
+        self._reconcile_thread.start()
 
     def _migrate_legacy_jobs(self) -> None:
         legacy = self.cwd / ".easychange" / "jobs"
@@ -348,15 +446,38 @@ class ProcessService:
             raise ValueError("INVALID_JOB_ID")
         return self.jobs_root / f"{safe}.json"
 
-    def _write_job(self, job_id: str, data: dict) -> dict:
+    def _write_job(
+        self,
+        job_id: str,
+        data: dict,
+        *,
+        durable: bool = True,
+    ) -> dict:
         target = self._job_path(job_id)
-        temporary = target.with_suffix(".json.tmp")
-        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        with temporary.open("wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.replace(target)
+        payload = json.dumps(
+            data,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        with self._job_write_lock:
+            # Thread-specific temporary names avoid collisions between a
+            # demand-driven status call and background startup reconciliation.
+            temporary = target.with_name(
+                f"{target.name}.{threading.get_ident()}.tmp"
+            )
+            try:
+                with temporary.open("wb") as handle:
+                    handle.write(payload)
+                    if durable:
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                temporary.replace(target)
+            finally:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
         return data
 
     def _read_job(self, job_id: str) -> dict | None:
@@ -1454,6 +1575,14 @@ class ProcessService:
         }
 
     def stop_all(self) -> None:
+        self._reconcile_stop.set()
+        thread = self._reconcile_thread
+        if (
+            thread is not None
+            and thread.is_alive()
+            and thread is not threading.current_thread()
+        ):
+            thread.join(timeout=1.0)
         for process_id, item in list(self._processes.items()):
             if item.process.poll() is None:
                 self.stop(process_id)

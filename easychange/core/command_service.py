@@ -3254,6 +3254,7 @@ class CommandService:
                 scan_workspace_temps=scan_workspace_temps,
             )
         if name == "health":
+            compact = "--compact" in args or "compact" in args
             index = self.indexer.status()
             processes = self.processes.list()
             active_processes = sum(
@@ -3333,6 +3334,30 @@ class CommandService:
                     "disk_budget": disk_budget,
                 },
             }
+            if compact:
+                compact_subsystems = {
+                    key: {
+                        "healthy": bool(value.get("healthy", True)),
+                        "state": str(value.get("state") or "UNKNOWN"),
+                    }
+                    for key, value in subsystems.items()
+                    if isinstance(value, dict)
+                }
+                return {
+                    "healthy": not degraded_reasons,
+                    "state": "READY" if not degraded_reasons else "DEGRADED",
+                    "workspace": str(self.workspace.root_path),
+                    "workspace_type": self.workspace.kind,
+                    "transaction": transaction_state,
+                    "machine_mode": self.machine,
+                    "transport": self.state_store.data.get("transport", "local"),
+                    "process_count": len(processes),
+                    "active_processes": active_processes,
+                    "durable_results": result_root_ready,
+                    "subsystems": compact_subsystems,
+                    "degraded_reasons": degraded_reasons,
+                    "compact": True,
+                }
             return {
                 "healthy": not degraded_reasons,
                 "state": "READY" if not degraded_reasons else "DEGRADED",

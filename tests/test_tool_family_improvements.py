@@ -1,7 +1,9 @@
 from __future__ import annotations
+import json
 import sqlite3
 import sys
 import time
+from easychange.core.command_service import CommandService
 from easychange.core.database_service import DatabaseService
 from easychange.core.file_service import FileService
 from easychange.core.process_service import ProcessService
@@ -272,3 +274,26 @@ def test_structured_result_chunks_is_bounded_to_eight_items(tmp_path):
     assert blocked.ok is False
     assert blocked.code == "INVALID_RESULT_CHUNK"
     assert "RESULT_CHUNK_INDEXES_REQUIRES_1_TO_8_ITEMS" in str(blocked.error)
+
+
+
+def test_health_compact_avoids_large_diagnostic_payload(tmp_path):
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        full = service.execute(":health")
+        compact = service.execute(":health --compact")
+        assert full.ok is True
+        assert compact.ok is True
+        assert compact.data["compact"] is True
+        assert "capability_manifest" in full.data
+        assert "structured_operations" in full.data
+        assert "maintenance" in full.data
+        assert "capability_manifest" not in compact.data
+        assert "structured_operations" not in compact.data
+        assert "maintenance" not in compact.data
+        encoded = json.dumps(compact.data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        assert len(encoded) < 4096
+        for subsystem in compact.data["subsystems"].values():
+            assert set(subsystem).issubset({"healthy", "state"})
+    finally:
+        service.close()
