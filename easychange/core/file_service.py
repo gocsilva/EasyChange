@@ -1,5 +1,7 @@
 from __future__ import annotations
 import os
+import subprocess
+from .subprocess_utils import hidden_console_kwargs
 
 import difflib
 import hashlib
@@ -75,17 +77,79 @@ class FileService:
                 self._read_cache_bytes = max(0, self._read_cache_bytes - previous[0])
 
     def list_files(self, limit: int = 500) -> list[dict[str, str]]:
-        items = []
-        ignored = {".git", ".easychange", ".venv", "venv", "node_modules", "bin", "obj", "dist", "build",
-                   "__pycache__", ".gradle", ".idea", ".vs", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
-        for path in sorted(self.workspace.root_path.rglob("*")):
-            if any(part in ignored for part in path.parts):
-                continue
-            if path.is_file():
-                rel = path.relative_to(self.workspace.root_path).as_posix()
-                items.append({"path": rel, "id": f"F{len(items) + 1}", "kind": "file"})
-                if len(items) >= limit:
-                    break
+        limit = max(1, int(limit))
+        ignored = {
+            ".git", ".easychange", ".venv", "venv", "node_modules", "bin", "obj",
+            "dist", "build", "__pycache__", ".gradle", ".idea", ".vs",
+            ".pytest_cache", ".mypy_cache", ".ruff_cache",
+        }
+        root = self.workspace.root_path
+        items: list[dict[str, str]] = []
+
+        def append_relative(relative: str) -> bool:
+            normalized = str(relative or "").replace("\\", "/").strip("/")
+            if not normalized:
+                return False
+            parts = tuple(part for part in normalized.split("/") if part)
+            if any(part in ignored for part in parts):
+                return False
+            candidate = root / Path(normalized)
+            try:
+                if not candidate.is_file():
+                    return False
+            except OSError:
+                return False
+            items.append({
+                "path": normalized,
+                "id": f"F{len(items) + 1}",
+                "kind": "file",
+            })
+            return len(items) >= limit
+
+        # Git already maintains a fast path index and also knows untracked files
+        # through --others/--exclude-standard. Avoid materializing/sorting the
+        # whole workspace tree before applying the caller's limit.
+        if (root / ".git").exists():
+            try:
+                completed = subprocess.run(
+                    [
+                        "git", "ls-files", "--cached", "--others",
+                        "--exclude-standard", "-z",
+                    ],
+                    cwd=str(root),
+                    capture_output=True,
+                    timeout=3.0,
+                    check=False,
+                    **hidden_console_kwargs(),
+                )
+                if completed.returncode == 0:
+                    for raw in completed.stdout.split(b"\0"):
+                        if not raw:
+                            continue
+                        relative = raw.decode("utf-8", errors="replace")
+                        if append_relative(relative):
+                            break
+                    if items:
+                        return items
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+        # Non-Git/fallback path: prune ignored directories before descending and
+        # stop as soon as the requested limit is satisfied. Sort only each local
+        # directory, never the entire recursive tree.
+        for current_root, dirs, files in os.walk(root):
+            dirs[:] = sorted(
+                name for name in dirs
+                if name not in ignored
+            )
+            current = Path(current_root)
+            for name in sorted(files):
+                try:
+                    relative = (current / name).relative_to(root).as_posix()
+                except ValueError:
+                    continue
+                if append_relative(relative):
+                    return items
         return items
 
     def read(self, path: str, start: int = 1, count: int = 120) -> dict:

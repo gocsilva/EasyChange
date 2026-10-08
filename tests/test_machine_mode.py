@@ -422,3 +422,27 @@ def test_optical_qr_size_switches_between_compact_and_burst(tmp_path):
         for label in window.machine_qrs
     )
     window.close(); app.processEvents()
+
+
+
+def test_human_gui_defers_file_tree_population_until_after_construction(monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QApplication
+    from easychange.core.workspace import Workspace
+    from easychange.ui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    calls = []
+    monkeypatch.setattr(
+        MainWindow,
+        "_populate_tree",
+        lambda self: calls.append("populate"),
+    )
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=False, hid_mode=False)
+    try:
+        assert calls == []
+        assert window.tree.topLevelItemCount() == 0
+        window._populate_tree_deferred()
+        assert calls == ["populate"]
+    finally:
+        window.close()
+        app.processEvents()

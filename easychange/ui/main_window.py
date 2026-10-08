@@ -171,8 +171,7 @@ class MainWindow(QMainWindow):
         self.optical_max.editingFinished.connect(self._save_optical_transport_controls)
 
         self.tree = QTreeWidget(); self.tree.setHeaderLabel("FILES")
-        if not self._machine:
-            self._populate_tree()
+        self._tree_population_scheduled = False
         self.editor = CodeEditor(); self.editor.setPlaceholderText("Open a file with :open <path> or select it in FILES")
 
         self.human_text_panel = QWidget()
@@ -589,6 +588,19 @@ class MainWindow(QMainWindow):
         finally:
             self._human_text_loading = False
 
+    def _schedule_tree_population(self, delay_ms: int = 75) -> None:
+        if self._machine or self._tree_population_scheduled:
+            return
+        if self.tree.topLevelItemCount() > 0:
+            return
+        self._tree_population_scheduled = True
+        QTimer.singleShot(max(0, int(delay_ms)), self._populate_tree_deferred)
+
+    def _populate_tree_deferred(self) -> None:
+        self._tree_population_scheduled = False
+        if self._machine or self.tree.topLevelItemCount() > 0:
+            return
+        self._populate_tree()
     def _populate_tree(self) -> None:
         self.tree.clear()
         for item in self.service.files.list_files():
@@ -598,7 +610,7 @@ class MainWindow(QMainWindow):
         self.service.machine = self._machine
         self.service._persist_state()
         if not self._machine and self.tree.topLevelItemCount() == 0:
-            self._populate_tree()
+            self._schedule_tree_population(delay_ms=0)
         self._apply_machine_style()
         self._refresh_header()
         self.focus_command()
@@ -997,4 +1009,7 @@ def run(workspace_path: str = ".", *, machine_mode: bool | None = None, hid_mode
     window.show()
     if window._machine:
         QTimer.singleShot(0, window.focus_command)
+    else:
+        # Let Qt paint the human GUI before enumerating workspace files.
+        window._schedule_tree_population(delay_ms=75)
     return app.exec()

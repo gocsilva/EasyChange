@@ -2050,3 +2050,69 @@ def test_result_store_stream_declines_poor_compression(tmp_path):
     meta = store.stream_meta(sequence, chunk_bytes=2048, max_ratio=0.50)
     assert meta["eligible"] is False
     assert meta["total_chunks"] == 0
+
+
+
+def test_file_list_git_fast_path_respects_limit_and_untracked(monkeypatch, tmp_path):
+    import subprocess
+    from easychange.core.file_service import FileService
+    from easychange.core.workspace import Workspace
+
+    (tmp_path / ".git").mkdir()
+    for name in ("a.py", "b.py", "c.py"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
+
+    class Completed:
+        returncode = 0
+        stdout = b"a.py\0b.py\0c.py\0"
+
+    calls = []
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or Completed(),
+    )
+    service = FileService(Workspace.open(tmp_path))
+    items = service.list_files(limit=2)
+
+    assert [item["path"] for item in items] == ["a.py", "b.py"]
+    assert len(calls) == 1
+    argv = calls[0][0][0]
+    assert "--others" in argv
+    assert "--exclude-standard" in argv
+
+
+def test_file_list_fallback_stops_before_walking_entire_tree(monkeypatch, tmp_path):
+    import subprocess
+    from easychange.core.file_service import FileService
+    from easychange.core.workspace import Workspace
+
+    (tmp_path / ".git").mkdir()
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "a.py").write_text("a", encoding="utf-8")
+    (first / "b.py").write_text("b", encoding="utf-8")
+    (second / "should-not-be-needed.py").write_text("x", encoding="utf-8")
+
+    workspace = Workspace.open(tmp_path)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("git unavailable")),
+    )
+    yielded = []
+
+    def fake_walk(_root):
+        yielded.append("first")
+        yield str(first), [], ["a.py", "b.py"]
+        yielded.append("second")
+        yield str(second), [], ["should-not-be-needed.py"]
+
+    monkeypatch.setattr("easychange.core.file_service.os.walk", fake_walk)
+    service = FileService(workspace)
+    items = service.list_files(limit=2)
+
+    assert [item["path"] for item in items] == ["first/a.py", "first/b.py"]
+    assert yielded == ["first"]
