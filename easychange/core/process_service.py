@@ -184,7 +184,6 @@ class ProcessService:
         self._start_background_reconcile()
 
     @staticmethod
-    @staticmethod
     def _pid_alive(pid: int | None) -> bool:
         try:
             value = int(pid or 0)

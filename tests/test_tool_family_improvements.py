@@ -297,3 +297,32 @@ def test_health_compact_avoids_large_diagnostic_payload(tmp_path):
             assert set(subsystem).issubset({"healthy", "state"})
     finally:
         service.close()
+
+
+
+def test_health_compact_skips_expensive_diagnostics(tmp_path, monkeypatch):
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        monkeypatch.setattr(
+            service,
+            "maintenance_report",
+            lambda: (_ for _ in ()).throw(AssertionError("maintenance must not run")),
+        )
+        monkeypatch.setattr(
+            service.browser,
+            "health_summary",
+            lambda: (_ for _ in ()).throw(AssertionError("browser health must not run")),
+        )
+        monkeypatch.setattr(
+            service.secret_broker,
+            "status",
+            lambda: (_ for _ in ()).throw(AssertionError("secret broker must not run")),
+        )
+        compact = service.execute(":health --compact")
+        assert compact.ok is True
+        assert compact.data["compact"] is True
+        assert set(compact.data["subsystems"]) == {
+            "index", "durable_results", "processes"
+        }
+    finally:
+        service.close()
