@@ -335,3 +335,9 @@ def test_optical_transport_controls_are_explicit_and_drive_timer(tmp_path):
     assert window._optical_timer.interval() == 1100
 
     window.close(); app.processEvents()
+
+
+
+def test_machine_mode_large_result_broadcast_is_one_page():
+    assert MainWindow._OPTICAL_BROADCAST_MAX_CHUNKS == 15
+    assert MainWindow._OPTICAL_BURST_SLOTS == 16

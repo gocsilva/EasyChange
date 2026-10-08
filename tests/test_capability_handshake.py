@@ -127,3 +127,16 @@ def test_capabilities_prefer_compact_runtime_environment_status(tmp_path):
         assert contract["secret_values_returned"] is False
     finally:
         service.close()
+
+
+
+def test_capabilities_advertise_one_page_then_durable_delivery(tmp_path):
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        manifest = service.execute(":capabilities --compact").data["capability_manifest"]
+        contract = manifest["optical_transport_contract"]
+        assert contract["initial_broadcast_max_chunks"] == 15
+        assert contract["initial_broadcast_pages"] == 1
+        assert contract["delivery_strategy"] == "one_page_then_durable_result_store"
+    finally:
+        service.close()

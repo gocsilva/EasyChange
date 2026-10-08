@@ -93,7 +93,11 @@ class CommandService:
         self.indexer = Indexer(workspace.root_path)
         for sensitive_path in self.state_store.data.get("sensitive_source_paths", []):
             try:
-                self.indexer.protect_path(str(sensitive_path), scrub=True)
+                # The plaintext was scrubbed when the source was first
+                # imported. Startup only has to keep the path excluded; running
+                # VACUUM once per persisted secret path made session startup scale
+                # poorly for no additional security benefit.
+                self.indexer.protect_path(str(sensitive_path), scrub=False)
             except (OSError, ValueError):
                 pass
         self.symbol_service = SymbolService(workspace, self.indexer)
@@ -2871,6 +2875,9 @@ class CommandService:
                 "adaptive": True,
                 "configurable_in_easychange_ui": True,
                 "mcp_tuning_supported": True,
+                "initial_broadcast_max_chunks": 15,
+                "initial_broadcast_pages": 1,
+                "delivery_strategy": "one_page_then_durable_result_store",
                 "supported_min_ms": 300,
                 "supported_max_ms": 5000,
                 "default_min_ms": 600,
@@ -2911,6 +2918,7 @@ class CommandService:
             "operation_profiles": structured.get("operations") or {},
             "feature_flags": feature_flags,
             "optical_transport": self.optical_transport_config(),
+            "optical_transport_contract": fingerprint_source["optical_transport_contract"],
             "runtime_environment_contract": fingerprint_source["runtime_environment_contract"],
             "result_chunk_recovery_contract": fingerprint_source["result_chunk_recovery_contract"],
             "max_payload": {

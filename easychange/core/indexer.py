@@ -17,7 +17,10 @@ from .subprocess_utils import hidden_console_kwargs
 SKIP_DIRS = {".git", ".easychange", ".venv", "venv", "node_modules", "bin", "obj", "dist", "build",
              "__pycache__", ".gradle", ".idea", ".vs", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 MAX_INDEX_BYTES = 2 * 1024 * 1024
-_INDEX_WORKERS = max(2, min(8, os.cpu_count() or 4))
+# Cold Git-backed discovery already works before the persistent index is warm.
+# Keep background hashing deliberately modest so startup/index refresh does not
+# steal CPU/disk from Qt painting and EC2 QR delivery.
+_INDEX_WORKERS = max(2, min(4, max(2, (os.cpu_count() or 4) // 2)))
 _INDEX_VERSION = "2"
 
 _CS_MODIFIERS = r"(?:(?:public|private|protected|internal|sealed|abstract|static|partial|new|readonly|ref|unsafe)\s+)*"
@@ -59,7 +62,10 @@ class Indexer:
         self._fully_indexed = False
         self._build_thread: threading.Thread | None = None
         self._last_refresh_at = 0.0
-        self._last_refresh_result = {"indexed": 0, "removed": 0, "files": 0, "cached": False}
+        self._last_refresh_result = {
+            "indexed": 0, "removed": 0, "files": 0, "cached": False,
+            "workers": _INDEX_WORKERS,
+        }
         self._fts_enabled = False
         self._force_rebuild = False
         with self._connect() as db:
@@ -295,8 +301,10 @@ class Indexer:
             db.execute("INSERT OR REPLACE INTO index_meta(key,value) VALUES('version',?)", (_INDEX_VERSION,))
 
         self._force_rebuild = False
-        result = {"indexed": len(loaded), "removed": len(removed), "files": len(seen),
-                  "cached": False, "fts": self._fts_enabled}
+        result = {
+            "indexed": len(loaded), "removed": len(removed), "files": len(seen),
+            "cached": False, "fts": self._fts_enabled, "workers": _INDEX_WORKERS,
+        }
         self._last_refresh_at = time.monotonic()
         self._fully_indexed = True
         self._last_refresh_result = result

@@ -71,11 +71,12 @@ class MainWindow(QMainWindow):
     # A burst page must remain visible for more than two typical HDMI capture
     # periods. This reduces missed pages under paint/capture/decode jitter.
     _OPTICAL_BURST_INTERVAL_MS = 900
-    # Bound the initial optical broadcast. Very large results remain durable in
-    # ResultStore and are fetched selectively by optical_chunks. The old code
-    # built/cached one QPixmap per result chunk and could consume hundreds of
-    # MiB or GiB while Windows reported the GUI as "Not Responding".
-    _OPTICAL_BROADCAST_MAX_CHUNKS = 31
+    # Bound the initial optical broadcast to one 4x4 page: one EC2H header
+    # plus up to 15 data packets. Large results are durable in ResultStore and
+    # MCP switches to result_meta/result_chunks after this first page. Rotating
+    # a second initial page only added ~1 dwell interval and more QR decode work
+    # before the same durable handoff.
+    _OPTICAL_BROADCAST_MAX_CHUNKS = 15
     # More than one 4-QR row should not rotate in compact mode.
     # Switch to the 16-slot canvas so 5-16 chunks are visible simultaneously
     # and duplicated padding adds optical redundancy.

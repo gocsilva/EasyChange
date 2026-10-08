@@ -1806,3 +1806,14 @@ def test_watcher_poll_if_due_avoids_duplicate_git_status_processes(tmp_path, mon
     assert second["freshness_poll"] is False
     assert second["cached"] is True
     assert len(calls) == 1
+
+
+
+def test_indexer_background_worker_budget_is_responsiveness_bounded(tmp_path):
+    from easychange.core import indexer as indexer_module
+    assert 2 <= indexer_module._INDEX_WORKERS <= 4
+    indexer = indexer_module.Indexer(tmp_path)
+    try:
+        assert indexer.status()["last_refresh"]["workers"] == indexer_module._INDEX_WORKERS
+    finally:
+        indexer.close()
