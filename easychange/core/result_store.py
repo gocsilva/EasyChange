@@ -253,6 +253,9 @@ class DurableResultStore:
             )
             ttl = self.active_ttl_seconds if active else self.ttl_seconds
             if timestamp and time.time() - timestamp > ttl:
+                if active:
+                    # An unfinished execution remains an uncertain receipt.
+                    return value
                 target.unlink(missing_ok=True)
                 return None
             return value
