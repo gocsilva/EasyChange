@@ -70,6 +70,24 @@ class InboundCommandStore:
         finally:
             temporary.unlink(missing_ok=True)
 
+    @classmethod
+    def _read_chunk_bounded(cls, path: Path) -> bytes:
+        # An interrupted/legacy or externally corrupted part may be larger
+        # than the protocol allows. Never allocate its entire disk contents.
+        try:
+            with path.open("rb") as stream:
+                payload = stream.read(cls.MAX_CHUNK_BYTES + 1)
+        except OSError as exc:
+            raise InboundTransferError("INBOUND_CHUNK_READ_FAILED") from exc
+        if len(payload) > cls.MAX_CHUNK_BYTES:
+            raise InboundTransferError(
+                "INBOUND_CHUNK_SIZE_LIMIT",
+                data={"max_chunk_bytes": cls.MAX_CHUNK_BYTES},
+            )
+        if not payload:
+            raise InboundTransferError("INBOUND_CHUNK_SIZE_LIMIT")
+        return payload
+
     def _meta_path(self, transfer_id: str) -> Path:
         return self._dir(transfer_id) / "meta.json"
 
@@ -243,10 +261,7 @@ class InboundCommandStore:
             directory = self._dir(transfer_id)
             target = directory / f"{index:04d}.part"
             if target.exists():
-                try:
-                    previous = target.read_bytes()
-                except OSError as exc:
-                    raise InboundTransferError("INBOUND_CHUNK_READ_FAILED") from exc
+                previous = self._read_chunk_bounded(target)
                 if previous != payload:
                     raise InboundTransferError(
                         "INBOUND_CHUNK_CONFLICT",
@@ -293,12 +308,16 @@ class InboundCommandStore:
 
         directory = self._dir(transfer_id)
         compressed = bytearray()
-        try:
-            for index in range(count):
-                compressed.extend((directory / f"{index:04d}.part").read_bytes())
-        except OSError as exc:
-            raise InboundTransferError("INBOUND_CHUNK_READ_FAILED") from exc
         expected_compressed = int(meta.get("compressed_bytes") or 0)
+        for index in range(count):
+            chunk = self._read_chunk_bounded(directory / f"{index:04d}.part")
+            if len(compressed) + len(chunk) > expected_compressed:
+                raise InboundTransferError(
+                    "INBOUND_COMPRESSED_LENGTH_MISMATCH",
+                    data={"expected": expected_compressed,
+                          "actual": len(compressed) + len(chunk)},
+                )
+            compressed.extend(chunk)
         if len(compressed) != expected_compressed:
             raise InboundTransferError(
                 "INBOUND_COMPRESSED_LENGTH_MISMATCH",
