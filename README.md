@@ -1,3 +1,19 @@
+## Módulo opcional MCP e GUI standalone
+
+`start.bat` abre a GUI básica independente `module_gui.py`;
+`Abrir_EasyChange_GUI.bat` continua disponível para a GUI
+especializada. EasyChange não exige MCP nem ESP ao ser operado
+externamente por sua própria interface.
+
+Quando carregado **pelo MCP**, `module.mdl` inicia invisivelmente
+`mcp_adapter/module_service.py` e o resolvedor ativa ESP. A
+interface `module_bridge.py` permite que EasyChange consulte
+as ferramentas do MCP e envie/receba mensagens de quaisquer
+outros módulos habilitados. Operações remotas preservam o limite
+HDMI + ESP/HID e não usam HTTP direto no PC remoto.
+
+---
+
 # EasyChange
 
 EasyChange is a machine-first development workspace: a predictable command layer between an AI agent and a software workspace. The core works with any directory; project formats add optional build and test profiles.

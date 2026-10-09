@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "id": "easychange",
+  "name": "EasyChange",
+  "standalone": true,
+  "service": {
+    "script": "mcp_adapter/module_service.py",
+    "port": 8784,
+    "health": "/health",
+    "hidden": true
+  },
+  "dependencies": {
+    "standalone": [],
+    "in_mcp": [
+      "esp"
+    ]
+  },
+  "bridge": {
+    "get": [
+      "/health",
+      "/status",
+      "/capabilities",
+      "/peers"
+    ],
+    "post": []
+  }
+}
