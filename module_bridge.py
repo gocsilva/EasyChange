@@ -101,9 +101,15 @@ class MCPBridge:
                 raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
             headers["Content-Type"]="application/json"
         req=Request(BUS+path,data=payload,method="POST" if payload is not None else "GET",headers=headers)
-        # The hub limits tool results to 8 MiB, plus a small JSON envelope.
-        # A stale or spoofed loopback service must not stream unlimited bytes.
-        max_response=8_388_608+131_072
+        # The tool-RPC endpoint can legitimately return an 8 MiB result.
+        # Metadata, mailbox, and ACK endpoints have much smaller envelopes;
+        # avoid allocating 8 MiB per failed/noisy health or receipt probe.
+        max_response = (
+            8_388_608 + 131_072 if path == "/v1/tools/call"
+            else 2_097_152 if path == "/v1/tools"
+            else 1_048_576 if path in ("/v1/inbox", "/v1/inbox/peek")
+            else 65_536
+        )
         with _local_opener.open(req,timeout=timeout) as response:
             raw=response.read(max_response+1)
         if len(raw)>max_response:
