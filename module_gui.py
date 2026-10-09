@@ -87,7 +87,7 @@ class ModuleGUI:
         if status()["running"]:
             self.message.set("Serviço já iniciado fora desta GUI (mantido).")
             return
-        folder=ROOT/"logs";folder.mkdir(exist_ok=True)
+        folder=ROOT/"logs"
         python=ROOT/".venv"/"Scripts"/"python.exe"
         if not python.is_file():
             python=ROOT/".venv"/"bin"/"python"
@@ -103,6 +103,7 @@ class ModuleGUI:
         # nested .py file directly breaks absolute package imports on Python.
         module_entry=SERVICE[:-3].replace("/",".")
         try:
+            folder.mkdir(exist_ok=True)
             with (folder/(MODULE_ID+"-gui-service.log")).open("ab") as output:
                 self.process=subprocess.Popen([str(python),"-B","-m",module_entry],
                           cwd=ROOT,stdin=subprocess.DEVNULL,stdout=output,
