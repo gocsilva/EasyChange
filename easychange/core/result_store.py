@@ -297,6 +297,8 @@ class DurableResultStore:
         with self._lock:
             previous = self.get(sequence)
             if previous is not None:
+                if previous.get("command_hash") != command_hash:
+                    raise ValueError("RESULT_SEQUENCE_COMMAND_HASH_MISMATCH")
                 return previous
             now = time.time()
             execution_id = "E" + hashlib.sha256(
