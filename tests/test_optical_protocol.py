@@ -57,7 +57,7 @@ def test_ec2_conflicting_duplicate_chunk_is_rejected():
     bad = json.loads(packets[0])
     bad["d"] = bad["d"] + "A"
     import binascii
-    bad["x"] = f"{binascii.crc32(bad["d"].encode("ascii")) & 0xffffffff:08x}"
+    bad["x"] = f"{binascii.crc32(bad['d'].encode('ascii')) & 0xffffffff:08x}"
     with pytest.raises(ValueError, match="conflicting duplicate"):
         decode_result_chunks(packets + [json.dumps(bad, separators=(",", ":"))])
 
