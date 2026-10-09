@@ -216,6 +216,34 @@ def test_cleanup_retains_completed_mutation_claim_after_result_ttl(tmp_path, mon
     assert prior["state"]=="DONE"
 
 
+def test_optical_recovery_query_rejects_fractional_chunk_identifiers(tmp_path):
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        seq="QOPTOINDEX"
+        service.result_store.mark_running(seq,"a"*64,":state",mutation=False)
+        service.result_store.complete(seq,"a"*64,":state",
+            {"ok":True,"command":"state","data":{"message":"ok"},"sequence":seq})
+        for kind in ("optical_chunk","optical_chunks"):
+            for bad in (0.9,1.9,True,None):
+                query={"op":"operation","type":kind,"sequence":seq}
+                if kind=="optical_chunk":
+                    query["chunk_index"]=bad
+                else:
+                    query["chunk_indexes"]=[bad]
+                result=service._execute_structured(query)
+                assert result.ok is False
+                assert result.code=="INVALID_RESULT_CHUNK"
+            query={"op":"operation","type":kind,"sequence":seq}
+            if kind=="optical_chunk":
+                query["chunk_index"]="0"
+            else:
+                query["chunk_indexes"]=["0"]
+            result=service._execute_structured(query)
+            assert result.ok is True
+    finally:
+        service.close()
+
+
 def test_chunk_batches_reject_fractional_indexes_but_allow_decimal_strings(tmp_path):
     import pytest
 
