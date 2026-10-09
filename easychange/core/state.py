@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import tempfile
 from pathlib import Path
 
 
@@ -16,7 +17,7 @@ class MachineSession:
         if path.exists():
             try:
                 loaded = json.loads(path.read_text(encoding="utf-8"))
-                if loaded.get("workspace") == workspace:
+                if isinstance(loaded, dict) and loaded.get("workspace") == workspace:
                     self.data.update(loaded)
             except (json.JSONDecodeError, OSError):
                 pass
@@ -26,19 +27,32 @@ class MachineSession:
         payload = json.dumps(
             self.data, ensure_ascii=False, separators=(",", ":")
         )
-        temp = self.path.with_suffix(".tmp")
         last_error: OSError | None = None
         for _attempt in range(2):
+            temporary: Path | None = None
+            descriptor: int | None = None
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
-                with temp.open("w", encoding="utf-8") as handle:
+                # Parallel EasyChange instances must never share a .tmp name:
+                # each write gets its own staging file on the same volume.
+                descriptor, name = tempfile.mkstemp(
+                    prefix=f".{self.path.name}.", suffix=".tmp",
+                    dir=self.path.parent)
+                temporary = Path(name)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    descriptor = None
                     handle.write(payload)
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(temp, self.path)
+                os.replace(temporary, self.path)
                 return
             except FileNotFoundError as exc:
                 last_error = exc
                 continue
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
         if last_error is not None:
             raise last_error
