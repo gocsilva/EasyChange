@@ -286,21 +286,30 @@ class Journal:
             return output
 
     def _rewrite(self) -> None:
-        temporary = self.path.with_suffix(".tmp")
-        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-            stream.write(json.dumps(
-                {"type": "meta", "counter": self._counter,
-                 "redo": [self._serialize_entry(entry) for entry in self._redo]},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ) + "\n")
-            for entry in self._entries:
+        # Undo/redo rewrites must never share a temporary filename across
+        # concurrent EasyChange instances. Rewriting stays atomic on disk.
+        fd, name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
                 stream.write(json.dumps(
-                    self._serialize_entry(entry),
+                    {"type": "meta", "counter": self._counter,
+                     "redo": [self._serialize_entry(entry) for entry in self._redo]},
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ) + "\n")
-        temporary.replace(self.path)
+                for entry in self._entries:
+                    stream.write(json.dumps(
+                        self._serialize_entry(entry),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 def re_full_hash(value: str) -> bool:
     return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
