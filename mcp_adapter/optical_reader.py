@@ -33,7 +33,16 @@ class OpticalAssembler:
                 if not isinstance(item,dict):continue
                 tag=str(item.get("p") or "")
                 if tag == "EC2H":
-                    if str(item.get("s") or "") == self.sequence and item.get("f") is True:
+                    # A QR claiming completion is still untrusted until its
+                    # digest matches the actual EC2 stream being assembled.
+                    digest=item.get("h")
+                    if (self.packet_identity is not None
+                            and str(item.get("s") or "") == self.sequence
+                            and item.get("f") is True
+                            and isinstance(digest,str)
+                            and len(digest) in (16,64)
+                            and all(ch in "0123456789abcdef" for ch in digest)
+                            and digest[:16] == self.packet_identity[2]):
                         self.header=item
                     continue
                 if tag!="EC2":continue
