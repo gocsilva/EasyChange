@@ -18,6 +18,8 @@ class OpticalAssembler:
     chunks: dict[int, str] = field(default_factory=dict)
     total: int = 0
     stored_chars: int = 0
+    packet_identity: tuple | None = None
+    verified_payload: dict | None = None
     header: dict = field(default_factory=dict)
     updated_at: float = field(default_factory=time.monotonic)
 
@@ -44,6 +46,9 @@ class OpticalAssembler:
                 if self.sequence and seq!=self.sequence:continue
                 if self.sequence and count!=self.total:
                     continue
+                identity=(seq,count,item.get("h"),item.get("c"),item.get("e"))
+                if self.packet_identity is not None and identity!=self.packet_identity:
+                    continue
                 piece=item.get("d")
                 if not isinstance(piece,str) or len(piece)>MAX_EC2_TOKEN_CHARS:
                     continue
@@ -67,21 +72,23 @@ class OpticalAssembler:
                     continue
                 if not self.sequence:
                     self.sequence=seq;self.total=count
+                    self.packet_identity=identity
                 self.chunks[index]=raw
                 self.stored_chars=candidate
                 self.updated_at=time.monotonic()
             except (ValueError,TypeError,KeyError,RecursionError):
                 continue
         if self.total and len(self.chunks)==self.total:
-            result=decode_result_chunks(list(self.chunks.values()))
+            # In HDMI burst mode the same complete carousel is observed many
+            # times. Decode and validate the identical verified payload once.
+            if self.verified_payload is None:
+                self.verified_payload=decode_result_chunks(list(self.chunks.values()))
             if self.header:
                 digest=str(self.header.get("h") or "")
-                import hashlib
-                wire = None
-                if digest and digest[:16] != str(json.loads(next(iter(self.chunks.values()))).get("h") or ""):
+                if digest and digest[:16] != str(self.packet_identity[2] or ""):
                     raise ValueError("EC2_HEADER_HASH_MISMATCH")
             return {"complete":True,"verified":True,"sequence":self.sequence,
-                    "payload":result,"packets":self.total}
+                    "payload":self.verified_payload,"packets":self.total}
         return {"complete":False,"sequence":self.sequence or None,"received":len(self.chunks),
                 "expected":self.total or None,"header":self.header}
 
