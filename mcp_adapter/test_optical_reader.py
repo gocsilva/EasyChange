@@ -13,6 +13,36 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertTrue(result["complete"])
         self.assertTrue(result["verified"])
         self.assertEqual(result["payload"]["data"]["text"],"x"*500)
+    def test_provisional_durable_header_hash_does_not_alias_wire_hash(self):
+        import hashlib
+        import json
+        from easychange.remote.optical_protocol import encode_durable_result_header
+
+        child={"text":"one","bytes":123}
+        original={"sequence":"QHDRDIFF1","ok":True,"command":"structured",
+                  "data":{"results":[child],"primary":dict(child)}}
+        packets=encode_result_chunks(original)
+        serialized=json.dumps(original,ensure_ascii=False,
+                              separators=(",",":")).encode("utf-8")
+        durable_digest=hashlib.sha256(serialized).hexdigest()
+        wire_digest=json.loads(packets[0])["h"]
+        # A compact $ec_ref produces distinct verified wire bytes.
+        self.assertNotEqual(durable_digest[:16],wire_digest)
+        provisional=encode_durable_result_header({
+            "sequence":"QHDRDIFF1","finished":True,"success":True,
+            "sha256":durable_digest,"payload_length":len(serialized)})
+        collector=OpticalAssembler()
+        self.assertTrue(collector.ingest(packets)["complete"])
+        # The provisional header is useful metadata, not the wire digest.
+        self.assertTrue(collector.ingest([provisional])["complete"])
+        self.assertEqual(collector.ingest([])["payload"]["data"],original["data"])
+
+        final=json.loads(provisional)
+        final.pop("d",None)
+        final["n"]=len(packets)
+        with self.assertRaisesRegex(ValueError,"EC2_HEADER_HASH_MISMATCH"):
+            collector.ingest([json.dumps(final)])
+
     def test_foreign_sequence_does_not_mix(self):
         a=OpticalAssembler()
         one=encode_result_chunks({"sequence":"one","ok":True})
