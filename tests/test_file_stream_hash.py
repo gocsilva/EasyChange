@@ -110,3 +110,22 @@ def test_cached_text_invalidates_on_atomic_replacement_with_same_size_and_time(t
     assert refreshed["lines"]==["1|BBBB"]
     assert refreshed["hash"]!=first["hash"]
     assert files.read("same.txt")["cache_hit"] is True
+
+
+def test_info_never_uses_unbounded_full_file_reads(tmp_path):
+    from easychange.core.file_service import MAX_TEXT_FILE_BYTES
+
+    small=tmp_path/"small.txt"
+    small.write_bytes(b"small-content")
+    large=tmp_path/"huge.txt"
+    large.write_bytes(b"z"*(MAX_TEXT_FILE_BYTES+1))
+    files=FileService(Workspace.open(tmp_path))
+    with patch.object(Path,"read_bytes",
+                      side_effect=AssertionError("INFO_UNBOUNDED_READ")):
+        first=files.info("small.txt")
+        second=files.info("huge.txt")
+    assert first["kind"]=="text"
+    assert first["hash"]==hashlib.sha256(b"small-content").hexdigest()
+    assert second["kind"]=="large"
+    assert second["hash"] is None
+    assert second["size"]==MAX_TEXT_FILE_BYTES+1
