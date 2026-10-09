@@ -260,7 +260,7 @@ class DurableResultStore:
             return None
         self._terminal_header_cache.move_to_end(sequence)
         return dict(base)
-    def _write(self, sequence: str, value: dict[str, Any]) -> None:
+    def _write(self, sequence: str, value: dict[str, Any], *, run_cleanup: bool = True) -> None:
         target = self._path(sequence)
         # Unique temp files avoid writers clobbering each other's staging file.
         # fsync before replacement so a successful write has a durable payload.
@@ -275,13 +275,14 @@ class DurableResultStore:
         finally:
             temporary.unlink(missing_ok=True)
 
-        self._writes_since_cleanup += 1
-        now = time.monotonic()
-        if (
-            self._writes_since_cleanup >= 8
-            or now - self._last_cleanup_monotonic >= 30.0
-        ):
-            self._cleanup()
+        if run_cleanup:
+            self._writes_since_cleanup += 1
+            now = time.monotonic()
+            if (
+                self._writes_since_cleanup >= 8
+                or now - self._last_cleanup_monotonic >= 30.0
+            ):
+                self._cleanup()
 
     @staticmethod
     def _active_record(value: dict[str, Any]) -> bool:
@@ -326,11 +327,38 @@ class DurableResultStore:
                     # an already-executed command into a new command.
                     continue
                 if self._active_record(value) or value.get("mutation") is True:
-                    # A completed mutation is also an idempotency tombstone.
-                    # Deleting it would let the same sequence execute again,
-                    # even though get() preserves expired receipts on replay.
+                    # Keep uncertain work and completed mutations in full.
                     continue
-                path.unlink(missing_ok=True)
+                if value.get("result_expired") is True:
+                    continue
+                sequence = value.get("sequence")
+                if (not isinstance(sequence, str) or not sequence or
+                        self._path(sequence) != path or value.get("state") != "DONE"):
+                    # Unknown or corrupt records are evidence, never absence.
+                    continue
+                # Keep the execution identity; drop only the expired large
+                # non-mutating result payload, avoiding unbounded disk growth.
+                tombstone = {
+                    key: value.get(key)
+                    for key in (
+                        "sequence", "execution_id", "command_hash", "command",
+                        "command_id", "created_at", "started_at", "finished_at",
+                        "updated_at", "state", "execution_state", "mutation_state",
+                        "mutation", "success", "return_code",
+                    )
+                }
+                tombstone["result_expired"] = True
+                tombstone["expired_result_hash"] = value.get("result_hash")
+                tombstone["result_bytes"] = 0
+                tombstone["result"] = None
+                self._write(sequence, tombstone, run_cleanup=False)
+                old_payload = self._payload_cache.pop(sequence, None)
+                if old_payload is not None:
+                    self._payload_cache_bytes -= len(old_payload[1])
+                old_stream = self._stream_cache.pop(sequence, None)
+                if old_stream is not None:
+                    self._stream_cache_bytes -= len(old_stream[1])
+                self._terminal_header_cache.pop(sequence, None)
             except OSError:
                 continue
 
@@ -612,6 +640,8 @@ class DurableResultStore:
             "command_hash": value.get("command_hash"),
             "result_hash": value.get("result_hash"),
             "result_bytes": value.get("result_bytes"),
+            "result_expired": value.get("result_expired") is True,
+            "expired_result_hash": value.get("expired_result_hash"),
             "started_at": value.get("started_at"),
             "finished_at": value.get("finished_at"),
             "duration_ms": int(max(0.0, elapsed_end - started) * 1000) if started else None,
