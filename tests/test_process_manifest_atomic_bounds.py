@@ -172,3 +172,19 @@ def test_unreadable_oversize_manifest_has_unknown_nonterminal_state(tmp_path):
     path.write_bytes(b'{"state":"SUCCEEDED","padding":"' + b"x"*128 + b'"}')
     assert jobs._durable_job_state(path)=="UNKNOWN"
     assert path.exists()
+
+
+def test_runtime_storage_stats_counts_files_incrementally_without_symlinks(tmp_path):
+    root=tmp_path/"runtime"
+    nested=root/"jobs"
+    nested.mkdir(parents=True)
+    (nested/"ONE.json").write_bytes(b"1234567")
+    (nested/"TWO.out").write_bytes(b"ABCDE")
+    jobs=_store(nested)
+    jobs.workspace_state_root=root
+    jobs.max_runtime_bytes=10
+    report=jobs.storage_stats()
+    assert report["files"]==2
+    assert report["bytes"]==12
+    assert report["over_budget"] is True
+    assert report["root"]==str(root)
