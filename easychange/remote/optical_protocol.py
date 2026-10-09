@@ -312,18 +312,24 @@ def decode_result_chunks(payloads: list[str]) -> dict[str, Any]:
     if len(by_index) != total:
         raise ValueError(f"incomplete optical packet set: {len(by_index)}/{total}")
     token = "".join(by_index[index] for index in range(total))
-    compressed = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+    try:
+        compressed = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("invalid optical base64 token") from exc
     if len(compressed) > MAX_EC2_COMPRESSED_BYTES:
         raise ValueError("optical compressed result too large")
-    decoder = zlib.decompressobj()
-    raw = decoder.decompress(compressed, MAX_EC2_RESULT_BYTES + 1)
-    if len(raw) > MAX_EC2_RESULT_BYTES or decoder.unconsumed_tail:
-        raise ValueError("optical decompressed result too large")
-    raw += decoder.flush(MAX_EC2_RESULT_BYTES + 1 - len(raw))
-    if len(raw) > MAX_EC2_RESULT_BYTES:
-        raise ValueError("optical decompressed result too large")
-    if not decoder.eof or decoder.unused_data:
-        raise ValueError("invalid optical compressed stream")
+    try:
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(compressed, MAX_EC2_RESULT_BYTES + 1)
+        if len(raw) > MAX_EC2_RESULT_BYTES or decoder.unconsumed_tail:
+            raise ValueError("optical decompressed result too large")
+        raw += decoder.flush(MAX_EC2_RESULT_BYTES + 1 - len(raw))
+        if len(raw) > MAX_EC2_RESULT_BYTES:
+            raise ValueError("optical decompressed result too large")
+        if not decoder.eof or decoder.unused_data:
+            raise ValueError("invalid optical compressed stream")
+    except zlib.error as exc:
+        raise ValueError("invalid optical compressed stream") from exc
     if hashlib.sha256(raw).hexdigest()[:16] != first["h"]:
         raise ValueError("optical sha256 mismatch")
     if f"{binascii.crc32(raw) & 0xffffffff:08x}" != first["c"]:
