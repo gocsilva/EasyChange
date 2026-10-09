@@ -15,6 +15,8 @@ OPTICAL_COMPRESSION_LEVEL = 3
 # Decoder limits apply to untrusted QR strings, not to durable on-disk results.
 MAX_EC2_PACKETS = 200_000
 MAX_EC2_PACKET_TEXT_CHARS = 65_536
+# Includes envelope overhead and duplicates: cap the complete untrusted QR set.
+MAX_EC2_PACKET_SET_CHARS = 64 * 1024 * 1024
 MAX_EC2_TOKEN_CHARS = 16 * 1024 * 1024
 MAX_EC2_COMPRESSED_BYTES = 12 * 1024 * 1024
 MAX_EC2_RESULT_BYTES = 16 * 1024 * 1024
@@ -265,9 +267,15 @@ def decode_result_chunks(payloads: list[str]) -> dict[str, Any]:
     total = 0
     by_index: dict[int, str] = {}
     token_chars = 0
+    packet_text_chars = 0
     for raw_packet in payloads:
         if not isinstance(raw_packet, str) or len(raw_packet) > MAX_EC2_PACKET_TEXT_CHARS:
             raise ValueError("optical packet too large")
+        # Check *before* json.loads() and include ignored or repeated frames.
+        # Otherwise many individually small QR packets can exhaust memory/CPU.
+        packet_text_chars += len(raw_packet)
+        if packet_text_chars > MAX_EC2_PACKET_SET_CHARS:
+            raise ValueError("optical packet set too large")
         try:
             chunk = json.loads(raw_packet)
         except (json.JSONDecodeError, RecursionError) as exc:
