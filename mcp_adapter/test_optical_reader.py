@@ -81,7 +81,7 @@ class OpticalReaderTests(unittest.TestCase):
             Result(True,"read",{"text":expected},sequence="QRECOVER01"))
         assert len(packets) >= 2
         forged=json.loads(packets[0])
-        forged["d"]="A"+forged["d"][1:]
+        forged["d"]="!"+forged["d"][1:]
         # Preserve the old CRC: this packet is corrupted in transit.
         collector=OpticalAssembler()
         initial=collector.ingest([json.dumps(forged)])
