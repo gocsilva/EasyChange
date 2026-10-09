@@ -24,7 +24,8 @@ class MCPBridge:
 
     def _request(self,path,body=None,*,timeout=40):
         if not self.token:raise RuntimeError("MCP_NOT_CONNECTED_STANDALONE")
-        if path not in ("/v1/tools","/v1/tools/call","/v1/peers","/v1/send","/v1/inbox"):
+        if path not in ("/v1/tools","/v1/tools/call","/v1/peers","/v1/send",
+                        "/v1/inbox","/v1/inbox/peek","/v1/inbox/ack"):
             raise ValueError("MCP_BUS_PATH_NOT_ALLOWED")
         headers={"Authorization":"Bearer "+self.token}
         payload=None
@@ -60,6 +61,15 @@ class MCPBridge:
                 time.sleep(min(0.5,0.025*(2**attempt)))
 
     def receive(self):
+        """Non-destructive read; process and then explicitly call ack(ids)."""
+        return self._request("/v1/inbox/peek")
+
+    def ack(self, ids):
+        """Confirm successful processing. Repeated ACKs are idempotent."""
+        return self._request("/v1/inbox/ack",{"ids":ids})
+
+    def receive_legacy(self):
+        """Older destructive read for compatibility; avoid for reliable delivery."""
         return self._request("/v1/inbox")
 
 def attach_hub(token,expected_module):

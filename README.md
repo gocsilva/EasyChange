@@ -113,3 +113,7 @@ Mutating SQL requires an explicit `--write` flag. Database access, runtime execu
 python -m pip install -e ".[dev]"
 python -m pytest
 ```
+
+## Ponte MCP opcional e mensagens confirmadas
+
+EasyChange pode ser usado sem MCP, pela GUI própria. Quando ativado via `module.mdl`, a comunicação com outros módulos ocorre pela ponte central autenticada do MCP. `module_bridge.MCPBridge.receive()` lê sem remover; `ack(ids)` confirma somente mensagens processadas e `receive_legacy()` mantém compatibilidade antiga. As confirmações da ponte não substituem observação HDMI da operação física.
