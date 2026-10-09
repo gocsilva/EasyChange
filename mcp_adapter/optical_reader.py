@@ -4,19 +4,28 @@ import json
 import time
 from dataclasses import dataclass, field
 
-from easychange.remote.optical_protocol import decode_result_chunks
+from easychange.remote.optical_protocol import (
+    decode_result_chunks, MAX_EC2_PACKETS,
+    MAX_EC2_PACKET_TEXT_CHARS, MAX_EC2_TOKEN_CHARS,
+)
+
+MAX_EC2_ASSEMBLY_TEXT_CHARS = 48 * 1024 * 1024
 
 @dataclass
 class OpticalAssembler:
     sequence: str = ""
     chunks: dict[int, str] = field(default_factory=dict)
     total: int = 0
+    stored_chars: int = 0
     header: dict = field(default_factory=dict)
     updated_at: float = field(default_factory=time.monotonic)
 
     def ingest(self, payloads: list[str]) -> dict:
         for raw in payloads:
             try:
+                if (not isinstance(raw,str) or
+                        len(raw)>MAX_EC2_PACKET_TEXT_CHARS):
+                    continue
                 item=json.loads(raw)
                 if not isinstance(item,dict):continue
                 tag=str(item.get("p") or "")
@@ -26,18 +35,30 @@ class OpticalAssembler:
                     continue
                 if tag!="EC2":continue
                 seq=str(item.get("s") or "")
-                index=int(item.get("i")); count=int(item.get("n"))
-                if not seq or count<1 or count>200000 or index<0 or index>=count:continue
+                index=item.get("i"); count=item.get("n")
+                if (not seq or type(count) is not int or
+                        count<1 or count>MAX_EC2_PACKETS or
+                        type(index) is not int or index<0 or index>=count):
+                    continue
                 if self.sequence and seq!=self.sequence:continue
-                if not self.sequence:self.sequence=seq;self.total=count
-                if count!=self.total:raise ValueError("MIXED_EC2_PACKET_COUNT")
+                if self.sequence and count!=self.total:
+                    continue
+                piece=item.get("d")
+                if not isinstance(piece,str) or len(piece)>MAX_EC2_TOKEN_CHARS:
+                    continue
                 prev=self.chunks.get(index)
                 if prev is not None and prev!=raw:
                     # Equivalent duplicate packet may differ only by whitespace.
-                    if json.loads(prev)!=item:raise ValueError("CONFLICTING_EC2_CHUNK")
+                    if json.loads(prev)!=item:continue
+                candidate=self.stored_chars - (len(prev) if prev is not None else 0) + len(raw)
+                if candidate>MAX_EC2_ASSEMBLY_TEXT_CHARS:
+                    continue
+                if not self.sequence:
+                    self.sequence=seq;self.total=count
                 self.chunks[index]=raw
+                self.stored_chars=candidate
                 self.updated_at=time.monotonic()
-            except (ValueError,TypeError,KeyError):
+            except (ValueError,TypeError,KeyError,RecursionError):
                 continue
         if self.total and len(self.chunks)==self.total:
             result=decode_result_chunks(list(self.chunks.values()))
