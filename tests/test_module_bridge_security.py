@@ -57,6 +57,70 @@ class TestHubRedirectBoundary(unittest.TestCase):
                    return_value=io.BytesIO(b'{"ok":')):
             self.assertFalse(esp_online())
 
+    def test_tool_rpc_busy_retry_only_when_hub_confirms_not_executed(self):
+        import io
+        import json
+        from unittest.mock import Mock,patch
+        from urllib.error import HTTPError
+
+        def rejection(status,error,accepted=None):
+            payload={"error":error,"accepted":accepted,"retryable":True}
+            return HTTPError("http://127.0.0.1:8786/v1/tools/call",
+                             status,"rejected",{},
+                             io.BytesIO(json.dumps(payload).encode("utf-8")))
+
+        client=module_bridge.MCPBridge(token="local-test-token")
+        completed={"ok":True,"result":{"value":42}}
+        client._request=Mock(side_effect=[
+            rejection(429,"MODULE_TOOL_RPC_BUSY_RETRY_LATER",False),completed])
+        with patch("module_bridge.time.sleep") as sleep:
+            self.assertEqual(client.call("mcp_core_status",ping=1),completed)
+        self.assertEqual(client._request.call_count,2)
+        self.assertEqual(client._request.call_args_list[0],
+                         client._request.call_args_list[1])
+        sleep.assert_called_once_with(0.025)
+
+        # 429 from the tool itself may happen after executing side effects.
+        for status,error,accepted in (
+                (429,"TOOL_RATE_LIMIT",False),
+                (429,"MODULE_TOOL_RPC_BUSY_RETRY_LATER",True),
+                (502,"INTERNAL_TOOL_ERROR",None)):
+            with self.subTest(status=status,error=error,accepted=accepted):
+                client._request=Mock(side_effect=rejection(status,error,accepted))
+                with patch("module_bridge.time.sleep") as sleep:
+                    with self.assertRaises(HTTPError):
+                        client.call("write_once")
+                self.assertEqual(client._request.call_count,1)
+                sleep.assert_not_called()
+
+    def test_tool_rpc_retry_has_finite_budget_and_never_replays_timeout(self):
+        import io
+        import json
+        from unittest.mock import Mock,patch
+        from urllib.error import HTTPError
+
+        def busy():
+            data={"error":"MODULE_TOOL_RPC_BUSY_RETRY_LATER",
+                  "accepted":False,"retryable":True}
+            return HTTPError("http://127.0.0.1:8786/v1/tools/call",
+                             429,"busy",{},
+                             io.BytesIO(json.dumps(data).encode("utf-8")))
+
+        client=module_bridge.MCPBridge(token="local-test-token")
+        client._request=Mock(side_effect=[busy() for _ in range(7)])
+        with patch("module_bridge.time.sleep") as sleep:
+            with self.assertRaises(HTTPError):
+                client.call("slow_tool")
+        self.assertEqual(client._request.call_count,7)
+        self.assertEqual(sleep.call_count,6)
+
+        client._request=Mock(side_effect=TimeoutError("RESPONSE_UNKNOWN"))
+        with patch("module_bridge.time.sleep") as sleep:
+            with self.assertRaises(TimeoutError):
+                client.call("possibly_mutating_tool")
+        self.assertEqual(client._request.call_count,1)
+        sleep.assert_not_called()
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
