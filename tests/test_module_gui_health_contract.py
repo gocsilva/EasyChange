@@ -229,10 +229,52 @@ def test_repeated_gui_refreshes_are_single_flight(tmp_path):
     assert len(deferred)==1
     assert gui._refresh_inflight is True
     deferred.pop()()
+    # Health I/O finished, but Tk has not yet consumed its queued result.
+    assert gui._refresh_inflight is True
+    for _ in range(100):
+        gui.refresh()
+    assert deferred==[]
+    callback=gui.root.after.call_args.args[1]
+    callback()
     assert gui._refresh_inflight is False
     gui.refresh()
     assert len(deferred)==1
 
+
+
+def test_failed_health_probe_releases_single_flight_after_tk_update():
+    from unittest.mock import Mock
+
+    src=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    klass=next(node for node in ast.parse(src).body
+               if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+    class Immediate:
+        def __init__(self,*,target,daemon):
+            self.target=target
+        def start(self):
+            self.target()
+    def unavailable():
+        raise TimeoutError("SERVICE_DOWN")
+    ns={"status":unavailable,
+        "threading":type("Threading",(),{"Thread":Immediate}),
+        "tk":type("Tk",(),{"TclError":RuntimeError})}
+    exec(compile(ast.Module(body=[klass],type_ignores=[]),
+                 "<gui-health-error>","exec"),ns)
+    gui=object.__new__(ns["ModuleGUI"])
+    gui.root=Mock()
+    gui.message=Mock()
+    gui.process=None
+    gui._closing=False
+    gui._refresh_inflight=False
+    gui.refresh()
+    assert gui._refresh_inflight is True
+    gui.refresh()
+    gui.root.after.assert_called_once()
+    callback=gui.root.after.call_args.args[1]
+    callback()
+    assert gui._refresh_inflight is False
+    assert gui.message.set.call_args.args[0]=="Serviço parado"
 
 def test_owned_process_is_reaped_and_failed_stop_keeps_gui_open():
     import subprocess
