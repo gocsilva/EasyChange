@@ -71,5 +71,23 @@ class OpticalReaderTests(unittest.TestCase):
         assert session.ingest(packets[1:])["complete"]
 
 
+    def test_untrusted_header_requires_real_boolean_completion(self):
+        import json
+        from easychange.core.result import Result
+
+        packets=encode_result_chunks(
+            Result(True,"read",{"value":"ok"},sequence="QHDRBOOL1"))
+        first=json.loads(packets[0])
+        assembler=OpticalAssembler()
+        assembler.ingest(packets)
+        header={"p":"EC2H","s":"QHDRBOOL1","f":"false",
+                "h":first["h"]}
+        assembler.ingest([json.dumps(header)])
+        self.assertEqual(assembler.header,{})
+        header["f"]=True
+        assembler.ingest([json.dumps(header)])
+        self.assertTrue(assembler.header["f"])
+
+
 if __name__=="__main__":
     unittest.main()
