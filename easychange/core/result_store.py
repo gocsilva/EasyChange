@@ -772,7 +772,8 @@ class DurableResultStore:
         limit = max(1, min(16, int(max_chunks)))
         unique: list[int] = []
         for raw_index in indexes:
-            if isinstance(raw_index, bool):
+            if (type(raw_index) is not int and
+                    not (isinstance(raw_index, str) and raw_index.strip().isdecimal())):
                 raise ValueError("INVALID_RESULT_STREAM_CHUNK_INDEX")
             index = int(raw_index)
             if index not in unique:
@@ -889,7 +890,8 @@ class DurableResultStore:
         limit = max(1, min(16, int(max_chunks)))
         unique: list[int] = []
         for raw_index in indexes:
-            if isinstance(raw_index, bool):
+            if (type(raw_index) is not int and
+                    not (isinstance(raw_index, str) and raw_index.strip().isdecimal())):
                 raise ValueError("INVALID_RESULT_CHUNK_INDEX")
             index = int(raw_index)
             if index not in unique:
