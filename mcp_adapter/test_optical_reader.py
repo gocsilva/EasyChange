@@ -110,6 +110,26 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertTrue(full["complete"])
         self.assertEqual(full["payload"]["data"]["text"],expected)
 
+    def test_aggregate_token_budget_rejects_qr_without_losing_next_valid_frame(self):
+        from unittest.mock import patch
+        from easychange.core.result import Result
+        from mcp_adapter import optical_reader
+        packets=encode_result_chunks(
+            Result(True,"read",{"text":"payload"},sequence="QTOKEN01"))
+        receiver=OpticalAssembler()
+        with patch.object(optical_reader,"MAX_EC2_TOKEN_CHARS",1):
+            pending=receiver.ingest(packets)
+        self.assertFalse(pending["complete"])
+        self.assertIsNone(pending["sequence"])
+        self.assertEqual(receiver.stored_token_chars,0)
+        self.assertTrue(receiver.ingest(packets)["complete"])
+        self.assertEqual(receiver.stored_token_chars,
+                         sum(len(__import__("json").loads(raw)["d"]) for raw in receiver.chunks.values()))
+        # Replayed duplicate frames cannot consume the byte budget again.
+        saved=receiver.stored_token_chars
+        receiver.ingest(packets)
+        self.assertEqual(receiver.stored_token_chars,saved)
+
     def test_repeated_complete_carousel_decodes_only_once(self):
         from unittest.mock import patch
         from easychange.core.result import Result
