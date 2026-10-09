@@ -43,6 +43,21 @@ class InboundCommandStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
 
+    @staticmethod
+    def _validated_number(value: Any, code: str) -> int:
+        # Keep decimal-string compatibility for transport arguments, but
+        # never interpret bool, float, NaN, or very long numeric tokens as
+        # packet sizes/indices. Reject malformed input using protocol errors.
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise InboundTransferError(code)
+        if isinstance(value, str):
+            if len(value) > 12 or not re.fullmatch(r"-?[0-9]+", value):
+                raise InboundTransferError(code)
+        try:
+            return int(value)
+        except (OverflowError, ValueError, TypeError) as exc:
+            raise InboundTransferError(code) from exc
+
     @classmethod
     def _transfer_id(cls, value: str) -> str:
         transfer_id = str(value or "").upper()
@@ -152,9 +167,9 @@ class InboundCommandStore:
         sha256: str,
     ) -> dict[str, Any]:
         transfer_id = self._transfer_id(transfer_id)
-        raw_bytes = int(raw_bytes)
-        compressed_bytes = int(compressed_bytes)
-        chunk_count = int(chunk_count)
+        raw_bytes = self._validated_number(raw_bytes, "INBOUND_RAW_SIZE_LIMIT")
+        compressed_bytes = self._validated_number(compressed_bytes, "INBOUND_COMPRESSED_SIZE_LIMIT")
+        chunk_count = self._validated_number(chunk_count, "INBOUND_CHUNK_COUNT_LIMIT")
         sha256 = str(sha256 or "").casefold()
         if raw_bytes <= 0 or raw_bytes > self.MAX_RAW_BYTES:
             raise InboundTransferError(
@@ -219,7 +234,7 @@ class InboundCommandStore:
         token: str,
     ) -> dict[str, Any]:
         transfer_id = self._transfer_id(transfer_id)
-        index = int(index)
+        index = self._validated_number(index, "INBOUND_CHUNK_INDEX_OUT_OF_RANGE")
         crc32 = str(crc32 or "").casefold()
         token = str(token or "")
         if not self._CRC_RE.fullmatch(crc32):
