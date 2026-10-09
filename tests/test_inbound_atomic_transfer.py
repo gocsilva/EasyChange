@@ -83,6 +83,57 @@ def test_concurrent_inbound_atomic_writers_use_distinct_staging_files(tmp_path):
     assert list(path.parent.glob(".*.tmp"))==[]
 
 
+def test_distinct_store_instances_cannot_replace_conflicting_chunk_concurrently(tmp_path):
+    import base64
+    import binascii
+    from concurrent.futures import TimeoutError as FutureTimeout
+
+    root=tmp_path/"inbound"
+    first=InboundCommandStore(root)
+    second=InboundCommandStore(root)
+    first.begin("UCROSSLOCK1",raw_bytes=2,compressed_bytes=2,
+                chunk_count=1,sha256="a"*64)
+    one,two=b"AB",b"CD"
+    def args(payload):
+        return {"index":0,"crc32":f"{binascii.crc32(payload)&0xffffffff:08x}",
+                "token":base64.urlsafe_b64encode(payload).decode().rstrip("=")}
+
+    entered=threading.Event()
+    release=threading.Event()
+    second_started=threading.Event()
+    original=InboundCommandStore._atomic_write
+
+    def hold_first(path,payload):
+        if path.name=="0000.part" and payload==one:
+            entered.set()
+            assert release.wait(timeout=5)
+        return original(path,payload)
+
+    def second_request():
+        second_started.set()
+        return second.put_chunk("UCROSSLOCK1",**args(two))
+
+    with patch.object(InboundCommandStore,"_atomic_write",
+                      staticmethod(hold_first)):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            primary=pool.submit(first.put_chunk,"UCROSSLOCK1",**args(one))
+            assert entered.wait(timeout=3)
+            competitor=pool.submit(second_request)
+            try:
+                assert second_started.wait(timeout=3)
+                # The second writer must wait for the first transaction's
+                # commit, not overwrite the same missing .part concurrently.
+                with pytest.raises(FutureTimeout):
+                    competitor.result(timeout=.12)
+            finally:
+                release.set()
+            assert primary.result(timeout=5)["duplicate"] is False
+            with pytest.raises(InboundTransferError) as exc:
+                competitor.result(timeout=5)
+            assert exc.value.code=="INBOUND_CHUNK_CONFLICT"
+    assert (root/"UCROSSLOCK1"/"0000.part").read_bytes()==one
+
+
 def test_failed_chunk_atomic_replace_preserves_previous_bytes_and_cleans_temp(tmp_path):
     path=tmp_path/"inbound"/"USAMEINDEX"/"0000.part"
     InboundCommandStore._atomic_write(path,b"original")
