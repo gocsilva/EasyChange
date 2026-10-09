@@ -308,7 +308,7 @@ class DurableResultStore:
         # Recent retained results need no decode at all. Decode only expired or
         # overflow candidates so large-result cleanup is proportional to data
         # actually eligible for removal, not every stored payload.
-        for rank, path in enumerate(files):
+        for path in files:
             try:
                 stat = path.stat()
                 age = now - stat.st_mtime
