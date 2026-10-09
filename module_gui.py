@@ -9,7 +9,14 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import ttk
-from urllib.request import urlopen
+from urllib.request import ProxyHandler, HTTPRedirectHandler, build_opener
+
+class _NoStandaloneRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+# A GUI health check must stay on localhost, without inherited proxy settings.
+urlopen = build_opener(ProxyHandler({}), _NoStandaloneRedirect()).open
 
 ROOT=Path(__file__).resolve().parent
 NAME="EasyChange"
@@ -20,8 +27,12 @@ SERVICE="mcp_adapter/module_service.py"
 def status():
     try:
         with urlopen(f"http://127.0.0.1:{PORT}/health",timeout=0.6) as r:
-            data=json.load(r)
-        return {"running":data.get("ok") is True and data.get("id")==MODULE_ID,
+            raw=r.read(2049)
+        if len(raw)>2048:
+            raise ValueError("MODULE_GUI_HEALTH_TOO_LARGE")
+        data=json.loads(raw)
+        return {"running":isinstance(data,dict) and
+                data.get("ok") is True and data.get("id")==MODULE_ID,
                 "service":MODULE_ID,"standalone":True}
     except Exception:
         return {"running":False,"service":MODULE_ID,"standalone":True}
