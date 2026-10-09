@@ -13,3 +13,38 @@ build/
 .env
 
 .pytest-final-consolidation/
+
+# Disposable tests, coverage and local diagnostics
+/.pytest-*/
+/.pytest_*/
+/pytest_*/
+/_pytest_*/
+.coverage*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+*.log
+*.tmp
+*.bak
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-wal
+*.db-shm
+
+# Local secrets and machine-specific settings
+.env.*
+!.env.example
+*.local.json
+*.local.yaml
+*.local.yml
+*.local.toml
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
