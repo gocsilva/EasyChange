@@ -181,11 +181,10 @@ def test_legacy_replay_does_not_overwrite_competing_durable_claim(tmp_path, monk
         service.close()
 
 
-def test_terminal_header_cache_honors_ttl_without_file_replacement(tmp_path, monkeypatch):
+def test_terminal_header_cache_preserves_expired_replay_tombstone(tmp_path, monkeypatch):
     import time
 
-    root=tmp_path / "receipts"
-    store=DurableResultStore(root, ttl_seconds=60)
+    store=DurableResultStore(tmp_path / "receipts", ttl_seconds=60)
     sequence="QEXPIRE01"
     store.mark_running(sequence, "a"*64, ":state", mutation=False)
     store.complete(sequence, "a"*64, ":state",
@@ -194,18 +193,17 @@ def test_terminal_header_cache_honors_ttl_without_file_replacement(tmp_path, mon
     assert recorded["finished"] is True
     target=store._path(sequence)
     assert target.exists()
-    # A hot hit must not deserialize the receipt before it expires.
-    with monkeypatch.context() as local:
-        local.setattr(store, "_decode",
-                      lambda _raw: (_ for _ in ()).throw(
-                          AssertionError("unexpected cache miss")))
-        assert store.header(sequence)["sequence"]==sequence
-    # The cache stamp has not changed, but the underlying receipt expired.
+    # A completed sequence remains replayable even after the result TTL.
+    # Repeated header polls must not repeatedly decode unchanged tombstones.
     advance=time.time()+61
     with monkeypatch.context() as local:
         local.setattr("easychange.core.result_store.time.time",lambda:advance)
-        assert store.header(sequence) is None
-    assert not target.exists()
+        local.setattr(store,"_decode",
+                      lambda _raw: (_ for _ in ()).throw(
+                          AssertionError("unnecessary receipt decode")))
+        assert store.header(sequence)["sha256"]==recorded["sha256"]
+    assert target.exists()
+    assert store.get(sequence)["state"]=="DONE"
 
 
 def test_header_cache_refreshes_after_other_process_replaces_receipt(tmp_path, monkeypatch):
