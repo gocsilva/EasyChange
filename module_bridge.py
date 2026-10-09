@@ -167,6 +167,7 @@ class MCPBridge:
                 if message["id"] in unique:
                     raise ValueError("DUPLICATE_MCP_INBOX_ID")
                 unique.add(message["id"])
+            validated_ids=tuple(message["id"] for message in selected)
             count=0
             accepted=[]
             def flush():
@@ -190,7 +191,7 @@ class MCPBridge:
                     raise RuntimeError("MCP_ACK_UNCONFIRMED")
                 count+=len(accepted)
                 accepted.clear()
-            for message in selected:
+            for message, original_id in zip(selected, validated_ids):
                 try:
                     successful=handler(message) is True
                 except Exception:
@@ -201,8 +202,8 @@ class MCPBridge:
                 if not successful:
                     flush()
                     return {"received":len(selected),"acknowledged":count,
-                            "deferred_id":message["id"]}
-                accepted.append(message["id"])
+                            "deferred_id":original_id}
+                accepted.append(original_id
                 if len(accepted)>=ack_batch_size:
                     flush()
             flush()
