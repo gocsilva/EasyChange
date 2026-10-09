@@ -105,3 +105,59 @@ def test_large_persisted_transfer_metadata_rejected_without_decoding(tmp_path,mo
             store.status(transfer_id)
     decoder.assert_not_called()
     assert path.read_bytes()==payload
+
+
+def test_oversized_persisted_part_is_read_with_strict_size_limit(tmp_path, monkeypatch):
+    store=InboundCommandStore(tmp_path/"inbound")
+    raw=b":state"
+    compressed=inbound_module.zlib.compress(raw)
+    transfer_id="UPARTSIZE01"
+    store.begin(transfer_id,raw_bytes=len(raw),compressed_bytes=len(compressed),
+                chunk_count=1,sha256=hashlib.sha256(raw).hexdigest())
+    target=store._dir(transfer_id)/"0000.part"
+    # This file is not an incoming request; it represents a legacy or
+    # externally corrupted spool restored after a process restart.
+    oversized=b"X"*(store.MAX_CHUNK_BYTES+100)
+    target.write_bytes(oversized)
+    with pytest.raises(InboundTransferError,match="INBOUND_CHUNK_SIZE_LIMIT"):
+        store.status(transfer_id)
+    with pytest.raises(InboundTransferError,match="INBOUND_CHUNK_SIZE_LIMIT"):
+        store.assemble(transfer_id)
+    token=inbound_module.base64.urlsafe_b64encode(compressed).decode().rstrip("=")
+    crc=f"{inbound_module.binascii.crc32(compressed)&0xffffffff:08x}"
+    with pytest.raises(InboundTransferError,match="INBOUND_CHUNK_SIZE_LIMIT"):
+        store.put_chunk(transfer_id,index=0,crc32=crc,token=token)
+    # Failed reads do not destroy forensic evidence or prevent repair.
+    assert target.read_bytes()==oversized
+    target.write_bytes(compressed)
+    assert store.status(transfer_id)["ready"] is True
+    assert store.assemble(transfer_id)[0]==raw.decode()
+
+
+def test_oversized_persisted_part_rejected_before_loading_whole_file(tmp_path, monkeypatch):
+    store=InboundCommandStore(tmp_path/"inbound")
+    raw=b":state"
+    compressed=inbound_module.zlib.compress(raw)
+    transfer_id="UBOUNDEDREAD1"
+    store.begin(transfer_id,raw_bytes=len(raw),compressed_bytes=len(compressed),
+                chunk_count=1,sha256=hashlib.sha256(raw).hexdigest())
+    target=store._dir(transfer_id)/"0000.part"
+    target.write_bytes(b"X"*(store.MAX_CHUNK_BYTES+10))
+    original_open=type(target).open
+    requests=[]
+    class Observed:
+        def __init__(self,stream):self._stream=stream
+        def __enter__(self):return self
+        def __exit__(self,*a):self._stream.close()
+        def read(self,length=-1):
+            requests.append(length)
+            return self._stream.read(length)
+    def monitored_open(path,mode="r",*args,**kwargs):
+        stream=original_open(path,mode,*args,**kwargs)
+        if path==target and mode=="rb":
+            return Observed(stream)
+        return stream
+    monkeypatch.setattr(type(target),"open",monitored_open)
+    with pytest.raises(InboundTransferError,match="INBOUND_CHUNK_SIZE_LIMIT"):
+        store.assemble(transfer_id)
+    assert requests==[store.MAX_CHUNK_BYTES+1]
