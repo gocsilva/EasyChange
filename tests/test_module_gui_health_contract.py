@@ -159,3 +159,39 @@ def test_standalone_gui_launches_real_python_package_not_nested_script(tmp_path)
     assert launched_venv.call_args.args[0][0]==str(linux_python)
     assert launched_venv.call_args.args[0][1:]==[
         "-B","-m",service[:-3].replace("/",".")]
+
+
+def test_module_gui_startup_failures_stay_in_status_instead_of_raising(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from unittest.mock import Mock,patch
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    tree=ast.parse(source)
+    assignments={target.id:node.value.value for node in tree.body
+                 if isinstance(node,ast.Assign) and
+                 isinstance(node.value,ast.Constant)
+                 for target in node.targets if isinstance(target,ast.Name)}
+    klass=next(item for item in tree.body
+               if isinstance(item,ast.ClassDef) and item.name=="ModuleGUI")
+    namespace={"ROOT":tmp_path,"SERVICE":assignments["SERVICE"],
+               "MODULE_ID":assignments["MODULE_ID"],
+               "status":lambda:{"running":False},
+               "subprocess":subprocess,"os":os,"sys":sys}
+    exec(compile(ast.Module(body=[klass],type_ignores=[]),
+                 "<gui-service-launch>","exec"),namespace)
+    gui=object.__new__(namespace["ModuleGUI"])
+    gui.process=None
+    gui.message=Mock()
+    gui.root=Mock()
+    with patch("subprocess.Popen",side_effect=OSError("BROKEN_INTERPRETER")):
+        gui.start()
+    assert gui.process is None
+    assert "OSError" in gui.message.set.call_args.args[0]
+    gui.message.reset_mock()
+    with patch.object(Path,"mkdir",side_effect=PermissionError("LOG_DENIED")):
+        gui.start()
+    assert gui.process is None
+    assert "PermissionError" in gui.message.set.call_args.args[0]
