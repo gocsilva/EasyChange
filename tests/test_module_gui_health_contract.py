@@ -232,3 +232,39 @@ def test_repeated_gui_refreshes_are_single_flight(tmp_path):
     assert gui._refresh_inflight is False
     gui.refresh()
     assert len(deferred)==1
+
+
+def test_owned_process_is_reaped_and_failed_stop_keeps_gui_open():
+    import subprocess
+    from unittest.mock import Mock
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    klass=next(node for node in ast.parse(source).body
+               if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+    ns={"subprocess":subprocess}
+    exec(compile(ast.Module(body=[klass],type_ignores=[]),
+                 "<module-process-stop>","exec"),ns)
+    gui=object.__new__(ns["ModuleGUI"])
+    gui.root=Mock()
+    gui.message=Mock()
+    gui._closing=False
+    owned=Mock()
+    owned.poll.return_value=None
+    owned.wait.side_effect=[subprocess.TimeoutExpired("module",2),0]
+    gui.process=owned
+    assert gui.stop() is True
+    owned.terminate.assert_called_once()
+    owned.kill.assert_called_once()
+    assert owned.wait.call_count==2
+    assert gui.process is None
+
+    stuck=Mock()
+    stuck.poll.return_value=None
+    stuck.wait.side_effect=subprocess.TimeoutExpired("module",2)
+    gui.process=stuck
+    gui.close()
+    assert gui._closing is False
+    assert gui.process is stuck
+    gui.root.destroy.assert_not_called()
+    assert "Falha ao encerrar" in gui.message.set.call_args.args[0]
