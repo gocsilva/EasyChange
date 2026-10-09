@@ -69,6 +69,67 @@ class TestHubRedirectBoundary(unittest.TestCase):
                    return_value=io.BytesIO(b'{"ok":')):
             self.assertFalse(esp_online())
 
+    def test_mailbox_send_retries_only_confirmed_unaccepted_backpressure(self):
+        import io
+        import json
+        from unittest.mock import Mock,patch
+        from urllib.error import HTTPError
+
+        def rejected(error="MODULE_INBOX_FULL_RETRY_LATER",
+                     accepted=False,retryable=True,status=429):
+            response={"error":error,"accepted":accepted,"retryable":retryable}
+            return HTTPError("http://127.0.0.1:8786/v1/send",status,"busy",{},
+                             io.BytesIO(json.dumps(response).encode("utf-8")))
+
+        client=module_bridge.MCPBridge(token="local-test-token")
+        success={"accepted":True,"id":37}
+        client._request=Mock(side_effect=[rejected(),success])
+        with patch("module_bridge.time.sleep") as sleeping:
+            result=client.send("esp","job.status",{"ok":True})
+        self.assertEqual(result,success)
+        self.assertEqual(client._request.call_count,2)
+        self.assertEqual(client._request.call_args_list[0],
+                         client._request.call_args_list[1])
+        sleeping.assert_called_once_with(0.025)
+
+        for response in (rejected(accepted=True),rejected(retryable=False),
+                         rejected(error="TOOL_RATE_LIMIT"),
+                         rejected(status=503)):
+            with self.subTest(response=str(response)):
+                client._request=Mock(side_effect=response)
+                with patch("module_bridge.time.sleep") as sleeping:
+                    with self.assertRaises(HTTPError):
+                        client.send("esp","job.status",{"ok":True})
+                self.assertEqual(client._request.call_count,1)
+                sleeping.assert_not_called()
+
+        client._request=Mock(side_effect=TimeoutError("UNKNOWN_SEND_OUTCOME"))
+        with patch("module_bridge.time.sleep") as sleeping:
+            with self.assertRaises(TimeoutError):
+                client.send("esp","job.status",{"ok":True})
+        self.assertEqual(client._request.call_count,1)
+        sleeping.assert_not_called()
+
+    def test_mailbox_retries_stop_after_finite_backpressure_budget(self):
+        import io
+        import json
+        from unittest.mock import Mock,patch
+        from urllib.error import HTTPError
+
+        def busy():
+            return HTTPError(
+                "http://127.0.0.1:8786/v1/send",429,"busy",{},
+                io.BytesIO(json.dumps({
+                    "error":"MODULE_INBOX_FULL_RETRY_LATER",
+                    "retryable":True,"accepted":False}).encode("utf-8")))
+        client=module_bridge.MCPBridge(token="local-test-token")
+        client._request=Mock(side_effect=[busy() for _ in range(7)])
+        with patch("module_bridge.time.sleep") as sleeping:
+            with self.assertRaises(HTTPError):
+                client.send("esp","job.status")
+        self.assertEqual(client._request.call_count,7)
+        self.assertEqual(sleeping.call_count,6)
+
     def test_tool_rpc_busy_retry_only_when_hub_confirms_not_executed(self):
         import io
         import json
