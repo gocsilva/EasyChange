@@ -149,14 +149,24 @@ class MCPBridge:
     def send(self,target,topic,payload=None,correlation_id=""):
         message={"target":target,"topic":topic,
                  "payload":payload,"correlation_id":correlation_id}
-        # A 429 guarantees this message was not accepted; bounded retries
-        # avoid loss while preventing unbounded blocking when a peer is stuck.
+        # A generic 429 does NOT guarantee the peer rejected an operation.
+        # Replay only explicit mailbox-admission backpressure (accepted=False);
+        # timeouts and responses with unknown outcomes remain non-retryable.
         for attempt in range(7):
             try:
                 return self._request("/v1/send",message,timeout=6)
             except HTTPError as exc:
-                if exc.code!=429 or attempt==6:
+                if exc.code!=429:
                     raise
+                try:
+                    details=json.loads(exc.read(2048))
+                except (ValueError,UnicodeError):
+                    raise exc
+                if (not isinstance(details,dict) or
+                        details.get("error")!="MODULE_INBOX_FULL_RETRY_LATER" or
+                        details.get("accepted") is not False or
+                        details.get("retryable") is not True or attempt==6):
+                    raise exc
                 time.sleep(min(0.5,0.025*(2**attempt)))
 
     def receive(self):
