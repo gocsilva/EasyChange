@@ -181,11 +181,16 @@ class MaintenanceService:
 
     @staticmethod
     def _result_record(path: Path) -> dict:
+        # Reuse the canonical bounded decoder. Maintenance must never load
+        # an arbitrarily large or corrupt legacy receipt into memory.
+        from .result_store import DurableResultStore
+
         try:
-            raw = zlib.decompress(path.read_bytes())
-            value = json.loads(raw.decode("utf-8"))
-            return value if isinstance(value, dict) else {}
-        except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError, zlib.error):
+            raw = DurableResultStore._read_compressed(path)
+            return DurableResultStore._decode(raw)
+        except (OSError, ValueError, UnicodeError, zlib.error):
+            # Never interpret an unreadable receipt as permission to delete
+            # or recreate that sequence. Cleanup preserves its disk evidence.
             return {}
 
     @classmethod
