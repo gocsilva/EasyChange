@@ -412,7 +412,7 @@ class DurableResultStore:
         or DONE receipt is returned with claimed=False, even when a racing
         process wrote it after the caller's last get().
         """
-        with self._claim_lock:
+        with self._claim_lock():
             previous = self.get(sequence)
             if previous is not None:
                 if previous.get("command_hash") != command_hash:
@@ -458,7 +458,7 @@ class DurableResultStore:
         state = str(lifecycle_state or "").upper()
         if state not in allowed:
             raise ValueError(f"INVALID_MUTATION_STATE:{state}")
-        with self._claim_lock:
+        with self._claim_lock():
             current = self.get(sequence)
             if current is None:
                 return None
@@ -514,7 +514,7 @@ class DurableResultStore:
         # On a cache miss, read and populate under the cross-process claim
         # lock so another writer cannot replace the receipt between get()
         # and recording its file signature.
-        with self._claim_lock:
+        with self._claim_lock():
             value = self.get(sequence)
             if value is None:
                 return None
@@ -563,7 +563,7 @@ class DurableResultStore:
         serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         serialized_hash = hashlib.sha256(serialized).hexdigest()
         execution_summary = _find_execution_summary(result)
-        with self._claim_lock:
+        with self._claim_lock():
             current = self.get(sequence) or {}
             if current and current.get("command_hash") != command_hash:
                 raise ValueError("RESULT_SEQUENCE_COMMAND_HASH_MISMATCH")
