@@ -31,6 +31,36 @@ def test_compact_large_result_advertises_optical_transport():
 
 
 
+def test_ec2_total_qr_budget_rejects_excessive_duplicate_text(monkeypatch):
+    import pytest
+    import easychange.remote.optical_protocol as optical
+
+    # A small legitimate result remains decodable. Repeated QR frames count
+    # toward the total input budget, even if their token is a duplicate.
+    packets=encode_result_chunks(
+        {"sequence":"QINPUTCAP1","ok":True,"data":{"text":"hello"}},
+        chunk_chars=10000)
+    assert len(packets)==1
+    size=len(packets[0])
+    monkeypatch.setattr(optical,"MAX_EC2_PACKET_SET_CHARS",size*2-1)
+    assert decode_result_chunks(packets)["sequence"]=="QINPUTCAP1"
+    with pytest.raises(ValueError,match="optical packet set too large"):
+        decode_result_chunks([packets[0],packets[0]])
+
+
+def test_ec2_total_input_budget_is_checked_before_json_decode(monkeypatch):
+    import pytest
+    from unittest.mock import patch
+    import easychange.remote.optical_protocol as optical
+
+    monkeypatch.setattr(optical,"MAX_EC2_PACKET_SET_CHARS",8)
+    with patch.object(optical.json,"loads",
+                      side_effect=AssertionError("JSON_PARSED_BEFORE_SIZE_CHECK")) as parser:
+        with pytest.raises(ValueError,match="optical packet set too large"):
+            decode_result_chunks(['{"padding":12345}'])
+    parser.assert_not_called()
+
+
 def test_ec2_duplicate_chunks_are_idempotent():
     import json
 
