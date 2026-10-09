@@ -486,6 +486,20 @@ class CommandService:
                 },
                 sequence=sequence,
             )
+        def _claim_durable() -> tuple[dict[str, Any] | None, Result | None]:
+            try:
+                record, acquired = self.result_store.claim_running(
+                    sequence, digest, command, mutation=is_mutation)
+            except ValueError as exc:
+                if str(exc) == "RESULT_SEQUENCE_COMMAND_HASH_MISMATCH":
+                    return None, Result(
+                        False, "ec", error="Sequence reused with different command",
+                        code="SEQUENCE_CONFLICT", sequence=sequence)
+                raise
+            if not acquired:
+                return None, _reuse_durable_receipt(record)
+            return record, None
+
         durable = self.result_store.get(sequence)
         if durable is not None:
             return _reuse_durable_receipt(durable)
@@ -505,7 +519,9 @@ class CommandService:
                     replay.sequence = sequence
                     replay.data = {**(replay.data or {}), "duplicate": True}
                     receipt = replay.data.get("mutation_receipt") if isinstance(replay.data, dict) else None
-                    self.result_store.mark_running(sequence, digest, command, mutation=is_mutation)
+                    _record, refusal = _claim_durable()
+                    if refusal is not None:
+                        return refusal
                     self.result_store.complete(
                         sequence, digest, command, replay.to_dict(),
                         mutation_receipt=receipt if isinstance(receipt, dict) else None,
@@ -517,14 +533,24 @@ class CommandService:
                     replay.sequence = sequence
                     replay.data = {**(replay.data or {}), "duplicate": True}
                     receipt = replay.data.get("mutation_receipt") if isinstance(replay.data, dict) else None
-                    self.result_store.mark_running(sequence, digest, command, mutation=is_mutation)
+                    _record, refusal = _claim_durable()
+                    if refusal is not None:
+                        return refusal
                     self.result_store.complete(
                         sequence, digest, command, replay.to_dict(),
                         mutation_receipt=receipt if isinstance(receipt, dict) else None,
                     )
                     return replay
+                if previous.get("state") == "DONE":
+                    # A legacy DONE journal without replay data is evidence of
+                    # prior execution, not permission to run the mutation again.
+                    return Result(
+                        False, "ec", error="Completed sequence has no replayable result",
+                        code="SEQUENCE_RESULT_MISSING", sequence=sequence)
                 if previous.get("state") != "DONE":
-                    self.result_store.mark_running(sequence, digest, command, mutation=is_mutation)
+                    _record, refusal = _claim_durable()
+                    if refusal is not None:
+                        return refusal
                     return Result(
                         False, "ec",
                         error="Execution is already marked RUNNING; mutation will not be replayed blindly",
@@ -536,17 +562,9 @@ class CommandService:
             # Reading an empty spool earlier did not reserve this sequence:
             # another EasyChange process may have claimed it in the meantime.
             # Only the winner of the durable cross-process claim may execute.
-            try:
-                claimed_record, claimed = self.result_store.claim_running(
-                    sequence, digest, command, mutation=is_mutation)
-            except ValueError as exc:
-                if str(exc) == "RESULT_SEQUENCE_COMMAND_HASH_MISMATCH":
-                    return Result(
-                        False, "ec", error="Sequence reused with different command",
-                        code="SEQUENCE_CONFLICT", sequence=sequence)
-                raise
-            if not claimed:
-                return _reuse_durable_receipt(claimed_record)
+            _record, refusal = _claim_durable()
+            if refusal is not None:
+                return refusal
 
             journal[sequence] = {
                 "sha256": digest,
