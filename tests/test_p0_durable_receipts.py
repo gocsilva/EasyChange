@@ -181,6 +181,33 @@ def test_legacy_replay_does_not_overwrite_competing_durable_claim(tmp_path, monk
         service.close()
 
 
+def test_terminal_header_cache_honors_ttl_without_file_replacement(tmp_path, monkeypatch):
+    import time
+
+    root=tmp_path / "receipts"
+    store=DurableResultStore(root, ttl_seconds=60)
+    sequence="QEXPIRE01"
+    store.mark_running(sequence, "a"*64, ":state", mutation=False)
+    store.complete(sequence, "a"*64, ":state",
+                   {"ok":True,"command":"state","data":{},"sequence":sequence})
+    recorded=store.header(sequence)
+    assert recorded["finished"] is True
+    target=store._path(sequence)
+    assert target.exists()
+    # A hot hit must not deserialize the receipt before it expires.
+    with monkeypatch.context() as local:
+        local.setattr(store, "_decode",
+                      lambda _raw: (_ for _ in ()).throw(
+                          AssertionError("unexpected cache miss")))
+        assert store.header(sequence)["sequence"]==sequence
+    # The cache stamp has not changed, but the underlying receipt expired.
+    advance=time.time()+61
+    with monkeypatch.context() as local:
+        local.setattr("easychange.core.result_store.time.time",lambda:advance)
+        assert store.header(sequence) is None
+    assert not target.exists()
+
+
 def test_header_cache_refreshes_after_other_process_replaces_receipt(tmp_path, monkeypatch):
     root=tmp_path / "results"
     first=DurableResultStore(root)
