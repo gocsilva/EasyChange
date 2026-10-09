@@ -129,3 +129,42 @@ def test_info_never_uses_unbounded_full_file_reads(tmp_path):
     assert second["kind"]=="large"
     assert second["hash"] is None
     assert second["size"]==MAX_TEXT_FILE_BYTES+1
+
+
+def test_atomic_staging_names_are_unique_across_competing_writers(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import easychange.core.file_service as file_module
+
+    target=tmp_path/"simultaneous.txt"
+    original=file_module.tempfile.NamedTemporaryFile
+    barrier=threading.Barrier(2)
+    guard=threading.Lock()
+    paths=[]
+    def staged(*args,**kwargs):
+        opened=original(*args,**kwargs)
+        with guard:
+            paths.append(Path(opened.name))
+        barrier.wait(timeout=10)
+        return opened
+
+    with patch("easychange.core.file_service.tempfile.NamedTemporaryFile",
+               side_effect=staged):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(lambda data:FileService._atomic_write_bytes(target,data),
+                              (b"ALPHA",b"BRAVO")))
+    assert len(paths)==2
+    assert len(set(paths))==2
+    assert target.read_bytes() in (b"ALPHA",b"BRAVO")
+    assert not any(path.exists() for path in paths)
+
+
+def test_atomic_stage_is_cleaned_after_failed_replace(tmp_path):
+    target=tmp_path/"stable.txt"
+    target.write_bytes(b"old")
+    with patch("easychange.core.file_service.os.replace",
+               side_effect=OSError("REPLACE_NOT_ALLOWED")):
+        with pytest.raises(OSError,match="REPLACE_NOT_ALLOWED"):
+            FileService._atomic_write_bytes(target,b"new")
+    assert target.read_bytes()==b"old"
+    assert not list(tmp_path.glob(".stable.txt.easychange-*.tmp"))
