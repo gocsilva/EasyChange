@@ -96,8 +96,11 @@ class ModuleGUI:
             si.dwFlags|=subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow=getattr(subprocess,"SW_HIDE",0)
             opts["startupinfo"]=si
+        # Execute the installed package from the repository root; running a
+        # nested .py file directly breaks absolute package imports on Python.
+        module_entry=SERVICE[:-3].replace("/",".")
         with (folder/(MODULE_ID+"-gui-service.log")).open("ab") as output:
-            self.process=subprocess.Popen([str(python),"-B",str(ROOT/SERVICE)],
+            self.process=subprocess.Popen([str(python),"-B","-m",module_entry],
                       cwd=ROOT,stdin=subprocess.DEVNULL,stdout=output,
                       stderr=subprocess.STDOUT,**opts)
         self.message.set("Serviço iniciando...")
