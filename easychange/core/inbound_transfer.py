@@ -81,11 +81,27 @@ class InboundCommandStore:
                 data={"transfer_id": self._transfer_id(transfer_id)},
             )
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            with path.open("rb") as stream:
+                raw = stream.read(16 * 1024 + 1)
+            if len(raw) > 16 * 1024:
+                raise ValueError("INBOUND_META_TOO_LARGE")
+            value = json.loads(raw)
+            if not isinstance(value, dict):
+                raise ValueError("INBOUND_META_NOT_OBJECT")
+            if (value.get("version") != 1
+                    or value.get("transfer_id") != transfer_id
+                    or value.get("codec") != "zlib"
+                    or type(value.get("chunk_count")) is not int
+                    or not 1 <= value["chunk_count"] <= self.MAX_CHUNKS
+                    or type(value.get("raw_bytes")) is not int
+                    or not 1 <= value["raw_bytes"] <= self.MAX_RAW_BYTES
+                    or type(value.get("compressed_bytes")) is not int
+                    or not 1 <= value["compressed_bytes"] <= self.MAX_COMPRESSED_BYTES
+                    or not isinstance(value.get("sha256"), str)
+                    or not self._SHA_RE.fullmatch(value["sha256"])):
+                raise ValueError("INBOUND_META_FIELDS_INVALID")
+        except (OSError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
             raise InboundTransferError("INBOUND_TRANSFER_META_CORRUPT") from exc
-        if not isinstance(value, dict):
-            raise InboundTransferError("INBOUND_TRANSFER_META_CORRUPT")
         return value
 
     def _cleanup_locked(self) -> None:
