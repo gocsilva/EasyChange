@@ -300,14 +300,10 @@ class DurableResultStore:
         now = time.time()
         self._last_cleanup_monotonic = time.monotonic()
         self._writes_since_cleanup = 0
-        try:
-            files = sorted(
-                self.root.glob("Q*.json.zlib"),
-                key=lambda path: path.stat().st_mtime,
-                reverse=True,
-            )
-        except OSError:
-            return
+        # Order is irrelevant to TTL/receipt safety. A global mtime sort
+        # stat()s every receipt and materializes the full directory on each
+        # maintenance pass; iterate lazily instead.
+        files = self.root.glob("Q*.json.zlib")
 
         # Recent retained results need no decode at all. Decode only expired or
         # overflow candidates so large-result cleanup is proportional to data
