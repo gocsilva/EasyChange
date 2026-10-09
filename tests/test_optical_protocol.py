@@ -246,6 +246,18 @@ def test_structured_primary_duplication_is_compacted_on_wire_and_restored():
 
 
 
+def test_ec2_sparse_indexes_reject_fractional_values_without_rounding():
+    import pytest
+
+    receipt=Result(True,"read",{"payload":"example"},sequence="QINDEXEC2")
+    for invalid in (0.9,1.9,True,None,[],{}):
+        with pytest.raises(ValueError,match="invalid optical chunk index"):
+            encode_result_chunks(receipt,indexes=[invalid])
+    packet=encode_result_chunks(receipt,indexes=["0"])
+    assert len(packet)==1
+    assert json.loads(packet[0])["i"]==0
+
+
 def test_ec2_sparse_indexes_materialize_only_requested_packets():
     import json
 
