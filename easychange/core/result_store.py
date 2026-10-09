@@ -88,10 +88,6 @@ class DurableResultStore:
         # A single byte is locked for the full read-then-write transaction.
         with self._lock:
             with open(self._claim_lock_path, "a+b") as handle:
-                handle.seek(0, os.SEEK_END)
-                if handle.tell() == 0:
-                    handle.write(bytes([0]))
-                    handle.flush()
                 handle.seek(0)
                 if sys.platform == "win32":
                     import msvcrt
@@ -100,6 +96,12 @@ class DurableResultStore:
                     import fcntl
                     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 try:
+                    # Initialize the lock byte only after acquiring the lock:
+                    # concurrent openers must not race while growing the file.
+                    handle.seek(0, os.SEEK_END)
+                    if handle.tell() == 0:
+                        handle.write(bytes([0]))
+                        handle.flush()
                     yield
                 finally:
                     if sys.platform == "win32":
