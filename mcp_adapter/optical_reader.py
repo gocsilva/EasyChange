@@ -34,17 +34,26 @@ class OpticalAssembler:
                 if not isinstance(item,dict):continue
                 tag=str(item.get("p") or "")
                 if tag == "EC2H":
-                    # A QR claiming completion is still untrusted until its
-                    # digest matches the actual EC2 stream being assembled.
+                    # EC2H d=1, n=0, w=0 is a durable *provisional* receipt.
+                    # It hashes the original durable result, not the compact
+                    # EC2 wire projection. Treat it as informational only.
+                    # Final EC2H receipts must match the verified wire digest.
                     digest=item.get("h")
+                    provisional=(type(item.get("d")) is int and item.get("d")==1
+                                 and type(item.get("n")) is int and item.get("n")==0
+                                 and type(item.get("w")) is int and item.get("w")==0)
                     if (self.packet_identity is not None
                             and str(item.get("s") or "") == self.sequence
                             and item.get("f") is True
                             and isinstance(digest,str)
                             and len(digest) in (16,64)
                             and all(ch in "0123456789abcdef" for ch in digest)
-                            and digest[:16] == self.packet_identity[2]):
-                        self.header=item
+                            and (provisional or digest[:16] == self.packet_identity[2])):
+                        # Never replace a matching final header with an
+                        # unverified provisional receipt arriving later.
+                        existing_final=(self.header and self.header.get("d") != 1)
+                        if not (provisional and existing_final):
+                            self.header=item
                     continue
                 if tag!="EC2":continue
                 seq=str(item.get("s") or "")
