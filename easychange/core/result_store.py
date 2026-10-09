@@ -8,6 +8,7 @@ import binascii
 from contextlib import contextmanager
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -342,13 +343,19 @@ class DurableResultStore:
             if not isinstance(value, dict):
                 raise RuntimeError("RESULT_RECEIPT_UNREADABLE")
             active = self._active_record(value)
-            timestamp = float(
-                value.get("updated_at")
-                or value.get("finished_at")
-                or value.get("started_at")
-                or value.get("created_at")
-                or 0.0
-            )
+            try:
+                timestamp = float(
+                    value.get("updated_at")
+                    or value.get("finished_at")
+                    or value.get("started_at")
+                    or value.get("created_at")
+                    or 0.0
+                )
+            except (TypeError, ValueError, OverflowError) as exc:
+                # Corrupt receipt metadata must not be treated as absence.
+                raise RuntimeError("RESULT_RECEIPT_UNREADABLE") from exc
+            if not math.isfinite(timestamp) or timestamp < 0:
+                raise RuntimeError("RESULT_RECEIPT_UNREADABLE")
             ttl = self.active_ttl_seconds if active else self.ttl_seconds
             if timestamp and time.time() - timestamp > ttl:
                 if active:
