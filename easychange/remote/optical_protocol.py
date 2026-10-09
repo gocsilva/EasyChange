@@ -12,6 +12,12 @@ PROTOCOL = "EC2"
 HEADER_PROTOCOL = "EC2H"
 DEFAULT_CHUNK_CHARS = 180
 OPTICAL_COMPRESSION_LEVEL = 3
+# Decoder limits apply to untrusted QR strings, not to durable on-disk results.
+MAX_EC2_PACKETS = 200_000
+MAX_EC2_PACKET_TEXT_CHARS = 65_536
+MAX_EC2_TOKEN_CHARS = 16 * 1024 * 1024
+MAX_EC2_COMPRESSED_BYTES = 12 * 1024 * 1024
+MAX_EC2_RESULT_BYTES = 16 * 1024 * 1024
 
 
 def _result_value(result: Any) -> dict[str, Any]:
@@ -248,34 +254,73 @@ def encode_result_bundle(
 
 
 def decode_result_chunks(payloads: list[str]) -> dict[str, Any]:
-    """Reassemble and verify EC2 packets; identical duplicate chunks are idempotent."""
+    """Reassemble bounded EC2 packets and reject malformed or oversized QR data."""
     if not payloads:
         raise ValueError("no optical chunks")
-    chunks = [json.loads(item) for item in payloads]
-    chunks = [chunk for chunk in chunks if isinstance(chunk, dict) and chunk.get("p") == PROTOCOL]
-    if not chunks:
-        raise ValueError("no EC2 optical chunks")
-    first = chunks[0]
-    identity = (first.get("s"), first.get("n"), first.get("h"), first.get("c"), first.get("e"))
+    if len(payloads) > MAX_EC2_PACKETS * 2:
+        raise ValueError("too many optical packets")
+    first: dict[str, Any] | None = None
+    identity: tuple[Any, ...] | None = None
+    total = 0
     by_index: dict[int, str] = {}
-    for chunk in chunks:
-        if (chunk.get("s"), chunk.get("n"), chunk.get("h"), chunk.get("c"), chunk.get("e")) != identity:
+    token_chars = 0
+    for raw_packet in payloads:
+        if not isinstance(raw_packet, str) or len(raw_packet) > MAX_EC2_PACKET_TEXT_CHARS:
+            raise ValueError("optical packet too large")
+        chunk = json.loads(raw_packet)
+        if not isinstance(chunk, dict) or chunk.get("p") != PROTOCOL:
+            continue
+        if first is None:
+            first = chunk
+            total = chunk.get("n")
+            if type(total) is not int or total < 1 or total > MAX_EC2_PACKETS:
+                raise ValueError("invalid optical packet count")
+            identity = (chunk.get("s"), total, chunk.get("h"),
+                        chunk.get("c"), chunk.get("e"))
+        elif (chunk.get("s"), chunk.get("n"), chunk.get("h"),
+              chunk.get("c"), chunk.get("e")) != identity:
             raise ValueError("mixed optical packet set")
-        index = int(chunk["i"])
-        data = str(chunk.get("d") or "")
+        index = chunk.get("i")
+        if type(index) is not int or not 0 <= index < total:
+            raise ValueError("invalid optical chunk index")
+        data = chunk.get("d")
+        if not isinstance(data, str):
+            raise ValueError("invalid optical chunk data")
+        try:
+            data_bytes = data.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError("invalid optical chunk encoding") from exc
         fragment_crc = chunk.get("x")
-        if fragment_crc and f"{binascii.crc32(data.encode('ascii')) & 0xffffffff:08x}" != str(fragment_crc):
+        if fragment_crc and f"{binascii.crc32(data_bytes) & 0xffffffff:08x}" != str(fragment_crc):
             raise ValueError(f"optical chunk crc32 mismatch: {index}")
         previous = by_index.get(index)
-        if previous is not None and previous != data:
-            raise ValueError("conflicting duplicate optical chunk")
+        if previous is not None:
+            if previous != data:
+                raise ValueError("conflicting duplicate optical chunk")
+            continue
+        token_chars += len(data)
+        if token_chars > MAX_EC2_TOKEN_CHARS:
+            raise ValueError("optical token too large")
         by_index[index] = data
-    total = int(first["n"])
-    if sorted(by_index) != list(range(total)):
+    if first is None:
+        raise ValueError("no EC2 optical chunks")
+    # Every unique index was already range checked. A full set needs only
+    # a cardinality check; never allocate list(range(untrusted_total)).
+    if len(by_index) != total:
         raise ValueError(f"incomplete optical packet set: {len(by_index)}/{total}")
     token = "".join(by_index[index] for index in range(total))
     compressed = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
-    raw = zlib.decompress(compressed)
+    if len(compressed) > MAX_EC2_COMPRESSED_BYTES:
+        raise ValueError("optical compressed result too large")
+    decoder = zlib.decompressobj()
+    raw = decoder.decompress(compressed, MAX_EC2_RESULT_BYTES + 1)
+    if len(raw) > MAX_EC2_RESULT_BYTES or decoder.unconsumed_tail:
+        raise ValueError("optical decompressed result too large")
+    raw += decoder.flush(MAX_EC2_RESULT_BYTES + 1 - len(raw))
+    if len(raw) > MAX_EC2_RESULT_BYTES:
+        raise ValueError("optical decompressed result too large")
+    if not decoder.eof or decoder.unused_data:
+        raise ValueError("invalid optical compressed stream")
     if hashlib.sha256(raw).hexdigest()[:16] != first["h"]:
         raise ValueError("optical sha256 mismatch")
     if f"{binascii.crc32(raw) & 0xffffffff:08x}" != first["c"]:
