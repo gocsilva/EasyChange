@@ -159,7 +159,7 @@ def encode_durable_result_header(header: dict[str, Any]) -> str:
     sequence = str(header.get("sequence") or "")
     if not sequence:
         raise ValueError("durable result sequence required")
-    if not bool(header.get("finished")):
+    if header.get("finished") is not True:
         raise ValueError("durable result is not terminal")
     try:
         payload_length = max(0, int(header.get("payload_length") or 0))
@@ -267,7 +267,10 @@ def decode_result_chunks(payloads: list[str]) -> dict[str, Any]:
     for raw_packet in payloads:
         if not isinstance(raw_packet, str) or len(raw_packet) > MAX_EC2_PACKET_TEXT_CHARS:
             raise ValueError("optical packet too large")
-        chunk = json.loads(raw_packet)
+        try:
+            chunk = json.loads(raw_packet)
+        except (json.JSONDecodeError, RecursionError) as exc:
+            raise ValueError("invalid optical packet JSON") from exc
         if not isinstance(chunk, dict) or chunk.get("p") != PROTOCOL:
             continue
         if first is None:
