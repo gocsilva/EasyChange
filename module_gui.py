@@ -47,6 +47,7 @@ class ModuleGUI:
         self.root.title(NAME+" — independente")
         self.root.geometry("510x255")
         self.process=None
+        self._closing=False
         parent=ttk.Frame(self.root,padding=18)
         parent.pack(fill="both",expand=True)
         ttk.Label(parent,text=NAME,font=("Segoe UI",17,"bold")).pack(anchor="w")
@@ -63,10 +64,21 @@ class ModuleGUI:
         self.refresh()
 
     def refresh(self):
+        if self._closing:
+            return
         def probe():
             report=status()
-            self.root.after(0,lambda:self.message.set(
-                "Serviço ativo" if report["running"] else "Serviço parado"))
+            if self._closing:
+                return
+            def update():
+                if not self._closing:
+                    self.message.set(
+                        "Serviço ativo" if report["running"] else "Serviço parado")
+            try:
+                self.root.after(0,update)
+            except (RuntimeError,tk.TclError):
+                # Closing the GUI while health I/O is in flight is normal.
+                pass
         threading.Thread(target=probe,daemon=True).start()
 
     def start(self):
@@ -103,6 +115,7 @@ class ModuleGUI:
         self.process=None
 
     def close(self):
+        self._closing=True
         self.stop()
         self.root.destroy()
 
