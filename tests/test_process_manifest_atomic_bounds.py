@@ -125,3 +125,50 @@ def test_startup_job_reconcile_selects_only_newest_and_counts_all(tmp_path):
     assert empty["available"]==70
     assert empty["checked"]==0
     assert visited==[]
+
+
+def test_maintenance_preserves_unknown_queued_and_running_receipts_under_disk_pressure(tmp_path):
+    import os
+    import time
+
+    root=tmp_path/"runtime"
+    jobs_root=root/"jobs"
+    process_root=root/"processes"
+    jobs_root.mkdir(parents=True)
+    process_root.mkdir()
+    jobs=_store(jobs_root)
+    jobs._processes={}
+    jobs.root=process_root
+    jobs.workspace_state_root=root
+    jobs.max_runtime_bytes=0
+
+    stale=time.time()-10*24*60*60
+    for name,content in (
+        ("UNKNOWN",b'not valid JSON'),
+        ("QUEUED",b'{"state":"QUEUED"}'),
+        ("RUNNING",b'{"state":"RUNNING"}'),
+        ("DONE",b'{"state":"SUCCEEDED"}'),
+    ):
+        manifest=jobs_root/(name+".json")
+        manifest.write_bytes(content)
+        stdout=process_root/(name+".out")
+        stdout.write_bytes(b"stdout evidence")
+        os.utime(manifest,(stale,stale))
+        os.utime(stdout,(stale,stale))
+
+    report=jobs.maintenance(keep_finished=0)
+    for name in ("UNKNOWN","QUEUED","RUNNING"):
+        assert (jobs_root/(name+".json")).exists(),name
+        assert (process_root/(name+".out")).exists(),name
+    assert not (jobs_root/"DONE.json").exists()
+    assert not (process_root/"DONE.out").exists()
+    assert report["disk_over_budget"] is True
+
+
+def test_unreadable_oversize_manifest_has_unknown_nonterminal_state(tmp_path):
+    jobs=_store(tmp_path)
+    jobs.MAX_JOB_MANIFEST_BYTES=64
+    path=tmp_path/"TOOLARGE.json"
+    path.write_bytes(b'{"state":"SUCCEEDED","padding":"' + b"x"*128 + b'"}')
+    assert jobs._durable_job_state(path)=="UNKNOWN"
+    assert path.exists()
