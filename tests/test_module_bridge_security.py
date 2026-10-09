@@ -36,6 +36,27 @@ class TestHubRedirectBoundary(unittest.TestCase):
                    side_effect=TimeoutError("SERVICE_UNAVAILABLE")):
             self.assertFalse(esp_online())
 
+    def test_esp_health_read_is_bounded_even_for_untrusted_local_service(self):
+        import io
+        from unittest.mock import patch
+        from mcp_adapter.module_service import esp_online
+
+        limits=[]
+        class ControlledResponse(io.BytesIO):
+            def read(self,limit=-1):
+                limits.append(limit)
+                return super().read(limit)
+
+        large=ControlledResponse(
+            b'{"ok":true,"id":"esp","padding":"' + b"x"*3000 + b'"}')
+        with patch("mcp_adapter.module_service.urlopen",return_value=large):
+            self.assertFalse(esp_online())
+        self.assertEqual(limits,[2049])
+
+        with patch("mcp_adapter.module_service.urlopen",
+                   return_value=io.BytesIO(b'{"ok":')):
+            self.assertFalse(esp_online())
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
