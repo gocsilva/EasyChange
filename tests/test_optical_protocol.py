@@ -87,6 +87,27 @@ def test_ec2_fragment_crc_rejects_corruption():
         decode_result_chunks(corrupted)
 
 
+def test_ec2_rejects_pathologically_nested_packet_json():
+    import pytest
+
+    nested="["*2000+"]"*2000
+    with pytest.raises(ValueError,match="invalid optical packet JSON"):
+        decode_result_chunks([nested])
+
+
+def test_durable_ec2_header_requires_boolean_finished_true():
+    import pytest
+    from easychange.remote.optical_protocol import encode_durable_result_header
+
+    metadata={"sequence":"QSTRICT1","finished":"true",
+              "payload_length":12,"success":True,"mutation":False}
+    with pytest.raises(ValueError,match="durable result is not terminal"):
+        encode_durable_result_header(metadata)
+    metadata["finished"]=True
+    valid=json.loads(encode_durable_result_header(metadata))
+    assert valid["f"] is True
+
+
 def test_ec2_rejects_untrusted_packet_counts_and_invalid_indexes():
     import pytest
     result=Result(True,"read",{"text":"ok"},sequence="QBADCOUNT")
