@@ -18,6 +18,7 @@ class OpticalAssembler:
     chunks: dict[int, str] = field(default_factory=dict)
     total: int = 0
     stored_chars: int = 0
+    stored_token_chars: int = 0
     packet_identity: tuple | None = None
     verified_payload: dict | None = None
     header: dict = field(default_factory=dict)
@@ -77,13 +78,16 @@ class OpticalAssembler:
                     # Equivalent duplicate packet may differ only by whitespace.
                     if json.loads(prev)!=item:continue
                 candidate=self.stored_chars - (len(prev) if prev is not None else 0) + len(raw)
-                if candidate>MAX_EC2_ASSEMBLY_TEXT_CHARS:
+                token_candidate=self.stored_token_chars + (len(piece) if prev is None else 0)
+                if (candidate>MAX_EC2_ASSEMBLY_TEXT_CHARS or
+                        token_candidate>MAX_EC2_TOKEN_CHARS):
                     continue
                 if not self.sequence:
                     self.sequence=seq;self.total=count
                     self.packet_identity=identity
                 self.chunks[index]=raw
                 self.stored_chars=candidate
+                self.stored_token_chars=token_candidate
                 self.updated_at=time.monotonic()
             except (ValueError,TypeError,KeyError,RecursionError):
                 continue
