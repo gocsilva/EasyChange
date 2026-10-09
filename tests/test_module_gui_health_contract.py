@@ -268,3 +268,45 @@ def test_owned_process_is_reaped_and_failed_stop_keeps_gui_open():
     assert gui.process is stuck
     gui.root.destroy.assert_not_called()
     assert "Falha ao encerrar" in gui.message.set.call_args.args[0]
+
+
+def test_owned_service_cold_start_keeps_polling_without_false_stopped_status():
+    from unittest.mock import Mock
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    klass=next(node for node in ast.parse(source).body
+               if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+
+    class ImmediateThread:
+        def __init__(self,*,target,daemon):
+            self.target=target
+        def start(self):
+            self.target()
+
+    ns={"status":lambda:{"running":False},
+        "threading":type("Async",(),{"Thread":ImmediateThread}),
+        "tk":type("Tk",(),{"TclError":RuntimeError})}
+    exec(compile(ast.Module(body=[klass],type_ignores=[]),
+                 "<cold-start-poll>","exec"),ns)
+    gui=object.__new__(ns["ModuleGUI"])
+    gui.root=Mock()
+    gui.message=Mock()
+    gui._closing=False
+    gui._refresh_inflight=False
+    gui.process=Mock()
+    gui.process.poll.return_value=None
+
+    gui.refresh()
+    first=gui.root.after.call_args.args[1]
+    first()
+    assert "iniciando" in gui.message.set.call_args.args[0]
+    delay,retry=gui.root.after.call_args.args
+    assert delay==1600
+    ns["status"]=lambda:{"running":True}
+    retry()
+    ready=gui.root.after.call_args.args[1]
+    count=gui.root.after.call_count
+    ready()
+    assert gui.message.set.call_args.args[0]=="Serviço ativo"
+    assert gui.root.after.call_count==count
