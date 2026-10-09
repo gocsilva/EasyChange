@@ -887,14 +887,15 @@ class ProcessService:
         total = 0
         files = 0
         try:
-            items = list(self.workspace_state_root.rglob("*"))
+            # Do not collect the entire runtime directory tree just to add
+            # file sizes. Legacy workspaces may contain years of job evidence.
+            for path in self.workspace_state_root.rglob("*"):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                total += self._file_size(path)
+                files += 1
         except OSError:
-            items = []
-        for path in items:
-            if not path.is_file() or path.is_symlink():
-                continue
-            total += self._file_size(path)
-            files += 1
+            pass
         return {
             "root": str(self.workspace_state_root),
             "bytes": total,
