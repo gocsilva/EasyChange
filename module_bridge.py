@@ -95,8 +95,14 @@ class MCPBridge:
             payload=json.dumps(body,ensure_ascii=False).encode("utf-8")
             headers["Content-Type"]="application/json"
         req=Request(BUS+path,data=payload,method="POST" if payload is not None else "GET",headers=headers)
+        # The hub limits tool results to 8 MiB, plus a small JSON envelope.
+        # A stale or spoofed loopback service must not stream unlimited bytes.
+        max_response=8_388_608+131_072
         with _local_opener.open(req,timeout=timeout) as response:
-            data=json.load(response)
+            raw=response.read(max_response+1)
+        if len(raw)>max_response:
+            raise ValueError("MCP_HUB_RESPONSE_TOO_LARGE")
+        data=json.loads(raw)
         if not isinstance(data,dict):raise ValueError("INVALID_MCP_HUB_RESPONSE")
         return data
 
