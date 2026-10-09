@@ -374,8 +374,9 @@ class DurableResultStore:
                 if active:
                     # An unfinished execution remains an uncertain receipt.
                     return value
-                target.unlink(missing_ok=True)
-                return None
+                # Retain expired receipts as replay tombstones. Deleting here
+                # can make a previously executed sequence appear never seen.
+                return value
             return value
 
     def mark_running(self, sequence: str, command_hash: str, command: str, *, mutation: bool) -> dict[str, Any]:
