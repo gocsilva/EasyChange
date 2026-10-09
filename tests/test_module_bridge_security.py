@@ -13,6 +13,29 @@ class TestHubRedirectBoundary(unittest.TestCase):
         # urllib may omit a ProxyHandler with no proxy mappings entirely.
         self.assertFalse(any(h.proxies for h in handlers))
 
+    def test_esp_presence_requires_matching_service_identity(self):
+        import io
+        import json
+        from unittest.mock import patch
+        from mcp_adapter.module_service import esp_online
+
+        cases=(
+            ({"ok":True,"id":"esp"},True),
+            ({"ok":True},False),
+            ({"ok":True,"id":"android"},False),
+            ({"ok":False,"id":"esp"},False),
+            ({"ok":1,"id":"esp"},False),
+            ([{"ok":True,"id":"esp"}],False),
+        )
+        for status,expected in cases:
+            with self.subTest(status=status), patch(
+                    "mcp_adapter.module_service.urlopen",
+                    return_value=io.BytesIO(json.dumps(status).encode("utf-8"))):
+                self.assertIs(esp_online(),expected)
+        with patch("mcp_adapter.module_service.urlopen",
+                   side_effect=TimeoutError("SERVICE_UNAVAILABLE")):
+            self.assertFalse(esp_online())
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
