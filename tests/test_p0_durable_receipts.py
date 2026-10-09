@@ -262,6 +262,63 @@ def test_terminal_header_cache_preserves_expired_replay_tombstone(tmp_path, monk
     assert store.get(sequence)["state"]=="DONE"
 
 
+def test_cleanup_compacts_expired_read_result_but_keeps_replay_tombstone(tmp_path):
+    import hashlib
+    import os
+    import time
+
+    folder=tmp_path / "result-receipts"
+    store=DurableResultStore(folder)
+    sequence="QEXPIRED01"
+    content="".join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(120))
+    store.mark_running(sequence,"a"*64,":state",mutation=False)
+    original=store.complete(
+        sequence,"a"*64,":state",
+        {"ok":True,"command":"state","data":{"text":content},
+         "sequence":sequence})
+    receipt_path=store._path(sequence)
+    original_size=receipt_path.stat().st_size
+    old=time.time()-store.ttl_seconds-120
+    os.utime(receipt_path,(old,old))
+    store._cleanup()
+    assert receipt_path.is_file()
+    assert receipt_path.stat().st_size<original_size
+    recovered=DurableResultStore(folder).get(sequence)
+    assert recovered["state"]=="DONE"
+    assert recovered["command_hash"]=="a"*64
+    assert recovered["result_expired"] is True
+    assert recovered["result"] is None
+    assert recovered["expired_result_hash"]==original["result_hash"]
+    assert store.status(sequence)["result_expired"] is True
+    # Another maintenance cycle may not delete or re-expand the tombstone.
+    store._cleanup()
+    assert store.get(sequence)["result_expired"] is True
+
+
+def test_expired_read_receipt_blocks_same_sequence_execution(tmp_path, monkeypatch):
+    import os
+    import time
+
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        seq="QEXPIRED02"
+        first=service.execute(":ec "+seq+" :state")
+        assert first.sequence==seq
+        target=service.result_store._path(seq)
+        old=time.time()-service.result_store.ttl_seconds-120
+        os.utime(target,(old,old))
+        service.result_store._cleanup()
+        def forbidden(*args,**kwargs):
+            raise AssertionError("expired command executed a second time")
+        monkeypatch.setattr(service,"execute_tokens",forbidden)
+        second=service.execute(":ec "+seq+" :state")
+        assert second.code=="SEQUENCE_RESULT_EXPIRED"
+        assert second.data["duplicate"] is True
+        assert service.result_store.get(seq)["state"]=="DONE"
+    finally:
+        service.close()
+
+
 def test_header_cache_refreshes_after_other_process_replaces_receipt(tmp_path, monkeypatch):
     root=tmp_path / "results"
     first=DurableResultStore(root)
