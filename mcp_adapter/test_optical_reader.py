@@ -53,6 +53,50 @@ class OpticalReaderTests(unittest.TestCase):
         collector.ingest([provisional])
         self.assertEqual(collector.header["h"],wire_digest)
 
+    def test_durable_header_shown_before_chunks_waits_for_matching_sequence(self):
+        import hashlib
+        import json
+        from easychange.remote.optical_protocol import encode_durable_result_header
+
+        original={"sequence":"QHDRFIRST1","ok":True,"data":{"text":"ready"}}
+        wire=encode_result_chunks(original)
+        original_bytes=json.dumps(
+            original,ensure_ascii=False,separators=(",",":")).encode("utf-8")
+        durable=encode_durable_result_header({
+            "sequence":"QHDRFIRST1","finished":True,"success":True,
+            "sha256":hashlib.sha256(original_bytes).hexdigest(),
+            "payload_length":len(original_bytes),
+        })
+        receiver=OpticalAssembler()
+        awaiting=receiver.ingest([durable])
+        self.assertFalse(awaiting["complete"])
+        self.assertIsNone(awaiting["sequence"])
+        self.assertEqual(receiver.header,{})
+        self.assertEqual(receiver.pending_provisional_header["d"],1)
+
+        other=encode_result_chunks({"sequence":"FOREIGN","ok":True})
+        other_receiver=OpticalAssembler()
+        other_receiver.ingest([durable])
+        other_receiver.ingest(other[:1])
+        self.assertEqual(other_receiver.header,{})
+        self.assertEqual(other_receiver.pending_provisional_header,{})
+
+        completed=receiver.ingest(wire)
+        self.assertTrue(completed["verified"])
+        self.assertEqual(receiver.header["d"],1)
+        self.assertEqual(receiver.pending_provisional_header,{})
+
+        # The verified final EC2H may replace the provisional header; a
+        # late repeat of the provisional QR must not downgrade it again.
+        final=json.loads(durable)
+        final.pop("d")
+        final["n"]=len(wire)
+        final["h"]=json.loads(wire[0])["h"]
+        receiver.ingest([json.dumps(final)])
+        self.assertEqual(receiver.header["h"],final["h"])
+        receiver.ingest([durable])
+        self.assertEqual(receiver.header["h"],final["h"])
+
     def test_foreign_sequence_does_not_mix(self):
         a=OpticalAssembler()
         one=encode_result_chunks({"sequence":"one","ok":True})
