@@ -327,6 +327,11 @@ def test_cleanup_compacts_expired_read_result_but_keeps_replay_tombstone(tmp_pat
     assert recovered["result"] is None
     assert recovered["expired_result_hash"]==original["result_hash"]
     assert store.status(sequence)["result_expired"] is True
+    header=store.header(sequence)
+    assert header["finished"] is True
+    assert header["result_expired"] is True
+    assert header["expired_result_hash"]==original["result_hash"]
+    assert header["payload_length"]==0
     # Another maintenance cycle may not delete or re-expand the tombstone.
     store._cleanup()
     assert store.get(sequence)["result_expired"] is True
