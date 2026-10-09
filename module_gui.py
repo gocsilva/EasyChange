@@ -102,10 +102,16 @@ class ModuleGUI:
         # Execute the installed package from the repository root; running a
         # nested .py file directly breaks absolute package imports on Python.
         module_entry=SERVICE[:-3].replace("/",".")
-        with (folder/(MODULE_ID+"-gui-service.log")).open("ab") as output:
-            self.process=subprocess.Popen([str(python),"-B","-m",module_entry],
-                      cwd=ROOT,stdin=subprocess.DEVNULL,stdout=output,
-                      stderr=subprocess.STDOUT,**opts)
+        try:
+            with (folder/(MODULE_ID+"-gui-service.log")).open("ab") as output:
+                self.process=subprocess.Popen([str(python),"-B","-m",module_entry],
+                          cwd=ROOT,stdin=subprocess.DEVNULL,stdout=output,
+                          stderr=subprocess.STDOUT,**opts)
+        except (OSError,ValueError,subprocess.SubprocessError) as exc:
+            # A missing/broken interpreter is a service startup failure, not
+            # an uncaught Tk callback that makes the GUI appear frozen.
+            self.message.set("Falha ao iniciar serviço: "+type(exc).__name__)
+            return
         self.message.set("Serviço iniciando...")
         self.root.after(700,self.refresh)
 
