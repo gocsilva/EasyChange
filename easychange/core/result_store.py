@@ -238,8 +238,12 @@ class DurableResultStore:
                 return None
             try:
                 value = self._decode(target.read_bytes())
-            except (OSError, ValueError, json.JSONDecodeError, zlib.error):
-                return None
+            except (OSError, ValueError, json.JSONDecodeError, zlib.error) as exc:
+                # A present but unreadable receipt is not a never-seen command.
+                # Fail closed instead of allowing mark_running to execute again.
+                raise RuntimeError("RESULT_RECEIPT_UNREADABLE") from exc
+            if not isinstance(value, dict):
+                raise RuntimeError("RESULT_RECEIPT_UNREADABLE")
             active = self._active_record(value)
             timestamp = float(
                 value.get("updated_at")
