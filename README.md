@@ -119,3 +119,11 @@ python -m pytest
 EasyChange pode ser usado sem MCP, pela GUI própria. Quando ativado via `module.mdl`, a comunicação com outros módulos ocorre pela ponte central autenticada do MCP. `module_bridge.MCPBridge.receive()` lê sem remover; `ack(ids)` confirma somente mensagens processadas e `receive_legacy()` mantém compatibilidade antiga. As confirmações da ponte não substituem observação HDMI da operação física.
 
 Persistência: quando carregado pelo MCP real, o spool SQLite local do MCP preserva mensagens não confirmadas após reinício; o teste sem spool é volátil. O destinatário deve processar reentregas de forma idempotente. O spool guarda payload em texto claro; não envie segredos por mensagens.
+
+### Processamento seguro de mensagens do MCP
+
+`module_bridge.MCPBridge.process_pending(handler, limit=20)` é **opt-in**: conectar este módulo não inicia consumo nem dispara ações. O callback é responsabilidade do módulo/operador; deve validar o tópico e o conteúdo antes de executar efeitos externos. O método lê a caixa via `GET /v1/inbox/peek` (não destrutivo), passa cada mensagem ao callback e só confirma cada ID por `POST /v1/inbox/ack` quando o callback retorna exatamente `True`. Ao retornar `False`/`None`, deixa a mensagem e as posteriores pendentes. Se houver exceção do callback, timeout ou ACK incerto, interrompe e propaga a falha sem confirmar a mensagem. Retorna `received`, `acknowledged` e `deferred_id`; limite de 1 a 20 mensagens por chamada. Ações não são executadas automaticamente, e os handlers precisam ser idempotentes: uma resposta de ACK perdida não prova que o efeito externo não ocorreu. `receive_legacy()` continua disponível por compatibilidade, mas é destrutivo e não deve ser utilizado para processamento confiável.
+
+O código e os testes ficam nesta **única versão oficial do projeto na branch `main`**; o MCP permanece a ponte central e o módulo continua independente em modo standalone.
+
+HTTP redirects and proxies are disabled for this local authenticated channel. Handlers must be idempotent across separate processes; the in-process consumer lock is not a distributed lock.

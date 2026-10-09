@@ -1,17 +1,28 @@
 """Optional MCP hub client; independent process can join the authenticated MCP host."""
 from __future__ import annotations
 import hmac
+import threading
 import json
 import os
 import time
 from urllib.error import HTTPError
-from urllib.request import Request,urlopen
+from urllib.request import Request,build_opener,HTTPRedirectHandler,ProxyHandler
 
 BUS=os.environ.get("MCP_MODULE_BUS_URL","http://127.0.0.1:8786")
 if BUS not in ("http://127.0.0.1:8786","http://localhost:8786"):
     raise ValueError("MCP_BUS_MUST_USE_LOOPBACK")
 
+class _NoRedirect(HTTPRedirectHandler):
+    """Never forward MCP credentials to redirect destinations."""
+    def redirect_request(self,req,fp,code,msg,headers,newurl):
+        return None
+
+# The MCP hub must never be reached through an external HTTP proxy.
+_local_opener=build_opener(ProxyHandler({}),_NoRedirect)
+
 _runtime_token=""
+# Single consumer in this module process, including multiple MCPBridge objects.
+_processing_lock=threading.Lock()
 
 class MCPBridge:
     def __init__(self,token=None):
@@ -33,7 +44,7 @@ class MCPBridge:
             payload=json.dumps(body,ensure_ascii=False).encode("utf-8")
             headers["Content-Type"]="application/json"
         req=Request(BUS+path,data=payload,method="POST" if payload is not None else "GET",headers=headers)
-        with urlopen(req,timeout=timeout) as response:
+        with _local_opener.open(req,timeout=timeout) as response:
             data=json.load(response)
         if not isinstance(data,dict):raise ValueError("INVALID_MCP_HUB_RESPONSE")
         return data
@@ -67,6 +78,66 @@ class MCPBridge:
     def ack(self, ids):
         """Confirm successful processing. Repeated ACKs are idempotent."""
         return self._request("/v1/inbox/ack",{"ids":ids})
+
+    def process_pending(self, handler, *, limit=20):
+        """Process a bounded batch, acknowledging each item ONLY on explicit success.
+
+        Opt-in pull API: merely attaching to MCP never executes a queued
+        message or any device action.  The caller owns topic authorization,
+        side-effect idempotency and error recovery.  Return exactly True from
+        handler(message) to confirm success; False/None defers the item. A
+        handler exception or an uncertain ACK propagates without an auto-retry.
+        """
+        if not callable(handler):
+            raise ValueError("HANDLER_REQUIRED")
+        # receive() currently uses the MCP default 20-message peek.  Never
+        # claim to process more messages than the page actually retrieves.
+        if type(limit) is not int or not 1<=limit<=20:
+            raise ValueError("INVALID_LIMIT")
+        if not self.connected:
+            raise RuntimeError("MCP_NOT_CONNECTED_STANDALONE")
+        if not _processing_lock.acquire(blocking=False):
+            raise RuntimeError("MCP_CONSUMER_BUSY")
+        try:
+            page=self.receive()
+            if not isinstance(page,dict) or page.get("requires_ack") is not True:
+                raise ValueError("MCP_REQUIRES_NONDESTRUCTIVE_INBOX")
+            messages=page.get("messages")
+            if not isinstance(messages,list):
+                raise ValueError("INVALID_MCP_INBOX")
+            selected=messages[:limit]
+            # Verify the entire page BEFORE executing the first side effect.
+            # Corrupted or duplicated IDs must not cause two dispatches.
+            unique=set()
+            for message in selected:
+                if (not isinstance(message,dict) or
+                        type(message.get("id")) is not int or message["id"]<1):
+                    raise ValueError("INVALID_MCP_INBOX_MESSAGE")
+                if message["id"] in unique:
+                    raise ValueError("DUPLICATE_MCP_INBOX_ID")
+                unique.add(message["id"])
+            count=0
+            for message in selected:
+                if handler(message) is not True:
+                    return {"received":len(selected),"acknowledged":count,
+                            "deferred_id":message["id"]}
+                receipt=self.ack([message["id"]])
+                if not isinstance(receipt,dict) or receipt.get("ok") is not True:
+                    raise RuntimeError("MCP_ACK_UNCONFIRMED")
+                acked=receipt.get("acked")
+                already=receipt.get("already_acked",[])
+                unknown=receipt.get("unknown",[])
+                if (type(acked) is not int or
+                        not isinstance(already,list) or
+                        not isinstance(unknown,list) or
+                        message["id"] in unknown or
+                        not ((acked==1 and message["id"] not in already) or
+                             (acked==0 and message["id"] in already))):
+                    raise RuntimeError("MCP_ACK_UNCONFIRMED")
+                count+=1
+            return {"received":len(selected),"acknowledged":count,"deferred_id":None}
+        finally:
+            _processing_lock.release()
 
     def receive_legacy(self):
         """Older destructive read for compatibility; avoid for reliable delivery."""
