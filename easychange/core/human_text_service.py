@@ -115,11 +115,12 @@ class HumanTextService:
         if self.path.exists() and self.meta_path.exists():
             try:
                 value = json.loads(self.meta_path.read_text(encoding="utf-8"))
+                file_stat = self.path.stat()
                 if (
                     isinstance(value, dict)
-                    and int(value.get("bytes") or -1) == self.path.stat().st_size
-                    and value.get("file_mtime_ns") == self.path.stat().st_mtime_ns
-                    and value.get("file_inode") == self.path.stat().st_ino
+                    and int(value.get("bytes") or -1) == file_stat.st_size
+                    and value.get("file_mtime_ns") == file_stat.st_mtime_ns
+                    and value.get("file_inode") == file_stat.st_ino
                     and value.get("sha256")
                 ):
                     return {
@@ -142,10 +143,16 @@ class HumanTextService:
     def load(self) -> str:
         if not self.path.exists():
             return ""
-        size = self.path.stat().st_size
-        if size > self.max_bytes:
+        # A size check followed by read_text() is vulnerable to a writer
+        # atomically replacing the file between those two operations.
+        with self.path.open("rb") as handle:
+            raw = handle.read(self.max_bytes + 1)
+        if len(raw) > self.max_bytes:
             raise ValueError("HUMAN_TEXT_EXCEEDS_CONFIGURED_LIMIT")
-        return self.path.read_text(encoding="utf-8")
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("HUMAN_TEXT_INVALID_UTF8") from exc
 
     def save(self, text: str) -> dict[str, Any]:
         if not isinstance(text, str):
