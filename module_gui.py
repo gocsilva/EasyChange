@@ -128,18 +128,31 @@ class ModuleGUI:
     def stop(self):
         process=self.process
         if process and process.poll() is None:
-            process.terminate()
-            try:process.wait(timeout=2)
-            except subprocess.TimeoutExpired:process.kill()
+            try:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    # Reap the process after forceful termination as well.
+                    process.wait(timeout=2)
+            except (OSError,subprocess.TimeoutExpired) as exc:
+                if process.poll() is None:
+                    self.message.set("Falha ao encerrar serviço: "+type(exc).__name__)
+                    return False
             self.message.set("Serviço iniciado por esta GUI foi encerrado.")
         else:
             self.message.set("Nenhum serviço próprio ativo. Outros processos preservados.")
         self.process=None
+        return True
 
     def close(self):
         self._closing=True
-        self.stop()
-        self.root.destroy()
+        if self.stop():
+            self.root.destroy()
+        else:
+            # Preserve ownership and let the user retry stopping the service.
+            self._closing=False
 
     def run(self):
         self.root.mainloop()
