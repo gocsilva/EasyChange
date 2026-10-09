@@ -69,3 +69,28 @@ def test_distinct_process_like_job_writers_do_not_reuse_staging_files(tmp_path):
     result=json.loads((tmp_path/"JOBONE.json").read_text(encoding="utf-8"))
     assert result["state"] in {"RUNNING","FINISHED"}
     assert first._read_job("JOBONE")==result
+
+
+def test_legacy_job_migration_bounds_reads_and_preserves_existing_targets(tmp_path):
+    legacy=tmp_path/".easychange"/"jobs"
+    legacy.mkdir(parents=True)
+    target_root=tmp_path/"new-jobs"
+    target_root.mkdir()
+    small=b'{"job_id":"GOOD","state":"RUNNING"}'
+    (legacy/"GOOD.json").write_bytes(small)
+    huge=b"x"*1024
+    (legacy/"LARGE.json").write_bytes(huge)
+    (legacy/"SAVED.json").write_bytes(b'{"state":"OLD"}')
+    (target_root/"SAVED.json").write_bytes(b'{"state":"NEW"}')
+
+    jobs=_store(target_root)
+    jobs.cwd=tmp_path
+    jobs.MAX_JOB_MANIFEST_BYTES=128
+    with patch.object(Path,"read_bytes",
+                      side_effect=AssertionError("UNBOUNDED_LEGACY_JOB_READ")):
+        jobs._migrate_legacy_jobs()
+    assert (target_root/"GOOD.json").read_bytes()==small
+    assert not (target_root/"LARGE.json").exists()
+    assert (target_root/"SAVED.json").read_bytes()==b'{"state":"NEW"}'
+    assert (legacy/"LARGE.json").read_bytes()==huge
+    assert not list(target_root.glob("*.tmp"))
