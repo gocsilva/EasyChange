@@ -340,12 +340,26 @@ class DurableResultStore:
             return value
 
     def mark_running(self, sequence: str, command_hash: str, command: str, *, mutation: bool) -> dict[str, Any]:
+        # Compatibility wrapper: callers that only need the record keep the
+        # historical return shape. Execution owners must use claim_running().
+        value, _claimed = self.claim_running(
+            sequence, command_hash, command, mutation=mutation)
+        return value
+
+    def claim_running(self, sequence: str, command_hash: str, command: str,
+                      *, mutation: bool) -> tuple[dict[str, Any], bool]:
+        """Atomically reserve a sequence across EasyChange processes.
+
+        Only a newly claimed receipt authorizes execution. An existing RUNNING
+        or DONE receipt is returned with claimed=False, even when a racing
+        process wrote it after the caller's last get().
+        """
         with self._claim_lock:
             previous = self.get(sequence)
             if previous is not None:
                 if previous.get("command_hash") != command_hash:
                     raise ValueError("RESULT_SEQUENCE_COMMAND_HASH_MISMATCH")
-                return previous
+                return previous, False
             now = time.time()
             execution_id = "E" + hashlib.sha256(
                 f"{sequence}:{command_hash}:{time.time_ns()}".encode("utf-8")
@@ -373,7 +387,7 @@ class DurableResultStore:
                 "active_retention_ttl_seconds": self.active_ttl_seconds,
             }
             self._write(sequence, value)
-            return value
+            return value, True
 
     def update_mutation_state(
         self,
