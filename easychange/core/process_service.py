@@ -7,6 +7,7 @@ import re
 import subprocess
 import shutil
 import tempfile
+from itertools import islice
 import threading
 import time
 from pathlib import Path
@@ -428,18 +429,36 @@ class ProcessService:
         legacy = self.cwd / ".easychange" / "jobs"
         if not legacy.is_dir():
             return
+        # Migration must not enumerate an entire enormous legacy folder or
+        # load an arbitrarily large old manifest in RAM at GUI startup.
         try:
-            candidates = list(legacy.glob("*.json"))
+            for source in islice(legacy.glob("*.json"),1024):
+                target = self.jobs_root / source.name
+                if target.exists():
+                    continue
+                stage=None
+                try:
+                    with source.open("rb") as reader:
+                        payload=reader.read(self.MAX_JOB_MANIFEST_BYTES+1)
+                    if len(payload)>self.MAX_JOB_MANIFEST_BYTES:
+                        continue
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb",dir=self.jobs_root,prefix=source.name+".",
+                        suffix=".tmp",delete=False
+                    ) as writer:
+                        stage=Path(writer.name)
+                        writer.write(payload)
+                        writer.flush()
+                        os.fsync(writer.fileno())
+                    if not target.exists():
+                        stage.replace(target)
+                except OSError:
+                    continue
+                finally:
+                    if stage is not None:
+                        stage.unlink(missing_ok=True)
         except OSError:
             return
-        for source in candidates[:1024]:
-            target = self.jobs_root / source.name
-            if target.exists():
-                continue
-            try:
-                target.write_bytes(source.read_bytes())
-            except OSError:
-                continue
 
     def _job_path(self, job_id: str) -> Path:
         safe = "".join(ch for ch in str(job_id) if ch.isalnum() or ch in "_-")
