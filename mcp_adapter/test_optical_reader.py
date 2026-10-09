@@ -71,6 +71,41 @@ class OpticalReaderTests(unittest.TestCase):
         assert session.ingest(packets[1:])["complete"]
 
 
+    def test_corrupt_first_qr_is_skipped_allowing_valid_retransmission(self):
+        import json
+        from easychange.core.result import Result
+
+        packets=encode_result_chunks(
+            Result(True,"read",{"text":"r"*3000},sequence="QRECOVER01"))
+        assert len(packets) >= 2
+        forged=json.loads(packets[0])
+        forged["d"]="A"+forged["d"][1:]
+        # Preserve the old CRC: this packet is corrupted in transit.
+        collector=OpticalAssembler()
+        initial=collector.ingest([json.dumps(forged)])
+        self.assertIsNone(initial["sequence"])
+        self.assertEqual(initial["received"],0)
+        receipt=collector.ingest(packets)
+        self.assertTrue(receipt["complete"])
+        self.assertEqual(receipt["payload"]["data"]["text"],"r"*3000)
+
+    def test_corrupt_later_qr_does_not_poison_existing_assembly(self):
+        import json
+        from easychange.core.result import Result
+
+        packets=encode_result_chunks(
+            Result(True,"read",{"text":"abcdef"*500},sequence="QRECOVER02"))
+        assert len(packets)>=2
+        bad=json.loads(packets[1])
+        bad["d"]="!"+bad["d"][1:]
+        collector=OpticalAssembler()
+        first=collector.ingest([packets[0],json.dumps(bad)])
+        self.assertFalse(first["complete"])
+        self.assertEqual(first["received"],1)
+        full=collector.ingest(packets[1:])
+        self.assertTrue(full["complete"])
+        self.assertEqual(full["payload"]["data"]["text"],"abcdef"*500)
+
     def test_untrusted_header_requires_real_boolean_completion(self):
         import json
         from easychange.core.result import Result
