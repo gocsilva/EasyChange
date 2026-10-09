@@ -30,7 +30,7 @@ class OpticalAssembler:
                 if not isinstance(item,dict):continue
                 tag=str(item.get("p") or "")
                 if tag == "EC2H":
-                    if str(item.get("s") or "") == self.sequence and bool(item.get("f")):
+                    if str(item.get("s") or "") == self.sequence and item.get("f") is True:
                         self.header=item
                     continue
                 if tag!="EC2":continue
