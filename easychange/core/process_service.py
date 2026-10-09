@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -133,6 +134,7 @@ class ProcessService:
     LOG_TTL_SECONDS = 6 * 60 * 60
     SCRIPT_TTL_SECONDS = 7 * 24 * 60 * 60
     MAX_DURABLE_JOBS = 128
+    MAX_JOB_MANIFEST_BYTES = 8 * 1024 * 1024
     DEFAULT_MAX_RUNTIME_BYTES = 256 * 1024 * 1024
     JOB_HEARTBEAT_INTERVAL_SECONDS = 5
     STARTUP_RECONCILE_SYNC_LIMIT = 16
@@ -459,24 +461,29 @@ class ProcessService:
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
+        if len(payload) > self.MAX_JOB_MANIFEST_BYTES:
+            raise ValueError("JOB_MANIFEST_TOO_LARGE")
         with self._job_write_lock:
-            # Thread-specific temporary names avoid collisions between a
-            # demand-driven status call and background startup reconciliation.
-            temporary = target.with_name(
-                f"{target.name}.{threading.get_ident()}.tmp"
-            )
+            # This lock protects threads within this service. Separate
+            # EasyChange processes need unique staging paths as well.
+            temporary = None
             try:
-                with temporary.open("wb") as handle:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",dir=target.parent,prefix=target.name+".",
+                    suffix=".tmp",delete=False
+                ) as handle:
+                    temporary=Path(handle.name)
                     handle.write(payload)
                     if durable:
                         handle.flush()
                         os.fsync(handle.fileno())
                 temporary.replace(target)
             finally:
-                try:
-                    temporary.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                if temporary is not None:
+                    try:
+                        temporary.unlink(missing_ok=True)
+                    except OSError:
+                        pass
         return data
 
     def _read_job(self, job_id: str) -> dict | None:
@@ -484,8 +491,12 @@ class ProcessService:
         if not target.exists():
             return None
         try:
-            data = json.loads(target.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            with target.open("rb") as stream:
+                raw=stream.read(self.MAX_JOB_MANIFEST_BYTES+1)
+            if len(raw)>self.MAX_JOB_MANIFEST_BYTES:
+                return None
+            data = json.loads(raw)
+        except (OSError, ValueError, UnicodeError):
             return None
         return data if isinstance(data, dict) else None
 
