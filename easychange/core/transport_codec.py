@@ -33,6 +33,12 @@ def decode_command(packet: str, max_raw_bytes: int = 262144) -> tuple[str, dict]
     if expected_size < 0 or expected_size > int(max_raw_bytes):
         raise ValueError("EC1_Z1_SIZE_LIMIT")
     token = parts[3]
+    # A zlib stream of at most max_raw_bytes cannot legitimately exceed this
+    # generous compressed framing budget. Reject oversize input before
+    # allocating a decoded base64 buffer.
+    max_token_chars = 4 * ((int(max_raw_bytes) + 1024 + 2) // 3) + 8
+    if len(token) > max_token_chars:
+        raise ValueError("EC1_Z1_COMPRESSED_SIZE_LIMIT")
     if not token or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for char in token):
         raise ValueError("INVALID_EC1_Z1_BASE64URL")
     try:
