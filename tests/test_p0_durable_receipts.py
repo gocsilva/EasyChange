@@ -560,7 +560,7 @@ def test_active_result_store_record_survives_terminal_ttl_and_count_pressure(tmp
     assert retained["mutation"] is True
 
 
-def test_active_result_store_record_expires_only_after_active_ttl(tmp_path, monkeypatch):
+def test_active_result_store_record_remains_claimed_even_after_active_ttl(tmp_path, monkeypatch):
     import os
     import time
 
@@ -582,5 +582,11 @@ def test_active_result_store_record_expires_only_after_active_ttl(tmp_path, monk
     target.write_bytes(store._encode(value))
     os.utime(target, (old, old))
 
-    assert store.get(sequence) is None
-    assert not target.exists()
+    persisted=store.get(sequence)
+    assert persisted is not None
+    assert persisted["state"]=="RUNNING"
+    assert target.exists()
+    replay,acquired=store.claim_running(
+        sequence,"c"*64,":test-job",mutation=False)
+    assert acquired is False
+    assert replay["execution_id"]==persisted["execution_id"]
