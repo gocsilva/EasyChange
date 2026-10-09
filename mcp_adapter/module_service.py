@@ -88,6 +88,8 @@ def main(argv=None):
     parser.add_argument("--port",type=int,default=8784)
     parser.add_argument("--self-test",action="store_true")
     args=parser.parse_args(argv)
+    if not 1 <= args.port <= 65535:
+        raise ValueError("INVALID_PORT")
     if args.self_test:
         print(json.dumps(module_status()));return 0
     with ThreadingHTTPServer(("127.0.0.1",args.port),Handler) as server:
