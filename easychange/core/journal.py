@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import threading
 import zlib
 from dataclasses import asdict, dataclass
@@ -11,6 +13,8 @@ from pathlib import Path
 
 _BLOB_THRESHOLD_BYTES = 4096
 _BLOB_PREFIX = "@zblob:"
+_MAX_BLOB_COMPRESSED_BYTES = 64 * 1024 * 1024
+_MAX_BLOB_DECOMPRESSED_BYTES = 128 * 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -89,12 +93,27 @@ class Journal:
         raw = value.encode("utf-8")
         if len(raw) < _BLOB_THRESHOLD_BYTES:
             return value
+        if len(raw) > _MAX_BLOB_DECOMPRESSED_BYTES:
+            raise ValueError("JOURNAL_BLOB_DECOMPRESSED_TOO_LARGE")
         digest = hashlib.sha256(raw).hexdigest()
         target = self.blob_root / f"{digest}.zlib"
         if not target.exists():
-            temporary = target.with_suffix(".tmp")
-            temporary.write_bytes(zlib.compress(raw, level=6))
-            temporary.replace(target)
+            compressed = zlib.compress(raw, level=6)
+            if len(compressed) > _MAX_BLOB_COMPRESSED_BYTES:
+                raise ValueError("JOURNAL_BLOB_COMPRESSED_TOO_LARGE")
+            # Multiple writers can store the same digest simultaneously.
+            # Per-writer staging files prevent clobbered temporary snapshots.
+            fd, name = tempfile.mkstemp(
+                prefix=target.name + ".", suffix=".tmp", dir=self.blob_root)
+            temporary = Path(name)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(compressed)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
         return _BLOB_PREFIX + digest
 
     def _load_text(self, value: str | None) -> str | None:
@@ -104,7 +123,19 @@ class Journal:
         if not re_full_hash(digest):
             raise ValueError("Invalid journal blob reference")
         target = self.blob_root / f"{digest}.zlib"
-        raw = zlib.decompress(target.read_bytes())
+        with target.open("rb") as stream:
+            compressed = stream.read(_MAX_BLOB_COMPRESSED_BYTES + 1)
+        if len(compressed) > _MAX_BLOB_COMPRESSED_BYTES:
+            raise ValueError("JOURNAL_BLOB_COMPRESSED_TOO_LARGE")
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(compressed, _MAX_BLOB_DECOMPRESSED_BYTES + 1)
+        if len(raw) > _MAX_BLOB_DECOMPRESSED_BYTES or decoder.unconsumed_tail:
+            raise ValueError("JOURNAL_BLOB_DECOMPRESSED_TOO_LARGE")
+        raw += decoder.flush(_MAX_BLOB_DECOMPRESSED_BYTES + 1 - len(raw))
+        if len(raw) > _MAX_BLOB_DECOMPRESSED_BYTES:
+            raise ValueError("JOURNAL_BLOB_DECOMPRESSED_TOO_LARGE")
+        if not decoder.eof or decoder.unused_data:
+            raise ValueError("JOURNAL_BLOB_INVALID_STREAM")
         if hashlib.sha256(raw).hexdigest() != digest:
             raise ValueError("Journal blob hash mismatch")
         return raw.decode("utf-8")
