@@ -384,6 +384,31 @@ def test_disk_budget_never_uses_active_result_as_pressure_candidate(tmp_path, mo
 
 
 
+def test_maintenance_bounded_receipt_decoder_matches_canonical_store(tmp_path, monkeypatch):
+    import easychange.core.result_store as result_module
+
+    root=tmp_path/".easychange"/"results"
+    store=result_module.DurableResultStore(root)
+    sequence="QCANONICAL1"
+    store.mark_running(sequence,"d"*64,":mutation",mutation=True)
+    path=store._path(sequence)
+    maintenance=MaintenanceService(tmp_path)
+    record=maintenance._result_record(path)
+    assert record["state"]=="RUNNING"
+    assert record["sequence"]==sequence
+
+    before=path.read_bytes()
+    monkeypatch.setattr(result_module,"MAX_COMPRESSED_RECEIPT_BYTES",8)
+    monkeypatch.setattr(
+        result_module.DurableResultStore, "_decode",
+        lambda _data: (_ for _ in ()).throw(
+            AssertionError("oversized compressed receipt was decoded")))
+    # Invalid/oversized receipts must not be treated as disposable records.
+    assert maintenance._result_record(path)=={}
+    maintenance.automatic_cleanup(now=time.time()+10*24*3600)
+    assert path.read_bytes()==before
+
+
 def test_maintenance_never_erases_durable_receipts_after_ttl_or_under_pressure(tmp_path):
     from easychange.core.result_store import DurableResultStore
 
