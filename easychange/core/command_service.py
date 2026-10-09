@@ -458,6 +458,16 @@ class CommandService:
                     False, "ec", error="Sequence reused with different command",
                     code="SEQUENCE_CONFLICT", sequence=sequence,
                 )
+            if durable.get("state") == "DONE" and durable.get("result_expired") is True:
+                # The full result was compacted after TTL, but its durable
+                # sequence receipt still prohibits any second execution.
+                return Result(
+                    False, "ec",
+                    error="Result payload expired; sequence already executed",
+                    code="SEQUENCE_RESULT_EXPIRED", sequence=sequence,
+                    data={"state":"DONE","duplicate":True,
+                          "result_hash":durable.get("expired_result_hash")},
+                )
             if durable.get("state") == "DONE" and isinstance(durable.get("result"), dict):
                 replay = Result(**durable["result"])
                 replay.sequence = sequence
