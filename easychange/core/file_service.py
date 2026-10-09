@@ -369,15 +369,22 @@ class FileService:
     def exists(self, path: str) -> bool:
         return self.workspace.resolve(path).exists()
 
+    @staticmethod
+    def _hash_file_stream(path: Path) -> str:
+        digest=hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda:stream.read(1024*1024),b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     def hash(self, path: str) -> str:
-        return hashlib.sha256(self.workspace.resolve(path, must_exist=True).read_bytes()).hexdigest()
+        return self._hash_file_stream(self.workspace.resolve(path,must_exist=True))
 
     def delete(self, path: str) -> None:
         target = self.workspace.resolve(path, must_exist=True)
         relative = target.relative_to(self.workspace.root_path).as_posix()
-        raw = target.read_bytes()
+        actual = self._hash_file_stream(target)
         expected = self._baselines.get(relative)
-        actual = hashlib.sha256(raw).hexdigest()
         if expected and expected != actual: raise ExternalChangeError(relative, expected, actual)
         target.unlink()
         with self._guard: self._baselines.pop(relative, None)
@@ -390,7 +397,7 @@ class FileService:
 
     def remember(self, path: str, *, replace: bool = False) -> str:
         target = self.workspace.resolve(path, must_exist=True)
-        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        digest = self._hash_file_stream(target)
         relative = target.relative_to(self.workspace.root_path).as_posix()
         with self._guard:
             if replace or relative not in self._baselines: self._baselines[relative] = digest
