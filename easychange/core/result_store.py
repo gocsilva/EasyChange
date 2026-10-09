@@ -220,7 +220,13 @@ class DurableResultStore:
     def _active_record(value: dict[str, Any]) -> bool:
         state = str(value.get("state") or "").upper()
         execution = str(value.get("execution_state") or "").upper()
-        return state == "RUNNING" or execution in {"STARTED", "RUNNING"}
+        mutation = str(value.get("mutation_state") or "").upper()
+        # A mutation without a confirmed terminal outcome must not become
+        # executable again just because its result-delivery TTL elapsed.
+        uncertain_mutation = bool(value.get("mutation")) and mutation in {
+            "STARTED", "APPLIED", "FAILED", "NOT_STARTED", "",
+        }
+        return state == "RUNNING" or execution in {"STARTED", "RUNNING"} or uncertain_mutation
 
     def _cleanup(self) -> None:
         now = time.time()
