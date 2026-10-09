@@ -37,11 +37,21 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertTrue(collector.ingest([provisional])["complete"])
         self.assertEqual(collector.ingest([])["payload"]["data"],original["data"])
 
+        self.assertEqual(collector.header["h"],durable_digest)
+        self.assertEqual(collector.header["d"],1)
         final=json.loads(provisional)
         final.pop("d",None)
         final["n"]=len(packets)
-        with self.assertRaisesRegex(ValueError,"EC2_HEADER_HASH_MISMATCH"):
-            collector.ingest([json.dumps(final)])
+        # A mismatched final header must not poison the verified transfer
+        # or overwrite a legitimate provisional durable receipt.
+        self.assertTrue(collector.ingest([json.dumps(final)])["verified"])
+        self.assertEqual(collector.header["h"],durable_digest)
+        final["h"]=wire_digest
+        self.assertTrue(collector.ingest([json.dumps(final)])["verified"])
+        self.assertEqual(collector.header["h"],wire_digest)
+        # A delayed provisional QR must not downgrade a final EC2H receipt.
+        collector.ingest([provisional])
+        self.assertEqual(collector.header["h"],wire_digest)
 
     def test_foreign_sequence_does_not_mix(self):
         a=OpticalAssembler()
