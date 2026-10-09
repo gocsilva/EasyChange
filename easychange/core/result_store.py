@@ -311,7 +311,9 @@ class DurableResultStore:
             try:
                 stat = path.stat()
                 age = now - stat.st_mtime
-                if rank < self.max_results and age <= self.ttl_seconds:
+                if age <= self.ttl_seconds:
+                    # Recent receipts must survive even when the count limit
+                    # is exceeded; otherwise replay can run a recent command.
                     continue
                 try:
                     value = self._decode(self._read_compressed(path))
