@@ -325,8 +325,10 @@ class DurableResultStore:
                     # Preserve uncertain receipts; corruption must never turn
                     # an already-executed command into a new command.
                     continue
-                if self._active_record(value):
-                    # Active or uncertain execution is never pruned by TTL.
+                if self._active_record(value) or value.get("mutation") is True:
+                    # A completed mutation is also an idempotency tombstone.
+                    # Deleting it would let the same sequence execute again,
+                    # even though get() preserves expired receipts on replay.
                     continue
                 path.unlink(missing_ok=True)
             except OSError:
