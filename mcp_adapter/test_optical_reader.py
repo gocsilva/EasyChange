@@ -20,5 +20,56 @@ class OpticalReaderTests(unittest.TestCase):
         out=a.ingest(one+other)
         self.assertTrue(out["verified"])
         self.assertEqual(out["sequence"],"one")
+    def test_malformed_or_oversized_qr_does_not_claim_session(self):
+        import json
+        from unittest.mock import patch
+        from easychange.core.result import Result
+        from mcp_adapter import optical_reader
+
+        packets=encode_result_chunks(
+            Result(True,"read",{"text":"valid"*200},sequence="QOPTSAFE1"))
+        bad=json.loads(packets[0])
+        bad["n"]=10**9
+        assembly=OpticalAssembler()
+        with patch.object(optical_reader,"MAX_EC2_PACKET_TEXT_CHARS",16):
+            state=assembly.ingest([packets[0]])
+        self.assertIsNone(state["sequence"])
+        self.assertEqual(assembly.stored_chars,0)
+
+        state=assembly.ingest([json.dumps(bad)])
+        self.assertIsNone(state["sequence"])
+        self.assertEqual(assembly.chunks,{})
+        self.assertTrue(assembly.ingest(packets)["complete"])
+
+    def test_qr_assembly_byte_budget_keeps_last_good_frame_available(self):
+        from unittest.mock import patch
+        from mcp_adapter import optical_reader
+        from easychange.core.result import Result
+
+        packets=encode_result_chunks(
+            Result(True,"read",{"text":"v"*600},sequence="QOPTCAP1"))
+        session=OpticalAssembler()
+        with patch.object(optical_reader,"MAX_EC2_ASSEMBLY_TEXT_CHARS",8):
+            blocked=session.ingest(packets)
+        self.assertFalse(blocked["complete"])
+        self.assertIsNone(blocked["sequence"])
+        self.assertEqual(session.stored_chars,0)
+        done=session.ingest(packets)
+        self.assertTrue(done["complete"])
+        self.assertLessEqual(session.stored_chars,sum(len(packet) for packet in packets))
+
+    def test_equivalent_duplicate_qr_only_replaces_stored_bytes(self):
+        from easychange.core.result import Result
+        packets=encode_result_chunks(
+            Result(True,"read",{"text":"z"*1000},sequence="QOPTDUP1"))
+        session=OpticalAssembler()
+        session.ingest(packets[:1])
+        replacement=packets[0]+"  "
+        session.ingest([replacement])
+        self.assertEqual(session.stored_chars,len(replacement))
+        self.assertEqual(len(session.chunks),1)
+        assert session.ingest(packets[1:])["complete"]
+
+
 if __name__=="__main__":
     unittest.main()
