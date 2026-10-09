@@ -87,6 +87,53 @@ def test_ec2_fragment_crc_rejects_corruption():
         decode_result_chunks(corrupted)
 
 
+def test_ec2_rejects_untrusted_packet_counts_and_invalid_indexes():
+    import pytest
+    result=Result(True,"read",{"text":"ok"},sequence="QBADCOUNT")
+    original=encode_result_chunks(result)
+    packet=json.loads(original[0])
+    packet["n"]=10**9
+    with pytest.raises(ValueError, match="invalid optical packet count"):
+        decode_result_chunks([json.dumps(packet)])
+    packet["n"]=1
+    packet["i"]=10**9
+    with pytest.raises(ValueError, match="invalid optical chunk index"):
+        decode_result_chunks([json.dumps(packet)])
+    packet["i"]=True
+    with pytest.raises(ValueError, match="invalid optical chunk index"):
+        decode_result_chunks([json.dumps(packet)])
+
+
+def test_ec2_bounded_decompression_rejects_small_compressed_bomb(monkeypatch):
+    import pytest
+    import easychange.remote.optical_protocol as protocol
+
+    result=Result(True,"read",{"text":"Z"*6000},sequence="QBOMB001")
+    packets=encode_result_chunks(result)
+    monkeypatch.setattr(protocol,"MAX_EC2_RESULT_BYTES",1024)
+    with pytest.raises(ValueError,match="optical decompressed result too large"):
+        decode_result_chunks(packets)
+
+
+def test_ec2_rejects_trailing_or_incomplete_zlib_stream():
+    import base64
+    import binascii
+    import pytest
+
+    result=Result(True,"read",{"text":"ok"},sequence="QBADZLIB")
+    packets=encode_result_chunks(result)
+    assert len(packets)==1
+    original=json.loads(packets[0])
+    token=original["d"]
+    zipped=base64.urlsafe_b64decode(token+"="*(-len(token)%4))
+    for corrupt in (zipped+b"TRAILING", zipped[:-2]):
+        packet=dict(original)
+        packet["d"]=base64.urlsafe_b64encode(corrupt).decode("ascii").rstrip("=")
+        packet["x"]=f"{binascii.crc32(packet['d'].encode('ascii')) & 0xffffffff:08x}"
+        with pytest.raises(ValueError,match="invalid optical compressed stream"):
+            decode_result_chunks([json.dumps(packet)])
+
+
 def test_ec2_status_header_contains_small_definitive_manifest():
     import json
 
