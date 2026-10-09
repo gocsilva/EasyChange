@@ -124,6 +124,63 @@ def test_same_sequence_mutation_replays_receipt_without_duplicate_write(tmp_path
 
 
 
+def test_legacy_done_journal_without_result_cannot_reexecute_mutation(tmp_path, monkeypatch):
+    import hashlib
+
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        sequence="QLEGACYDONE1"
+        operation={"op":"operation","type":"replace_exact",
+                   "path":"missing.txt","old_text":"before","new_text":"after"}
+        canonical=json.dumps(
+            operation,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+        digest=hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        service.state_store.data["ec_results"]={
+            sequence:{"sha256":digest,"state":"DONE","mutation":True}}
+        def forbidden(*args, **kwargs):
+            raise AssertionError("unreplayable legacy mutation executed again")
+        monkeypatch.setattr(service,"_execute_structured",forbidden)
+        response=service.execute(":ec "+sequence+" :j1 "+json.dumps(operation))
+        assert response.code=="SEQUENCE_RESULT_MISSING"
+        assert service.result_store.get(sequence) is None
+    finally:
+        service.close()
+
+
+def test_legacy_replay_does_not_overwrite_competing_durable_claim(tmp_path, monkeypatch):
+    import hashlib
+    from easychange.core.result import Result
+
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        sequence="QLEGACYRACE1"
+        operation={"op":"operation","type":"replace_exact",
+                   "path":"missing.txt","old_text":"before","new_text":"after"}
+        canonical=json.dumps(
+            operation,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+        digest=hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        prior_result=Result(True,"replace_exact",data={"replayed":True})
+        service.state_store.data["ec_results"]={
+            sequence:{"sha256":digest,"state":"DONE","mutation":True,
+                      "result":prior_result.to_dict()}}
+        original=service.result_store.claim_running
+
+        def competing_claim(seq, command_hash, command, *, mutation):
+            first, acquired=original(seq,command_hash,command,mutation=mutation)
+            assert acquired
+            return original(seq,command_hash,command,mutation=mutation)
+
+        monkeypatch.setattr(service.result_store,"claim_running",competing_claim)
+        monkeypatch.setattr(service,"_execute_structured",
+                            lambda *a,**k: (_ for _ in ()).throw(
+                                AssertionError("legacy mutation executed")))
+        response=service.execute(":ec "+sequence+" :j1 "+json.dumps(operation))
+        assert response.code=="RUNNING"
+        assert service.result_store.get(sequence)["state"]=="RUNNING"
+    finally:
+        service.close()
+
+
 def test_header_cache_refreshes_after_other_process_replaces_receipt(tmp_path, monkeypatch):
     root=tmp_path / "results"
     first=DurableResultStore(root)
