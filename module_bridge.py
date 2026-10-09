@@ -1,5 +1,8 @@
 """Optional MCP hub client; independent process can join the authenticated MCP host."""
 from __future__ import annotations
+import errno
+import hashlib
+import tempfile
 import hmac
 import threading
 import json
@@ -23,6 +26,54 @@ _local_opener=build_opener(ProxyHandler({}),_NoRedirect)
 _runtime_token=""
 # Single consumer in this module process, including multiple MCPBridge objects.
 _processing_lock=threading.Lock()
+
+
+def _acquire_consumer_lease():
+    """One consumer per canonical module across all local processes.
+
+    Keep the OS lock file in place: unlinking it while leased creates a
+    second-inode race. A crashed process releases its file descriptor.
+    """
+    key=hashlib.sha256(
+        os.path.normcase(os.path.abspath(__file__)).encode("utf-8")
+    ).hexdigest()[:24]
+    path=os.path.join(tempfile.gettempdir(),"mcp-module-inbox-"+key+".lock")
+    flags=os.O_CREAT|os.O_RDWR|getattr(os,"O_BINARY",0)|getattr(os,"O_NOFOLLOW",0)
+    try:
+        fd=os.open(path,flags,0o600)
+    except OSError as exc:
+        raise RuntimeError("MCP_CONSUMER_LEASE_UNAVAILABLE") from exc
+    lease=os.fdopen(fd,"r+b",buffering=0)
+    try:
+        if os.name=="nt":
+            import msvcrt
+            if os.fstat(lease.fileno()).st_size==0:
+                lease.write(b"0")
+            lease.seek(0)
+            msvcrt.locking(lease.fileno(),msvcrt.LK_NBLCK,1)
+        else:
+            import fcntl
+            fcntl.flock(lease.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+        return lease
+    except OSError as exc:
+        lease.close()
+        if exc.errno in (errno.EACCES,errno.EAGAIN,errno.EDEADLK):
+            raise RuntimeError("MCP_CONSUMER_BUSY") from exc
+        raise RuntimeError("MCP_CONSUMER_LEASE_UNAVAILABLE") from exc
+
+
+def _release_consumer_lease(lease):
+    try:
+        if os.name=="nt":
+            import msvcrt
+            lease.seek(0)
+            msvcrt.locking(lease.fileno(),msvcrt.LK_UNLCK,1)
+        else:
+            import fcntl
+            fcntl.flock(lease.fileno(),fcntl.LOCK_UN)
+    finally:
+        lease.close()
+
 
 class MCPBridge:
     def __init__(self,token=None):
@@ -85,7 +136,8 @@ class MCPBridge:
         The safe default ACKs each message individually. An idempotent handler
         may opt into bounded batch ACK for performance; a crash before batch
         commit can replay several already-executed operations. No side effects
-        occur automatically when joining MCP. The lock is process-local.
+        occur automatically when joining MCP. An OS lease also blocks a
+        second local process from executing the same unacknowledged work.
         """
         if not callable(handler):
             raise ValueError("HANDLER_REQUIRED")
@@ -97,7 +149,9 @@ class MCPBridge:
             raise RuntimeError("MCP_NOT_CONNECTED_STANDALONE")
         if not _processing_lock.acquire(blocking=False):
             raise RuntimeError("MCP_CONSUMER_BUSY")
+        lease=None
         try:
+            lease=_acquire_consumer_lease()
             page=self.receive()
             if not isinstance(page,dict) or page.get("requires_ack") is not True:
                 raise ValueError("MCP_REQUIRES_NONDESTRUCTIVE_INBOX")
@@ -154,7 +208,11 @@ class MCPBridge:
             flush()
             return {"received":len(selected),"acknowledged":count,"deferred_id":None}
         finally:
-            _processing_lock.release()
+            try:
+                if lease is not None:
+                    _release_consumer_lease(lease)
+            finally:
+                _processing_lock.release()
 
     def receive_legacy(self):
         """Older destructive read for compatibility; avoid for reliable delivery."""
