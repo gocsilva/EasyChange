@@ -124,6 +124,47 @@ def test_same_sequence_mutation_replays_receipt_without_duplicate_write(tmp_path
 
 
 
+def test_compressed_receipt_file_read_is_bounded(tmp_path, monkeypatch):
+    import io
+    from pathlib import Path
+    import pytest
+    import easychange.core.result_store as result_module
+
+    target = tmp_path / "QBOUNDED.json.zlib"
+    observed = []
+    stream = io.BytesIO(b"X" * 30)
+    original_read = stream.read
+
+    def recorded_read(limit=-1):
+        observed.append(limit)
+        return original_read(limit)
+
+    monkeypatch.setattr(stream, "read", recorded_read)
+    monkeypatch.setattr(result_module, "MAX_COMPRESSED_RECEIPT_BYTES", 8)
+    monkeypatch.setattr(Path, "open", lambda self, mode="r": stream)
+    with pytest.raises(ValueError, match="RESULT_RECEIPT_COMPRESSED_TOO_LARGE"):
+        result_module.DurableResultStore._read_compressed(target)
+    assert observed == [9]
+
+
+def test_oversized_receipt_fails_closed_without_deleting_disk_evidence(tmp_path, monkeypatch):
+    import pytest
+    import easychange.core.result_store as result_module
+
+    store = DurableResultStore(tmp_path / "results")
+    sequence = "QCORRUPT1"
+    store.mark_running(sequence, "a" * 64, ":job", mutation=True)
+    target = store._path(sequence)
+    before = target.read_bytes()
+    assert len(before) > 8
+    monkeypatch.setattr(result_module, "MAX_COMPRESSED_RECEIPT_BYTES", 8)
+    with pytest.raises(RuntimeError, match="RESULT_RECEIPT_UNREADABLE"):
+        store.get(sequence)
+    assert target.read_bytes() == before
+    with pytest.raises(RuntimeError, match="RESULT_RECEIPT_UNREADABLE"):
+        store.mark_running(sequence, "a" * 64, ":job", mutation=True)
+
+
 def test_active_result_store_record_survives_terminal_ttl_and_count_pressure(tmp_path, monkeypatch):
     import os
     import time
