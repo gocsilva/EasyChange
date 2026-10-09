@@ -112,3 +112,40 @@ def test_health_refresh_does_not_update_destroyed_gui():
     namespace["status"]=closing_during_probe
     gui.refresh()
     gui.root.after.assert_not_called()
+
+
+def test_standalone_gui_launches_real_python_package_not_nested_script(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from unittest.mock import Mock, patch
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    tree=ast.parse(source)
+    service=next(node.value.value for node in tree.body
+                 if isinstance(node,ast.Assign) and any(
+                     isinstance(t,ast.Name) and t.id=="SERVICE"
+                     for t in node.targets))
+    module_id=next(node.value.value for node in tree.body
+                   if isinstance(node,ast.Assign) and any(
+                       isinstance(t,ast.Name) and t.id=="MODULE_ID"
+                       for t in node.targets))
+    gui_class=next(node for node in tree.body
+                   if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+    namespace={"ROOT":tmp_path,"SERVICE":service,"MODULE_ID":module_id,
+               "status":lambda:{"running":False},"subprocess":subprocess,
+               "sys":sys,"os":os}
+    exec(compile(ast.Module(body=[gui_class],type_ignores=[]),
+                 "<standalone-package-start>","exec"),namespace)
+    gui=object.__new__(namespace["ModuleGUI"])
+    gui.process=None
+    gui.message=Mock()
+    gui.root=Mock()
+    fake_process=Mock()
+    with patch("subprocess.Popen",return_value=fake_process) as launched:
+        gui.start()
+    args=launched.call_args.args[0]
+    assert args[1:]==["-B","-m",service[:-3].replace("/",".")]
+    assert launched.call_args.kwargs["cwd"]==tmp_path
+    assert gui.process is fake_process
