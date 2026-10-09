@@ -2,8 +2,13 @@
 from __future__ import annotations
 import binascii
 import json
+import threading
 import time
 from dataclasses import dataclass, field
+
+# OpenCV's detector is reusable across frames, but should not be shared
+# concurrently by unrelated HDMI readers.
+_qr_detectors = threading.local()
 
 from easychange.remote.optical_protocol import (
     decode_result_chunks, MAX_EC2_PACKETS,
@@ -142,7 +147,10 @@ class OpticalAssembler:
 def decode_hdmi_qr(frame) -> list[str]:
     """Use image pixels as the sole observational source; never access REMOTE_PC filesystem."""
     import cv2
-    detector=cv2.QRCodeDetector()
+    detector=getattr(_qr_detectors,"detector",None)
+    if detector is None:
+        detector=cv2.QRCodeDetector()
+        _qr_detectors.detector=detector
     ok, texts, _points, _rectified=detector.detectAndDecodeMulti(frame)
     decoded=[value for value in texts if value] if ok and texts else []
     if not decoded:
