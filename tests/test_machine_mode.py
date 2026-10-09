@@ -321,6 +321,51 @@ def test_optical_render_is_non_reentrant_and_incremental(tmp_path, monkeypatch):
 
 
 
+def test_optical_render_failure_does_not_leave_pending_ui_page(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    try:
+        window._optical_payloads = ["invalid-qr"]
+        window._optical_render_generation += 1
+        window._render_optical_page()
+        assert window._optical_render_pending is not None
+        def invalid_qr(_):
+            raise ValueError("QR_CAPACITY_EXCEEDED")
+        monkeypatch.setattr(window, "_build_optical_pixmap", invalid_qr)
+        window._render_next_optical_symbol()
+        assert window._optical_render_pending is None
+        assert window._optical_payloads == []
+        assert "EC2 RENDER ERROR: ValueError" in window.optical_status.text()
+        # The next valid page can start; failure does not poison the renderer.
+        monkeypatch.undo()
+        window._optical_payloads = ["valid-qr"]
+        window._render_optical_page()
+        _drain_optical(window, app)
+        assert window.machine_qr.pixmap() is not None
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_failed_optical_encoder_does_not_raise_in_gui_callback(tmp_path):
+    from concurrent.futures import Future
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    try:
+        future=Future()
+        future.set_exception(OverflowError("ENVELOPE_TOO_LARGE"))
+        window._optical_render_generation += 1
+        generation=window._optical_render_generation
+        window._optical_encode_future=future
+        window._poll_optical_bundle(generation,future)
+        assert window._optical_encode_future is None
+        assert "EC2 ENCODE ERROR: OverflowError" in window.optical_status.text()
+        assert window._optical_render_pending is None
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_optical_transport_controls_are_explicit_and_drive_timer(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
