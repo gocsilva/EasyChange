@@ -203,7 +203,7 @@ class MCPBridge:
                     flush()
                     return {"received":len(selected),"acknowledged":count,
                             "deferred_id":original_id}
-                accepted.append(original_id
+                accepted.append(original_id)
                 if len(accepted)>=ack_batch_size:
                     flush()
             flush()
