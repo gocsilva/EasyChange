@@ -118,7 +118,8 @@ class HumanTextService:
                 file_stat = self.path.stat()
                 if (
                     isinstance(value, dict)
-                    and int(value.get("bytes") or -1) == file_stat.st_size
+                    and value.get("bytes") is not None
+                    and int(value["bytes"]) == file_stat.st_size
                     and value.get("file_mtime_ns") == file_stat.st_mtime_ns
                     and value.get("file_inode") == file_stat.st_ino
                     and value.get("sha256")
