@@ -441,6 +441,12 @@ class DurableResultStore:
         execution_summary = _find_execution_summary(result)
         with self._lock:
             current = self.get(sequence) or {}
+            if current and current.get("command_hash") != command_hash:
+                raise ValueError("RESULT_SEQUENCE_COMMAND_HASH_MISMATCH")
+            if current.get("state") == "DONE":
+                # Duplicate delivery must never rewrite the terminal receipt,
+                # even when a retry arrives with a different result payload.
+                return current
             success = bool(result.get("ok"))
             lifecycle = None
             if isinstance(mutation_receipt, dict):
