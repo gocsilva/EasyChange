@@ -143,7 +143,7 @@ class TestHubRedirectBoundary(unittest.TestCase):
             self.assertEqual(client.peers()["self"],"easychange")
         opener.assert_called_once()
 
-        maximum=8_388_608+131_072
+        maximum=65_536
         oversized=MagicMock()
         oversized.read.return_value=b"x"*(maximum+1)
         oversized.__enter__.return_value=oversized
@@ -153,6 +153,33 @@ class TestHubRedirectBoundary(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,"MCP_HUB_RESPONSE_TOO_LARGE"):
                     client.peers()
         oversized.read.assert_called_once_with(maximum+1)
+
+    def test_endpoint_specific_hub_response_read_budgets(self):
+        import io
+        from unittest.mock import patch
+
+        client=module_bridge.MCPBridge(token="local-test-token")
+        scenarios=(
+            ("/v1/tools/call",8_388_608+131_072),
+            ("/v1/tools",2_097_152),
+            ("/v1/inbox",1_048_576),
+            ("/v1/inbox/peek",1_048_576),
+            ("/v1/send",65_536),
+            ("/v1/inbox/ack",65_536),
+            ("/v1/peers",65_536),
+        )
+        for path,maximum in scenarios:
+            with self.subTest(endpoint=path):
+                reads=[]
+                class Tracked(io.BytesIO):
+                    def read(self,size=-1):
+                        reads.append(size)
+                        return super().read(size)
+                healthy=Tracked(b'{"ok":true}')
+                with patch.object(module_bridge._local_opener,
+                                  "open",return_value=healthy):
+                    self.assertEqual(client._request(path),{"ok":True})
+                self.assertEqual(reads,[maximum+1])
 
     def test_hub_response_rejects_non_object_json(self):
         import io
