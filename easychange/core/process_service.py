@@ -7,6 +7,7 @@ import re
 import subprocess
 import shutil
 import tempfile
+from heapq import nlargest
 from itertools import islice
 import threading
 import time
@@ -358,23 +359,31 @@ class ProcessService:
         reconciled = 0
         orphaned = 0
         running = 0
+        available = 0
+        requested = (max(0,int(limit)) if limit is not None
+                     else self.STARTUP_RECONCILE_MAX_MANIFESTS)
+        # Retained mutation jobs can greatly exceed the active job budget.
+        # Select only the newest entries instead of sorting every manifest
+        # and blocking GUI construction on an unbounded file list.
+        def ranked_paths():
+            nonlocal available
+            for path in self.jobs_root.glob("*.json"):
+                available += 1
+                try:
+                    stamp = path.stat().st_mtime_ns
+                except OSError:
+                    stamp = 0
+                yield stamp, path
         try:
-            manifests = list(self.jobs_root.glob("*.json"))
+            if requested:
+                newest = nlargest(requested,ranked_paths(),
+                                  key=lambda item:item[0])
+                bounded = [path for _,path in newest]
+            else:
+                available = sum(1 for _ in self.jobs_root.glob("*.json"))
+                bounded = []
         except OSError:
-            manifests = []
-        try:
-            manifests.sort(
-                key=lambda path: path.stat().st_mtime_ns,
-                reverse=True,
-            )
-        except OSError:
-            pass
-
-        bounded = (
-            manifests[: max(0, int(limit))]
-            if limit is not None
-            else manifests[: self.STARTUP_RECONCILE_MAX_MANIFESTS]
-        )
+            bounded = []
         for index, path in enumerate(bounded):
             if background and self._reconcile_stop.is_set():
                 break
@@ -397,7 +406,7 @@ class ProcessService:
                 time.sleep(0.001)
         return {
             "checked": len(bounded),
-            "available": len(manifests),
+            "available": available,
             "reconciled": reconciled,
             "orphaned": orphaned,
             "running_unattached": running,
