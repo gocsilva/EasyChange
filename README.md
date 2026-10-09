@@ -117,3 +117,5 @@ python -m pytest
 ## Ponte MCP opcional e mensagens confirmadas
 
 EasyChange pode ser usado sem MCP, pela GUI própria. Quando ativado via `module.mdl`, a comunicação com outros módulos ocorre pela ponte central autenticada do MCP. `module_bridge.MCPBridge.receive()` lê sem remover; `ack(ids)` confirma somente mensagens processadas e `receive_legacy()` mantém compatibilidade antiga. As confirmações da ponte não substituem observação HDMI da operação física.
+
+Persistência: quando carregado pelo MCP real, o spool SQLite local do MCP preserva mensagens não confirmadas após reinício; o teste sem spool é volátil. O destinatário deve processar reentregas de forma idempotente. O spool guarda payload em texto claro; não envie segredos por mensagens.
