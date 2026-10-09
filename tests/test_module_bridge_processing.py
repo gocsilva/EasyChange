@@ -270,6 +270,27 @@ class TestProcessPending(unittest.TestCase):
         b.ack.return_value={"ok":True,"acked":2,"already_acked":[],"unknown":[]}
         self.assertEqual(b.process_pending(lambda _:True,ack_batch_size=2)["acknowledged"],2)
 
+
+    def test_handler_cannot_retarget_ack_by_mutating_id(self):
+        b=self.bridge([item(1),item(2)])
+        def handler(message):
+            if message["id"]==1:
+                message["id"]=2
+            return True
+        result=b.process_pending(handler,ack_batch_size=2)
+        self.assertEqual(result["acknowledged"],2)
+        b.ack.assert_called_once_with([1,2])
+
+    def test_handler_cannot_retarget_deferred_id(self):
+        b=self.bridge([item(7)])
+        def handler(message):
+            message["id"]=999
+            return False
+        result=b.process_pending(handler)
+        self.assertEqual(result["deferred_id"],7)
+        self.assertEqual(result["acknowledged"],0)
+        b.ack.assert_not_called()
+
     def test_standalone_without_hub_cannot_consume(self):
         b=MCPBridge(token="")
         with self.assertRaisesRegex(RuntimeError,"MCP_NOT_CONNECTED_STANDALONE"):
