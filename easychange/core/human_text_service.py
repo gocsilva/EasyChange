@@ -4,6 +4,7 @@ import codecs
 import hashlib
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -69,30 +70,46 @@ class HumanTextService:
             raise ValueError("HUMAN_TEXT_INVALID_UTF8") from exc
 
         lines = 0 if not saw_data else newlines + (0 if last_byte == b"\n" else 1)
+        stat = self.path.stat()
         return {
             "exists": True,
             "bytes": size,
+            "file_mtime_ns": stat.st_mtime_ns,
+            "file_inode": stat.st_ino,
             "chars": chars,
             "lines": lines,
             "sha256": digest.hexdigest(),
-            "updated_at": self.path.stat().st_mtime,
+            "updated_at": stat.st_mtime,
+            "file_mtime_ns": stat.st_mtime_ns,
+            "file_inode": stat.st_ino,
             "max_bytes": self.max_bytes,
             "complete": True,
         }
 
+    @staticmethod
+    def _atomic_write(path: Path, payload: bytes) -> None:
+        # Concurrent GUI and MCP writers must never share a temporary name.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def _write_meta(self, meta: dict[str, Any]) -> None:
-        temporary = self.meta_path.with_suffix(".json.tmp")
         payload = json.dumps(
             meta,
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
-        with temporary.open("wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, self.meta_path)
+        self._atomic_write(self.meta_path, payload)
 
     def info(self) -> dict[str, Any]:
         if self.path.exists() and self.meta_path.exists():
@@ -101,6 +118,8 @@ class HumanTextService:
                 if (
                     isinstance(value, dict)
                     and int(value.get("bytes") or -1) == self.path.stat().st_size
+                    and value.get("file_mtime_ns") == self.path.stat().st_mtime_ns
+                    and value.get("file_inode") == self.path.stat().st_ino
                     and value.get("sha256")
                 ):
                     return {
@@ -137,13 +156,8 @@ class HumanTextService:
                 f"HUMAN_TEXT_TOO_LARGE:{len(raw)}>{self.max_bytes}"
             )
 
-        temporary = self.path.with_suffix(".txt.tmp")
-        self.root.mkdir(parents=True, exist_ok=True)
-        with temporary.open("wb") as handle:
-            handle.write(raw)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, self.path)
+        self._atomic_write(self.path, raw)
+        stat = self.path.stat()
 
         meta = {
             "exists": True,
@@ -155,7 +169,9 @@ class HumanTextService:
                 else text.count("\n") + (0 if text.endswith("\n") else 1)
             ),
             "sha256": hashlib.sha256(raw).hexdigest(),
-            "updated_at": self.path.stat().st_mtime,
+            "updated_at": stat.st_mtime,
+            "file_mtime_ns": stat.st_mtime_ns,
+            "file_inode": stat.st_ino,
             "max_bytes": self.max_bytes,
             "complete": True,
         }
