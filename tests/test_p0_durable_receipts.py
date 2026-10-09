@@ -124,6 +124,39 @@ def test_same_sequence_mutation_replays_receipt_without_duplicate_write(tmp_path
 
 
 
+def test_header_cache_refreshes_after_other_process_replaces_receipt(tmp_path, monkeypatch):
+    root=tmp_path / "results"
+    first=DurableResultStore(root)
+    second=DurableResultStore(root)
+    seq="QHEADEREXT1"
+    receipt={"state":"COMMITTED","lifecycle_state":"APPLIED",
+             "mutation_id":"M-EXT","verified":True}
+    first.mark_running(seq, "a"*64, ":patch", mutation=True)
+    first.complete(
+        seq, "a"*64, ":patch",
+        {"ok":True,"command":"patch","data":{},"sequence":seq},
+        mutation_receipt=receipt)
+    cached=first.header(seq)
+    assert cached["mutation_state"]=="APPLIED"
+
+    def should_not_decode(_):
+        raise AssertionError("unchanged cached header should avoid decoding")
+    with monkeypatch.context() as ctx:
+        ctx.setattr(first, "_decode", should_not_decode)
+        assert first.header(seq)["mutation_state"]=="APPLIED"
+
+    updated={"state":"ROLLED_BACK","lifecycle_state":"ROLLED_BACK",
+             "mutation_id":"M-EXT","verified":True}
+    second.update_mutation_state(seq,"ROLLED_BACK",mutation_receipt=updated)
+    fresh=first.header(seq)
+    assert fresh["mutation_state"]=="ROLLED_BACK"
+    assert fresh["mutation_receipt"]["state"]=="ROLLED_BACK"
+    assert fresh["sha256"] == cached["sha256"]
+
+    second._path(seq).unlink()
+    assert first.header(seq) is None
+
+
 def test_cross_instance_durable_claim_has_single_execution_owner(tmp_path):
     import pytest
 
