@@ -203,10 +203,6 @@ def test_cleanup_retains_completed_mutation_claim_after_result_ttl(tmp_path, mon
     # previously allowed its idempotency receipt to be deleted.
     assert not store._active_record(store.get(mutation))
 
-    with monkeypatch.context() as local:
-        local.setattr("easychange.core.result_store.time.time",
-                      lambda: time.time()+61)
-        # Use a fixed numeric clock below to avoid recursive module patches.
     advanced=time.time()+61
     with monkeypatch.context() as local:
         local.setattr("easychange.core.result_store.time.time",lambda: advanced)
