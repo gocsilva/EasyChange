@@ -1,5 +1,6 @@
 """Read EC2 optical receipts from HDMI frames; do not infer execution success from HID."""
 from __future__ import annotations
+import binascii
 import json
 import time
 from dataclasses import dataclass, field
@@ -45,6 +46,17 @@ class OpticalAssembler:
                     continue
                 piece=item.get("d")
                 if not isinstance(piece,str) or len(piece)>MAX_EC2_TOKEN_CHARS:
+                    continue
+                # Reject corrupted HDMI QR fragments before reserving their
+                # index. A later valid retransmission must remain admissible.
+                try:
+                    piece_bytes=piece.encode("ascii")
+                except UnicodeEncodeError:
+                    continue
+                expected_crc=item.get("x")
+                if (not isinstance(expected_crc,str) or
+                        len(expected_crc)!=8 or
+                        f"{binascii.crc32(piece_bytes) & 0xffffffff:08x}"!=expected_crc):
                     continue
                 prev=self.chunks.get(index)
                 if prev is not None and prev!=raw:
