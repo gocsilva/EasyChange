@@ -16,6 +16,9 @@ import time
 import zlib
 
 
+MAX_COMPRESSED_RECEIPT_BYTES = 32 * 1024 * 1024
+
+
 def _find_execution_summary(value: Any, depth: int = 0) -> dict[str, Any] | None:
     if depth > 6:
         return None
@@ -128,10 +131,20 @@ class DurableResultStore:
         )
 
     @staticmethod
+    def _read_compressed(path: Path) -> bytes:
+        # read_bytes() allocates the complete file *before* _decode() can
+        # reject a corrupt oversized receipt. Bound disk reads at source.
+        with path.open("rb") as stream:
+            raw = stream.read(MAX_COMPRESSED_RECEIPT_BYTES + 1)
+        if len(raw) > MAX_COMPRESSED_RECEIPT_BYTES:
+            raise ValueError("RESULT_RECEIPT_COMPRESSED_TOO_LARGE")
+        return raw
+
+    @staticmethod
     def _decode(raw: bytes) -> dict[str, Any]:
         # Reject oversized compressed records and decompression bombs before
         # allocating an unbounded JSON document.
-        max_compressed = 32 * 1024 * 1024
+        max_compressed = MAX_COMPRESSED_RECEIPT_BYTES
         max_decoded = 64 * 1024 * 1024
         if len(raw) > max_compressed:
             raise ValueError("RESULT_RECEIPT_COMPRESSED_TOO_LARGE")
@@ -284,7 +297,7 @@ class DurableResultStore:
                 if rank < self.max_results and age <= self.ttl_seconds:
                     continue
                 try:
-                    value = self._decode(path.read_bytes())
+                    value = self._decode(self._read_compressed(path))
                 except (OSError, ValueError, json.JSONDecodeError, zlib.error):
                     # Preserve uncertain receipts; corruption must never turn
                     # an already-executed command into a new command.
@@ -302,7 +315,7 @@ class DurableResultStore:
             if not target.exists():
                 return None
             try:
-                value = self._decode(target.read_bytes())
+                value = self._decode(self._read_compressed(target))
             except (OSError, ValueError, json.JSONDecodeError, zlib.error) as exc:
                 # A present but unreadable receipt is not a never-seen command.
                 # Fail closed instead of allowing mark_running to execute again.
