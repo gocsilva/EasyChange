@@ -3,8 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
-from urllib.request import urlopen
+from urllib.request import ProxyHandler, HTTPRedirectHandler, build_opener
 from mcp_adapter.integration import module_status,capabilities
+
+class _NoLocalPeerRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+# ESP presence must not reach any remote host through a proxy or redirect.
+urlopen = build_opener(ProxyHandler({}), _NoLocalPeerRedirect()).open
 
 def esp_online():
     try:
