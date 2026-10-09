@@ -13,6 +13,40 @@ import easychange.core.inbound_transfer as inbound_module
 from easychange.core.inbound_transfer import InboundCommandStore, InboundTransferError
 
 
+@pytest.mark.parametrize("invalid", (True, False, 1.5, float("nan"), float("inf"),
+                                     None, "3.5", "9"*500))
+def test_inbound_numeric_fields_reject_invalid_types_with_protocol_code(tmp_path, invalid):
+    store=InboundCommandStore(tmp_path / "inbound")
+    meta={"raw_bytes":10,"compressed_bytes":8,
+          "chunk_count":1,"sha256":"a"*64}
+    for name,code in (
+            ("raw_bytes","INBOUND_RAW_SIZE_LIMIT"),
+            ("compressed_bytes","INBOUND_COMPRESSED_SIZE_LIMIT"),
+            ("chunk_count","INBOUND_CHUNK_COUNT_LIMIT")):
+        with pytest.raises(InboundTransferError) as exc:
+            store.begin("UNUMERIC1",**{**meta,name:invalid})
+        assert exc.value.code==code
+    with pytest.raises(InboundTransferError) as exc:
+        store.put_chunk("UNUMERIC1",index=invalid,
+                        crc32="00000000",token="AAAA")
+    assert exc.value.code=="INBOUND_CHUNK_INDEX_OUT_OF_RANGE"
+
+
+def test_inbound_numeric_fields_preserve_decimal_string_transport(tmp_path):
+    store=InboundCommandStore(tmp_path / "inbound")
+    receipt=store.begin("UNUMERIC2",raw_bytes="10",
+                        compressed_bytes="8",chunk_count="1",
+                        sha256="a"*64)
+    assert receipt["raw_bytes"]==10
+    assert receipt["compressed_bytes"]==8
+    assert receipt["chunk_count"]==1
+    # Valid decimal-string indexes reach CRC validation normally.
+    with pytest.raises(InboundTransferError) as exc:
+        store.put_chunk("UNUMERIC2",index="0",
+                        crc32="00000000",token="AQ")
+    assert exc.value.code=="INBOUND_CHUNK_CRC_MISMATCH"
+
+
 def test_oversized_base64_chunk_is_rejected_before_decoding(tmp_path):
     store=InboundCommandStore(tmp_path / "inbound")
     store.MAX_CHUNK_BYTES=64
