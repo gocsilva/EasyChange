@@ -121,6 +121,37 @@ class TestHubRedirectBoundary(unittest.TestCase):
         self.assertEqual(client._request.call_count,1)
         sleep.assert_not_called()
 
+    def test_hub_response_is_bounded_before_json_decode(self):
+        import io
+        from unittest.mock import Mock,patch
+
+        client=module_bridge.MCPBridge(token="local-test-token")
+        healthy=io.BytesIO(b'{"ok":true,"self":"easychange"}')
+        with patch.object(module_bridge._local_opener,"open",return_value=healthy) as opener:
+            self.assertEqual(client.peers()["self"],"easychange")
+        opener.assert_called_once()
+
+        maximum=8_388_608+131_072
+        oversized=Mock()
+        oversized.read.return_value=b"x"*(maximum+1)
+        oversized.__enter__=Mock(return_value=oversized)
+        oversized.__exit__=Mock(return_value=False)
+        with patch.object(module_bridge._local_opener,"open",return_value=oversized):
+            with patch.object(module_bridge.json,"loads",
+                              side_effect=AssertionError("unbounded parse")):
+                with self.assertRaisesRegex(ValueError,"MCP_HUB_RESPONSE_TOO_LARGE"):
+                    client.peers()
+        oversized.read.assert_called_once_with(maximum+1)
+
+    def test_hub_response_rejects_non_object_json(self):
+        import io
+        from unittest.mock import patch
+        client=module_bridge.MCPBridge(token="local-test-token")
+        with patch.object(module_bridge._local_opener,"open",
+                          return_value=io.BytesIO(b'[1,2,3]')):
+            with self.assertRaisesRegex(ValueError,"INVALID_MCP_HUB_RESPONSE"):
+                client.peers()
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
