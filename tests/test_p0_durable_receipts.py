@@ -394,6 +394,55 @@ def test_header_cache_refreshes_after_other_process_replaces_receipt(tmp_path, m
     assert first.header(seq) is None
 
 
+def test_payload_and_stream_caches_invalidate_after_other_process_compacts_receipt(tmp_path):
+    import os
+    import time
+
+    root=tmp_path/"receipts"
+    original=DurableResultStore(root)
+    maintenance=DurableResultStore(root)
+    sequence="QEXTERNALCOMPACT1"
+    original.mark_running(sequence,"a"*64,":state",mutation=False)
+    original.complete(
+        sequence,"a"*64,":state",
+        {"ok":True,"command":"state","data":{"text":"cache me"*1600},
+         "sequence":sequence})
+    assert original.result(sequence)["data"]["text"]
+    assert original.stream_meta(sequence) is not None
+    assert sequence in original._payload_cache
+    assert sequence in original._stream_cache
+
+    path=original._path(sequence)
+    old=time.time()-maintenance.ttl_seconds-120
+    os.utime(path,(old,old))
+    maintenance._cleanup()
+    assert maintenance.get(sequence)["result_expired"] is True
+    assert path.exists()
+
+    # The physical receipt is still present, but its atomic replacement
+    # must invalidate both caches, including the compressed stream cache.
+    assert original.stream_meta(sequence) is None
+    assert original.result(sequence) is None
+    assert sequence not in original._stream_cache
+    assert sequence not in original._payload_cache
+    assert original.header(sequence)["result_expired"] is True
+
+
+def test_payload_cache_survives_unchanged_receipt_without_redecode(tmp_path, monkeypatch):
+    original=DurableResultStore(tmp_path/"receipts")
+    sequence="QUNMODIFIED1"
+    original.mark_running(sequence,"a"*64,":state",mutation=False)
+    original.complete(sequence,"a"*64,":state",
+                      {"ok":True,"data":{"text":"keep"},"sequence":sequence})
+    assert original.result(sequence)["data"]["text"]=="keep"
+    with monkeypatch.context() as context:
+        context.setattr(original,"_decode",
+                        lambda data: (_ for _ in ()).throw(
+                            AssertionError("unchanged cache decoded receipt")))
+        assert original.result(sequence)["data"]["text"]=="keep"
+        assert original.stream_meta(sequence) is not None
+
+
 def test_cross_instance_durable_claim_has_single_execution_owner(tmp_path):
     import pytest
 
