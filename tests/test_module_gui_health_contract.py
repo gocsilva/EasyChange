@@ -67,3 +67,48 @@ def test_gui_local_opener_disables_proxy_and_redirects():
                  "<no-redirect>","exec"),namespace)
     no_redirect=namespace["_NoStandaloneRedirect"]()
     assert no_redirect.redirect_request(None,None,None,None,None,None) is None
+
+
+def test_health_refresh_does_not_update_destroyed_gui():
+    import threading
+    from unittest.mock import Mock
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    node=next(item for item in ast.parse(source).body
+              if isinstance(item,ast.ClassDef) and item.name=="ModuleGUI")
+
+    class InstantThread:
+        def __init__(self, *, target, daemon):
+            self.target=target
+        def start(self):
+            self.target()
+
+    namespace={"status":lambda:{"running":True},
+               "threading":type("Threading",(),{"Thread":InstantThread}),
+               "tk":type("Tk",(),{"TclError":RuntimeError})}
+    exec(compile(ast.Module(body=[node],type_ignores=[]),
+                 "<standalone-module-class>","exec"),namespace)
+    gui=object.__new__(namespace["ModuleGUI"])
+    gui.root=Mock()
+    gui.message=Mock()
+    gui.stop=Mock()
+    gui._closing=False
+    gui.refresh()
+    gui.root.after.assert_called_once()
+    callback=gui.root.after.call_args.args[1]
+    gui.close()
+    assert gui._closing is True
+    gui.stop.assert_called_once()
+    gui.root.destroy.assert_called_once()
+    callback()
+    gui.message.set.assert_not_called()
+
+    gui.root.after.reset_mock()
+    gui._closing=False
+    def closing_during_probe():
+        gui._closing=True
+        return {"running":True}
+    namespace["status"]=closing_during_probe
+    gui.refresh()
+    gui.root.after.assert_not_called()
