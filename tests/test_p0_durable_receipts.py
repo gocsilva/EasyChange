@@ -209,11 +209,20 @@ def test_cleanup_retains_completed_mutation_claim_after_result_ttl(tmp_path, mon
         store._cleanup()
 
     assert store._path(mutation).exists()
-    assert not store._path(readonly).exists()
+    assert store._path(readonly).exists()
     reopened=DurableResultStore(root,ttl_seconds=60)
     prior,acquired=reopened.claim_running(mutation,"a"*64,":patch",mutation=True)
     assert acquired is False
     assert prior["state"]=="DONE"
+    assert isinstance(prior["result"],dict)
+    # Non-mutating results may discard the large payload, but retain their
+    # sequence identity so replay cannot silently turn into new execution.
+    read_prior,read_acquired=reopened.claim_running(
+        readonly,"b"*64,":state",mutation=False)
+    assert read_acquired is False
+    assert read_prior["state"]=="DONE"
+    assert read_prior["result_expired"] is True
+    assert read_prior["result"] is None
 
 
 def test_optical_recovery_query_rejects_fractional_chunk_identifiers(tmp_path):
