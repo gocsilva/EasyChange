@@ -5,9 +5,11 @@ from pathlib import Path
 from typing import Any
 import base64
 import binascii
+from contextlib import contextmanager
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -63,6 +65,9 @@ class DurableResultStore:
             float(active_ttl_seconds),
         )
         self._lock = threading.RLock()
+        # A separate OS lock protects the read/claim/write transaction when
+        # multiple EasyChange processes share the same receipt directory.
+        self._claim_lock_path = self.root / ".receipt-claim.lock"
         self._writes_since_cleanup = 0
         self._last_cleanup_monotonic = time.monotonic()
         self._payload_cache: OrderedDict[str, tuple[float, bytes, str]] = OrderedDict()
@@ -76,6 +81,32 @@ class DurableResultStore:
         self._stream_cache_max_entries = 16
         self._stream_cache_max_bytes = 16 * 1024 * 1024
         self.root.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def _claim_lock(self):
+        # File locks are advisory: all claim writers must use this context.
+        # A single byte is locked for the full read-then-write transaction.
+        with self._lock:
+            with open(self._claim_lock_path, "a+b") as handle:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\\0")
+                    handle.flush()
+                handle.seek(0)
+                if sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    if sys.platform == "win32":
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _path(self, sequence: str) -> Path:
         safe = "".join(ch for ch in sequence.upper() if ch.isalnum() or ch in "_-")
@@ -294,7 +325,7 @@ class DurableResultStore:
             return value
 
     def mark_running(self, sequence: str, command_hash: str, command: str, *, mutation: bool) -> dict[str, Any]:
-        with self._lock:
+        with self._claim_lock:
             previous = self.get(sequence)
             if previous is not None:
                 if previous.get("command_hash") != command_hash:
