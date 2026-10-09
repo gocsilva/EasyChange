@@ -13,6 +13,18 @@ class TestHubRedirectBoundary(unittest.TestCase):
         # urllib may omit a ProxyHandler with no proxy mappings entirely.
         self.assertFalse(any(h.proxies for h in handlers))
 
+    def test_esp_presence_cannot_follow_redirect_or_inherited_proxy(self):
+        from urllib.request import ProxyHandler
+        import mcp_adapter.module_service as service
+
+        handlers=service.urlopen.__self__.handlers
+        self.assertFalse(any(isinstance(h,ProxyHandler) and h.proxies
+                             for h in handlers))
+        restricted=next(
+            h for h in handlers if isinstance(h,service._NoLocalPeerRedirect))
+        self.assertIsNone(restricted.redirect_request(
+            None,None,None,None,None,None))
+
     def test_esp_presence_requires_matching_service_identity(self):
         import io
         import json
