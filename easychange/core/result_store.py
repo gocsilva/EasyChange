@@ -7,6 +7,8 @@ import base64
 import binascii
 import hashlib
 import json
+import os
+import tempfile
 import threading
 import time
 import zlib
@@ -177,9 +179,18 @@ class DurableResultStore:
         return dict(base)
     def _write(self, sequence: str, value: dict[str, Any]) -> None:
         target = self._path(sequence)
-        temporary = target.with_suffix(target.suffix + ".tmp")
-        temporary.write_bytes(self._encode(value))
-        temporary.replace(target)
+        # Unique temp files avoid writers clobbering each other's staging file.
+        # fsync before replacement so a successful write has a durable payload.
+        fd, name = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=self.root)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(self._encode(value))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
         self._writes_since_cleanup += 1
         now = time.monotonic()
