@@ -78,3 +78,17 @@ def test_human_text_load_rejects_invalid_utf8_without_rewriting_file(tmp_path):
     with pytest.raises(ValueError,match="HUMAN_TEXT_INVALID_UTF8"):
         service.load()
     assert service.path.read_bytes()==b"invalid\xffbytes"
+
+
+def test_empty_buffer_metadata_is_cached_without_full_rescan(tmp_path, monkeypatch):
+    service=HumanTextService(tmp_path)
+    saved=service.save("")
+    assert saved["bytes"]==0
+    assert service.path.is_file()
+    with monkeypatch.context() as ctx:
+        ctx.setattr(service, "_scan_info",
+                    lambda: (_ for _ in ()).throw(
+                        AssertionError("empty buffer should use metadata cache")))
+        cached=service.info()
+    assert cached["bytes"]==0
+    assert cached["sha256"]==hashlib.sha256(b"").hexdigest()
