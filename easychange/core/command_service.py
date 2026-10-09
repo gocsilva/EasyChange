@@ -1816,7 +1816,9 @@ class CommandService:
                                     raise ValueError("CHUNK_INDEXES_REQUIRES_1_TO_16_ITEMS")
                                 indexes = []
                                 for raw_index in raw_indexes:
-                                    if isinstance(raw_index, bool):
+                                    if (type(raw_index) is not int and
+                                            not (isinstance(raw_index, str)
+                                                 and raw_index.strip().isdecimal())):
                                         raise ValueError("INVALID_CHUNK_INDEX")
                                     index = int(raw_index)
                                     if index < 0:
@@ -1844,7 +1846,12 @@ class CommandService:
                                 return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_CHUNK")
                         else:
                             try:
-                                chunk_index = int(query_item.get("chunk_index"))
+                                raw_index = query_item.get("chunk_index")
+                                if (type(raw_index) is not int and
+                                        not (isinstance(raw_index, str)
+                                             and raw_index.strip().isdecimal())):
+                                    raise ValueError("INVALID_CHUNK_INDEX")
+                                chunk_index = int(raw_index)
                                 packet = json.loads(
                                     encode_result_chunks(
                                         original_result, indexes=[chunk_index]
