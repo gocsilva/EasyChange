@@ -110,6 +110,42 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertTrue(full["complete"])
         self.assertEqual(full["payload"]["data"]["text"],expected)
 
+    def test_repeated_complete_carousel_decodes_only_once(self):
+        from unittest.mock import patch
+        from easychange.core.result import Result
+        from mcp_adapter import optical_reader
+        packets=encode_result_chunks(
+            Result(True,"read",{"value":"hello"*300},sequence="QCACHE01"))
+        assembly=OpticalAssembler()
+        with patch.object(optical_reader,"decode_result_chunks",
+                          wraps=optical_reader.decode_result_chunks) as decoder:
+            first=assembly.ingest(packets)
+            self.assertTrue(first["complete"])
+            for _ in range(20):
+                repeated=assembly.ingest(packets)
+                self.assertTrue(repeated["complete"])
+                self.assertIs(repeated["payload"],first["payload"])
+            decoder.assert_called_once_with(list(assembly.chunks.values()))
+
+    def test_mismatched_packet_manifest_cannot_poison_later_retransmission(self):
+        import json
+        from easychange.core.result import Result
+        import hashlib
+        sample="".join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(64))
+        packets=encode_result_chunks(
+            Result(True,"read",{"text":sample},sequence="QIDENT01"))
+        self.assertGreaterEqual(len(packets),2)
+        assembly=OpticalAssembler()
+        assembly.ingest(packets[:1])
+        corrupted=json.loads(packets[1])
+        corrupted["h"]="0"*16 if corrupted["h"]!="0"*16 else "1"*16
+        state=assembly.ingest([json.dumps(corrupted)])
+        self.assertFalse(state["complete"])
+        self.assertEqual(state["received"],1)
+        result=assembly.ingest(packets[1:])
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["payload"]["data"]["text"],sample)
+
     def test_untrusted_header_requires_real_boolean_completion(self):
         import json
         from easychange.core.result import Result
