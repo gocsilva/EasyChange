@@ -60,3 +60,21 @@ def test_failed_text_replace_preserves_existing_buffer(tmp_path):
             service.save("new content")
     assert service.load()=="old content"
     assert not list(service.root.glob(".*.tmp"))
+
+
+def test_human_text_load_rejects_overlong_data_with_bounded_read(tmp_path):
+    service=HumanTextService(tmp_path)
+    service.path.write_bytes(b"A"*200)
+    # Lower the per-instance budget in this isolated test.
+    service.max_bytes=16
+    with pytest.raises(ValueError,match="HUMAN_TEXT_EXCEEDS_CONFIGURED_LIMIT"):
+        service.load()
+    assert service.path.read_bytes()==b"A"*200
+
+
+def test_human_text_load_rejects_invalid_utf8_without_rewriting_file(tmp_path):
+    service=HumanTextService(tmp_path)
+    service.path.write_bytes(b"invalid\xffbytes")
+    with pytest.raises(ValueError,match="HUMAN_TEXT_INVALID_UTF8"):
+        service.load()
+    assert service.path.read_bytes()==b"invalid\xffbytes"
