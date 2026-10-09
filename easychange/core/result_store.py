@@ -218,6 +218,8 @@ class DurableResultStore:
             "return_code": value.get("return_code"),
             "payload_length": int(value.get("result_bytes") or 0),
             "sha256": value.get("result_hash"),
+            "result_expired": value.get("result_expired") is True,
+            "expired_result_hash": value.get("expired_result_hash"),
             "summary": value.get("summary"),
             "mutation_receipt": value.get("mutation_receipt"),
         }
