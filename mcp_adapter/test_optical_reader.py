@@ -97,6 +97,43 @@ class OpticalReaderTests(unittest.TestCase):
         receiver.ingest([durable])
         self.assertEqual(receiver.header["h"],final["h"])
 
+    def test_stale_qr_session_can_accept_a_new_transfer_without_mixing(self):
+        import hashlib
+        from mcp_adapter import optical_reader
+
+        sample="".join(hashlib.sha256(str(i).encode()).hexdigest()
+                       for i in range(80))
+        first=encode_result_chunks({"sequence":"OLD-QR","ok":True,
+                                    "data":{"text":sample}})
+        later=encode_result_chunks({"sequence":"NEW-QR","ok":True,
+                                    "data":{"text":"new result"}})
+        self.assertGreater(len(first),1)
+        session=OpticalAssembler()
+        session.ingest(first[:1])
+        blocked=session.ingest(later)
+        self.assertFalse(blocked["complete"])
+        self.assertEqual(blocked["sequence"],"OLD-QR")
+        session.updated_at-=optical_reader.MAX_EC2_ASSEMBLY_IDLE_SECONDS + 1
+        recovered=session.ingest(later)
+        self.assertTrue(recovered["verified"])
+        self.assertEqual(recovered["sequence"],"NEW-QR")
+        self.assertEqual(recovered["payload"]["data"]["text"],"new result")
+        self.assertEqual(session.stored_token_chars,
+                         sum(len(__import__("json").loads(raw)["d"])
+                             for raw in session.chunks.values()))
+
+    def test_idle_expiry_does_not_discard_last_result_on_empty_poll(self):
+        from mcp_adapter import optical_reader
+
+        session=OpticalAssembler()
+        frames=encode_result_chunks({"sequence":"DONE-QR","ok":True})
+        done=session.ingest(frames)
+        self.assertTrue(done["verified"])
+        session.updated_at-=optical_reader.MAX_EC2_ASSEMBLY_IDLE_SECONDS + 1
+        self.assertIs(session.ingest([])["payload"],done["payload"])
+        self.assertEqual(session.sequence,"DONE-QR")
+
+
     def test_foreign_sequence_does_not_mix(self):
         a=OpticalAssembler()
         one=encode_result_chunks({"sequence":"one","ok":True})
