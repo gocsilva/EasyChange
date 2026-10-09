@@ -77,3 +77,38 @@ def test_simultaneous_identical_snapshot_writers_have_unique_staging_paths(tmp_p
     assert len(set(temp_paths)) == 2
     assert journal._load_text(references[0]) == original
     assert not list(journal.blob_root.glob("*.tmp"))
+
+
+def test_untrusted_journal_jsonl_record_size_is_bounded_before_parsing(tmp_path, monkeypatch):
+    folder=tmp_path / ".easychange"
+    folder.mkdir()
+    path=folder / "journal.jsonl"
+    oversized='{"change_id":"CH1","description":"' + "x"*512 + '"}\n'
+    path.write_text(oversized,encoding="utf-8")
+    monkeypatch.setattr(journal_module,"_MAX_JOURNAL_RECORD_CHARS",128)
+    with patch.object(journal_module.json,"loads",
+                      side_effect=AssertionError("unbounded journal JSON parsed")) as loads:
+        with pytest.raises(ValueError,match="JOURNAL_RECORD_TOO_LARGE"):
+            Journal(path,"S1")
+    loads.assert_not_called()
+    assert path.read_text(encoding="utf-8")==oversized
+
+
+def test_untrusted_journal_jsonl_record_must_be_object(tmp_path):
+    path=tmp_path / ".easychange" / "journal.jsonl"
+    path.parent.mkdir()
+    path.write_text('[1,2,3]\n',encoding="utf-8")
+    with pytest.raises(ValueError,match="JOURNAL_RECORD_NOT_OBJECT"):
+        Journal(path,"S1")
+    assert path.read_text(encoding="utf-8")=='[1,2,3]\n'
+
+
+def test_journal_restart_still_recovers_small_valid_entry(tmp_path):
+    path=tmp_path / ".easychange" / "journal.jsonl"
+    first=Journal(path,"S1")
+    saved=first.record("write","hello.txt","before","after")
+    reopened=Journal(path,"S1")
+    assert reopened.count==1
+    recovered=reopened.get(saved.change_id)
+    assert recovered.before=="before"
+    assert recovered.after=="after"
