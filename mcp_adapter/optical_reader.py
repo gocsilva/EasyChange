@@ -100,7 +100,15 @@ class OpticalAssembler:
                 self.verified_payload=decode_result_chunks(list(self.chunks.values()))
             if self.header:
                 digest=str(self.header.get("h") or "")
-                if digest and digest[:16] != str(self.packet_identity[2] or ""):
+                # EC2H d=1 advertises the original durable receipt digest,
+                # whereas EC2 fragments hash the compact optical projection.
+                # Fragment SHA/CRC is still independently verified by decode.
+                # A final EC2H (without d=1) must match the wire digest.
+                provisional=(type(self.header.get("d")) is int
+                             and self.header.get("d")==1
+                             and self.header.get("n")==0)
+                if (digest and not provisional and
+                        digest[:16] != str(self.packet_identity[2] or "")):
                     raise ValueError("EC2_HEADER_HASH_MISMATCH")
             return {"complete":True,"verified":True,"sequence":self.sequence,
                     "payload":self.verified_payload,"packets":self.total}
