@@ -181,6 +181,45 @@ def test_legacy_replay_does_not_overwrite_competing_durable_claim(tmp_path, monk
         service.close()
 
 
+def test_cleanup_retains_completed_mutation_claim_after_result_ttl(tmp_path, monkeypatch):
+    import time
+
+    root=tmp_path / "receipts"
+    store=DurableResultStore(root, ttl_seconds=60)
+    mutation="QMUTTOMB1"
+    readonly="QREADOLD1"
+    store.mark_running(mutation,"a"*64,":patch",mutation=True)
+    store.complete(mutation,"a"*64,":patch",
+                   {"ok":True,"command":"patch","data":{},"sequence":mutation},
+                   mutation_receipt={"state":"COMMITTED",
+                                     "lifecycle_state":"VALIDATED",
+                                     "verified":True})
+    store.mark_running(readonly,"b"*64,":state",mutation=False)
+    store.complete(readonly,"b"*64,":state",
+                   {"ok":True,"command":"state","data":{},"sequence":readonly})
+    assert store.get(mutation)["state"]=="DONE"
+    assert store.get(mutation)["mutation_state"]=="VALIDATED"
+    # VALIDATED is a completed outcome, so the active-record guard alone
+    # previously allowed its idempotency receipt to be deleted.
+    assert not store._active_record(store.get(mutation))
+
+    with monkeypatch.context() as local:
+        local.setattr("easychange.core.result_store.time.time",
+                      lambda: time.time()+61)
+        # Use a fixed numeric clock below to avoid recursive module patches.
+    advanced=time.time()+61
+    with monkeypatch.context() as local:
+        local.setattr("easychange.core.result_store.time.time",lambda: advanced)
+        store._cleanup()
+
+    assert store._path(mutation).exists()
+    assert not store._path(readonly).exists()
+    reopened=DurableResultStore(root,ttl_seconds=60)
+    prior,acquired=reopened.claim_running(mutation,"a"*64,":patch",mutation=True)
+    assert acquired is False
+    assert prior["state"]=="DONE"
+
+
 def test_terminal_header_cache_preserves_expired_replay_tombstone(tmp_path, monkeypatch):
     import time
 
