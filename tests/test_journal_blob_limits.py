@@ -112,3 +112,31 @@ def test_journal_restart_still_recovers_small_valid_entry(tmp_path):
     recovered=reopened.get(saved.change_id)
     assert recovered.before=="before"
     assert recovered.after=="after"
+
+
+def test_simultaneous_journal_rewrites_do_not_collide_on_temp_path(tmp_path):
+    target=tmp_path/".easychange"/"journal.jsonl"
+    first=Journal(target,"S1")
+    saved=first.record("write","demo.txt","before","after")
+    second=Journal(target,"S1")
+    barrier=threading.Barrier(2)
+    temporary=[]
+    guard=threading.Lock()
+    original=journal_module.tempfile.mkstemp
+
+    def simultaneous(*args,**kwargs):
+        fd,name=original(*args,**kwargs)
+        with guard:
+            temporary.append(name)
+        barrier.wait(timeout=10)
+        return fd,name
+
+    with patch.object(journal_module.tempfile,"mkstemp",
+                      side_effect=simultaneous):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(lambda journal:journal._rewrite(),(first,second)))
+    restored=Journal(target,"S1")
+    assert restored.count==1
+    assert restored.get(saved.change_id).after=="after"
+    assert len(set(temporary))==2
+    assert not list(target.parent.glob(".journal.jsonl.*.tmp"))
