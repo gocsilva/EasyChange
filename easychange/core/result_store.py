@@ -79,7 +79,7 @@ class DurableResultStore:
         self._payload_cache_max_entries = 32
         self._payload_cache_max_bytes = 16 * 1024 * 1024
         self._terminal_header_cache: OrderedDict[
-            str, tuple[dict[str, Any], tuple[int, int, int, int], float]
+            str, tuple[dict[str, Any], tuple[int, int, int, int]]
         ] = OrderedDict()
         self._terminal_header_cache_max = 128
         self._stream_cache: OrderedDict[str, tuple[float, bytes, str, str, int]] = OrderedDict()
@@ -241,26 +241,16 @@ class DurableResultStore:
             self._terminal_header_cache.pop(sequence, None)
         while len(self._terminal_header_cache) >= self._terminal_header_cache_max:
             self._terminal_header_cache.popitem(last=False)
-        # File identity alone does not imply freshness: a terminal receipt
-        # can expire while it sits unchanged in this hot metadata cache.
-        stamp_time = float(
-            value.get("updated_at") or value.get("finished_at")
-            or value.get("started_at") or value.get("created_at") or 0.0
-        )
-        expires_at = (
-            float("inf") if self._active_record(value) or not stamp_time
-            else stamp_time + self.ttl_seconds
-        )
-        self._terminal_header_cache[sequence] = (base, stamp, expires_at)
+        # Completed receipts remain replay tombstones even past the nominal
+        # TTL. Cache by file version; cross-process deletion/replacement still
+        # invalidates the entry without repeatedly decoding aged receipts.
+        self._terminal_header_cache[sequence] = (base, stamp)
 
     def _terminal_header_cache_get(self, sequence: str) -> dict[str, Any] | None:
         entry = self._terminal_header_cache.get(sequence)
         if entry is None:
             return None
-        base, stamp, expires_at = entry
-        if time.time() > expires_at:
-            self._terminal_header_cache.pop(sequence, None)
-            return None
+        base, stamp = entry
         try:
             if self._receipt_stamp(self._path(sequence)) != stamp:
                 self._terminal_header_cache.pop(sequence, None)
