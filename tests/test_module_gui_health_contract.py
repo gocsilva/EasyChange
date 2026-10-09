@@ -94,6 +94,7 @@ def test_health_refresh_does_not_update_destroyed_gui():
     gui.message=Mock()
     gui.stop=Mock()
     gui._closing=False
+    gui._refresh_inflight=False
     gui.refresh()
     gui.root.after.assert_called_once()
     callback=gui.root.after.call_args.args[1]
@@ -195,3 +196,39 @@ def test_module_gui_startup_failures_stay_in_status_instead_of_raising(tmp_path)
         gui.start()
     assert gui.process is None
     assert "PermissionError" in gui.message.set.call_args.args[0]
+
+
+def test_repeated_gui_refreshes_are_single_flight(tmp_path):
+    import threading
+    from unittest.mock import Mock
+
+    src=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    klass=next(node for node in ast.parse(src).body
+               if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+    deferred=[]
+    class DeferredThread:
+        def __init__(self,*,target,daemon):
+            self.target=target
+        def start(self):
+            deferred.append(self.target)
+
+    ns={"status":lambda:{"running":True},
+        "threading":type("Deferred",(),{"Thread":DeferredThread}),
+        "tk":type("Tk",(),{"TclError":RuntimeError})}
+    exec(compile(ast.Module(body=[klass],type_ignores=[]),
+                 "<gui-refresh>","exec"),ns)
+    gui=object.__new__(ns["ModuleGUI"])
+    gui.root=Mock()
+    gui.message=Mock()
+    gui._closing=False
+    gui._refresh_inflight=False
+    gui.refresh()
+    for _ in range(100):
+        gui.refresh()
+    assert len(deferred)==1
+    assert gui._refresh_inflight is True
+    deferred.pop()()
+    assert gui._refresh_inflight is False
+    gui.refresh()
+    assert len(deferred)==1
