@@ -22,6 +22,7 @@ class OpticalAssembler:
     packet_identity: tuple | None = None
     verified_payload: dict | None = None
     header: dict = field(default_factory=dict)
+    pending_provisional_header: dict = field(default_factory=dict)
     updated_at: float = field(default_factory=time.monotonic)
 
     def ingest(self, payloads: list[str]) -> dict:
@@ -42,16 +43,25 @@ class OpticalAssembler:
                     provisional=(type(item.get("d")) is int and item.get("d")==1
                                  and type(item.get("n")) is int and item.get("n")==0
                                  and type(item.get("w")) is int and item.get("w")==0)
-                    if (self.packet_identity is not None
-                            and str(item.get("s") or "") == self.sequence
-                            and item.get("f") is True
-                            and isinstance(digest,str)
-                            and len(digest) in (16,64)
-                            and all(ch in "0123456789abcdef" for ch in digest)
+                    valid_header=(item.get("f") is True
+                                  and isinstance(digest,str)
+                                  and len(digest) in (16,64)
+                                  and all(ch in "0123456789abcdef" for ch in digest))
+                    if self.packet_identity is None:
+                        # A durable EC2H page may precede asynchronous QR
+                        # compression. Preserve one bounded untrusted header,
+                        # but do not claim a verified result or a sequence yet.
+                        if provisional and valid_header and item.get("s"):
+                            self.pending_provisional_header=item
+                        continue
+                    if (str(item.get("s") or "") == self.sequence
+                            and valid_header
                             and (provisional or digest[:16] == self.packet_identity[2])):
                         # Never replace a matching final header with an
                         # unverified provisional receipt arriving later.
-                        existing_final=(self.header and self.header.get("d") != 1)
+                        existing_final=(self.header and
+                                        not (type(self.header.get("d")) is int
+                                             and self.header.get("d")==1))
                         if not (provisional and existing_final):
                             self.header=item
                     continue
@@ -96,6 +106,11 @@ class OpticalAssembler:
                 if not self.sequence:
                     self.sequence=seq;self.total=count
                     self.packet_identity=identity
+                    # Bind an earlier provisional receipt only to the same
+                    # sequence; it never bypasses EC2 CRC/SHA verification.
+                    if self.pending_provisional_header.get("s")==seq:
+                        self.header=self.pending_provisional_header
+                    self.pending_provisional_header={}
                 self.chunks[index]=raw
                 self.stored_chars=candidate
                 self.stored_token_chars=token_candidate
