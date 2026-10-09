@@ -89,7 +89,10 @@ class ModuleGUI:
             return
         folder=ROOT/"logs";folder.mkdir(exist_ok=True)
         python=ROOT/".venv"/"Scripts"/"python.exe"
-        if not python.is_file():python=sys.executable
+        if not python.is_file():
+            python=ROOT/".venv"/"bin"/"python"
+        if not python.is_file():
+            python=sys.executable
         opts={"creationflags":getattr(subprocess,"CREATE_NO_WINDOW",0)}
         if os.name=="nt":
             si=subprocess.STARTUPINFO()
