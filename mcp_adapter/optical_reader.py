@@ -68,6 +68,8 @@ class OpticalAssembler:
                     piece_bytes=piece.encode("ascii")
                 except UnicodeEncodeError:
                     continue
+                if any(ch not in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for ch in piece_bytes):
+                    continue
                 expected_crc=item.get("x")
                 if (not isinstance(expected_crc,str) or
                         len(expected_crc)!=8 or
