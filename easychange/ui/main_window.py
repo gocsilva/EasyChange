@@ -848,15 +848,20 @@ class MainWindow(QMainWindow):
         if future is not self._optical_encode_future:
             return
         if not future.done():
+            # The frame dwell is hundreds of milliseconds; checking a
+            # background compression Future every 5ms wastes GUI wakeups.
             QTimer.singleShot(
-                5,
+                25,
                 lambda g=generation, f=future: self._poll_optical_bundle(g, f),
             )
             return
         self._optical_encode_future = None
         try:
             payloads, bundle_header = future.result()
-        except (ImportError, ValueError, RuntimeError):
+        except Exception as exc:
+            # A failed QR encoding must not propagate uncaught through Qt's
+            # event loop; preserve the already-painted durable EC2H receipt.
+            self.optical_status.setText(f"EC2 ENCODE ERROR: {type(exc).__name__}")
             self._set_optical_burst(False)
             return
         if generation != self._optical_render_generation:
@@ -943,7 +948,17 @@ class MainWindow(QMainWindow):
         pending["index"] = index
         if index < len(payloads):
             payload = payloads[index]
-            self._optical_pixmaps[payload] = self._build_optical_pixmap(payload)
+            try:
+                self._optical_pixmaps[payload] = self._build_optical_pixmap(payload)
+            except Exception as exc:
+                # Invalid/oversized optical data cannot wedge the incremental
+                # renderer or leave an endless pending page after a Qt callback.
+                self._optical_render_pending = None
+                self._optical_payloads = []
+                self._optical_timer.stop()
+                self._set_optical_burst(False)
+                self.optical_status.setText(f"EC2 RENDER ERROR: {type(exc).__name__}")
+                return
             pending["index"] = index + 1
             QTimer.singleShot(0, self._render_next_optical_symbol)
             return
