@@ -216,6 +216,27 @@ def test_cleanup_retains_completed_mutation_claim_after_result_ttl(tmp_path, mon
     assert prior["state"]=="DONE"
 
 
+def test_chunk_batches_reject_fractional_indexes_but_allow_decimal_strings(tmp_path):
+    import pytest
+
+    store=DurableResultStore(tmp_path / "receipt", ttl_seconds=600)
+    seq="QINDEXSAFE"
+    store.mark_running(seq,"a"*64,":state",mutation=False)
+    store.complete(seq,"a"*64,":state",
+                   {"ok":True,"command":"state",
+                    "data":{"payload":"A"*40000},"sequence":seq})
+    assert store.chunks(seq,["0"])["chunks"][0]["chunk_index"]==0
+    meta=store.stream_meta(seq)
+    assert meta["eligible"] is True
+    assert store.stream_chunks(seq,["0"])["chunks"][0]["chunk_index"]==0
+
+    for rejected in (0.9,1.9,True,False,None,{},[]):
+        with pytest.raises(ValueError,match="INVALID_RESULT_CHUNK_INDEX"):
+            store.chunks(seq,[rejected])
+        with pytest.raises(ValueError,match="INVALID_RESULT_STREAM_CHUNK_INDEX"):
+            store.stream_chunks(seq,[rejected])
+
+
 def test_terminal_header_cache_preserves_expired_replay_tombstone(tmp_path, monkeypatch):
     import time
 
