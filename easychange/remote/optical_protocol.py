@@ -294,6 +294,8 @@ def decode_result_chunks(payloads: list[str]) -> dict[str, Any]:
             data_bytes = data.encode("ascii")
         except UnicodeEncodeError as exc:
             raise ValueError("invalid optical chunk encoding") from exc
+        if any(char not in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for char in data_bytes):
+            raise ValueError("invalid optical base64url fragment")
         fragment_crc = chunk.get("x")
         if fragment_crc and f"{binascii.crc32(data_bytes) & 0xffffffff:08x}" != str(fragment_crc):
             raise ValueError(f"optical chunk crc32 mismatch: {index}")
