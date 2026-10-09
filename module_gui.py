@@ -74,7 +74,18 @@ class ModuleGUI:
                 if self._closing:
                     return
                 def update():
-                    if not self._closing:
+                    if self._closing:
+                        return
+                    owned=self.process
+                    if (not report["running"] and owned is not None
+                            and owned.poll() is None):
+                        # 700 ms is not enough for a cold Python service.
+                        # Keep polling at low rate until it answers /health
+                        # or the owned process exits; do not spawn a thread
+                        # for every missed readiness check.
+                        self.message.set("Serviço iniciando; aguardando /health...")
+                        self.root.after(1600,self.refresh)
+                    else:
                         self.message.set(
                             "Serviço ativo" if report["running"] else "Serviço parado")
                 try:
