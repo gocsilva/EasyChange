@@ -240,17 +240,10 @@ class MaintenanceService:
         """
         candidates: list[tuple[float, Path, str]] = []
 
-        results_root = self.easy_root / "results"
-        try:
-            for path in results_root.glob("Q*.json.zlib"):
-                # Active durable execution truth is not disposable pressure.
-                # Deleting it can turn an already-started mutation/job into an
-                # apparently new request after restart.
-                if self._active_result(path):
-                    continue
-                candidates.append((self._mtime(path), path, "results_pressure"))
-        except OSError:
-            pass
+        # Durable Q* receipt identities are never disposable pressure.
+        # Even a terminal or unreadable receipt prevents duplicate execution
+        # after restart. DurableResultStore may compact old *payloads* to
+        # tombstones, but this cleanup must not remove the receipt itself.
 
         for path in self._evidence_dirs():
             candidates.append((self._mtime(path), path, "evidence_pressure"))
@@ -423,34 +416,11 @@ class MaintenanceService:
                 if age > self.TEMP_TTL_SECONDS:
                     self._remove(path, report, "sidecar_temp", dry_run=dry_run)
 
-        # Durable results: mirror DurableResultStore semantics. Active
-        # execution receipts live on the longer active TTL and never consume
-        # the terminal LRU budget.
-        results_root = self.easy_root / "results"
-        try:
-            results = sorted(
-                results_root.glob("Q*.json.zlib"),
-                key=lambda path: path.stat().st_mtime,
-                reverse=True,
-            )
-        except OSError:
-            results = []
-        terminal_position = 0
-        for path in results:
-            try:
-                age = now - path.stat().st_mtime
-            except OSError:
-                continue
-            record = self._result_record(path)
-            active = self._result_is_active_record(record)
-            ttl = self._result_retention_seconds(record, active=active)
-            if active:
-                if age > ttl:
-                    self._remove(path, report, "active_results_stale", dry_run=dry_run)
-                continue
-            if terminal_position >= self.MAX_RESULTS or age > ttl:
-                self._remove(path, report, "results", dry_run=dry_run)
-            terminal_position += 1
+        # Never remove durable result receipts by TTL or LRU. Sequence IDs
+        # must remain claimed across process restarts, including after old
+        # results expire and when receipt contents are damaged. The result
+        # store owns safe payload compaction; its tombstones are evidence.
+        # This maintenance pass can still prune jobs, logs, temp and evidence.
 
         # Jobs: preserve RUNNING jobs; terminal/stale jobs are bounded.
         jobs_root = self.easy_root / "jobs"
