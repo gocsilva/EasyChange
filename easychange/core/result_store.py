@@ -220,12 +220,11 @@ class DurableResultStore:
                 try:
                     value = self._decode(path.read_bytes())
                 except (OSError, ValueError, json.JSONDecodeError, zlib.error):
-                    if age > self.ttl_seconds or rank >= self.max_results:
-                        path.unlink(missing_ok=True)
+                    # Preserve uncertain receipts; corruption must never turn
+                    # an already-executed command into a new command.
                     continue
                 if self._active_record(value):
-                    if age > self.active_ttl_seconds:
-                        path.unlink(missing_ok=True)
+                    # Active or uncertain execution is never pruned by TTL.
                     continue
                 path.unlink(missing_ok=True)
             except OSError:
