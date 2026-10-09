@@ -79,21 +79,20 @@ class MCPBridge:
         """Confirm successful processing. Repeated ACKs are idempotent."""
         return self._request("/v1/inbox/ack",{"ids":ids})
 
-    def process_pending(self, handler, *, limit=20):
-        """Process a bounded batch, acknowledging each item ONLY on explicit success.
+    def process_pending(self, handler, *, limit=20, ack_batch_size=1):
+        """Opt-in callback processing. ACK only after explicit True.
 
-        Opt-in pull API: merely attaching to MCP never executes a queued
-        message or any device action.  The caller owns topic authorization,
-        side-effect idempotency and error recovery.  Return exactly True from
-        handler(message) to confirm success; False/None defers the item. A
-        handler exception or an uncertain ACK propagates without an auto-retry.
+        The safe default ACKs each message individually. An idempotent handler
+        may opt into bounded batch ACK for performance; a crash before batch
+        commit can replay several already-executed operations. No side effects
+        occur automatically when joining MCP. The lock is process-local.
         """
         if not callable(handler):
             raise ValueError("HANDLER_REQUIRED")
-        # receive() currently uses the MCP default 20-message peek.  Never
-        # claim to process more messages than the page actually retrieves.
         if type(limit) is not int or not 1<=limit<=20:
             raise ValueError("INVALID_LIMIT")
+        if type(ack_batch_size) is not int or not 1<=ack_batch_size<=20:
+            raise ValueError("INVALID_ACK_BATCH_SIZE")
         if not self.connected:
             raise RuntimeError("MCP_NOT_CONNECTED_STANDALONE")
         if not _processing_lock.acquire(blocking=False):
@@ -106,8 +105,6 @@ class MCPBridge:
             if not isinstance(messages,list):
                 raise ValueError("INVALID_MCP_INBOX")
             selected=messages[:limit]
-            # Verify the entire page BEFORE executing the first side effect.
-            # Corrupted or duplicated IDs must not cause two dispatches.
             unique=set()
             for message in selected:
                 if (not isinstance(message,dict) or
@@ -117,24 +114,44 @@ class MCPBridge:
                     raise ValueError("DUPLICATE_MCP_INBOX_ID")
                 unique.add(message["id"])
             count=0
-            for message in selected:
-                if handler(message) is not True:
-                    return {"received":len(selected),"acknowledged":count,
-                            "deferred_id":message["id"]}
-                receipt=self.ack([message["id"]])
+            accepted=[]
+            def flush():
+                nonlocal count
+                if not accepted:
+                    return
+                receipt=self.ack(list(accepted))
                 if not isinstance(receipt,dict) or receipt.get("ok") is not True:
                     raise RuntimeError("MCP_ACK_UNCONFIRMED")
                 acked=receipt.get("acked")
                 already=receipt.get("already_acked",[])
                 unknown=receipt.get("unknown",[])
                 if (type(acked) is not int or
+                        not 0<=acked<=len(accepted) or
                         not isinstance(already,list) or
-                        not isinstance(unknown,list) or
-                        message["id"] in unknown or
-                        not ((acked==1 and message["id"] not in already) or
-                             (acked==0 and message["id"] in already))):
+                        not isinstance(unknown,list) or unknown or
+                        any(type(item) is not int or item not in accepted
+                            for item in already) or
+                        len(set(already))!=len(already) or
+                        acked+len(already)!=len(accepted)):
                     raise RuntimeError("MCP_ACK_UNCONFIRMED")
-                count+=1
+                count+=len(accepted)
+                accepted.clear()
+            for message in selected:
+                try:
+                    successful=handler(message) is True
+                except Exception:
+                    # Flush any prior successful operations, never the failing
+                    # message. If ACK fails its uncertainty takes precedence.
+                    flush()
+                    raise
+                if not successful:
+                    flush()
+                    return {"received":len(selected),"acknowledged":count,
+                            "deferred_id":message["id"]}
+                accepted.append(message["id"])
+                if len(accepted)>=ack_batch_size:
+                    flush()
+            flush()
             return {"received":len(selected),"acknowledged":count,"deferred_id":None}
         finally:
             _processing_lock.release()

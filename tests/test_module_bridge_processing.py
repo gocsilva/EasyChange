@@ -188,6 +188,88 @@ class TestProcessPending(unittest.TestCase):
         b.ack.assert_called_once_with([1])
         b.receive.assert_called_once()
 
+    def test_opt_in_batch_ack_combines_only_successful_messages(self):
+        b=self.bridge([item(i) for i in range(1,7)])
+        result=b.process_pending(lambda _:True,ack_batch_size=4)
+        self.assertEqual(result["acknowledged"],6)
+        self.assertEqual(b.ack.call_args_list,[
+            unittest.mock.call([1,2,3,4]),unittest.mock.call([5,6])])
+
+    def test_opt_in_batch_ack_flushes_before_deferred_item(self):
+        b=self.bridge([item(i) for i in range(1,7)])
+        observed=[]
+        def handler(msg):
+            observed.append(msg["id"])
+            return msg["id"]!=4
+        result=b.process_pending(handler,ack_batch_size=5)
+        self.assertEqual(observed,[1,2,3,4])
+        self.assertEqual(result["acknowledged"],3)
+        self.assertEqual(result["deferred_id"],4)
+        b.ack.assert_called_once_with([1,2,3])
+
+    def test_opt_in_batch_ack_flushes_completed_work_on_callback_exception(self):
+        b=self.bridge([item(i) for i in range(1,5)])
+        def handler(msg):
+            if msg["id"]==3: raise RuntimeError("BATCH_HANDLER_FAILED")
+            return True
+        with self.assertRaisesRegex(RuntimeError,"BATCH_HANDLER_FAILED"):
+            b.process_pending(handler,ack_batch_size=4)
+        b.ack.assert_called_once_with([1,2])
+
+    def test_opt_in_batch_ack_strictly_validates_receipt(self):
+        b=self.bridge([item(1),item(2)])
+        b.ack.side_effect=None
+        b.ack.return_value={"ok":True,"acked":2,
+                            "already_acked":[1],"unknown":[]}
+        with self.assertRaisesRegex(RuntimeError,"MCP_ACK_UNCONFIRMED"):
+            b.process_pending(lambda _:True,ack_batch_size=2)
+        b.ack.assert_called_once_with([1,2])
+
+    def test_ack_batch_size_rejects_invalid_numbers_without_network(self):
+        b=self.bridge([item(1)])
+        for n in (0,21,True,-1,1.2,"4"):
+            with self.subTest(n=n):
+                with self.assertRaisesRegex(ValueError,"INVALID_ACK_BATCH_SIZE"):
+                    b.process_pending(lambda _:True,ack_batch_size=n)
+        b.receive.assert_not_called()
+
+    def test_opt_in_batch_ack_accepts_partial_replay_receipt(self):
+        b=self.bridge([item(1),item(2)])
+        b.ack.side_effect=None
+        b.ack.return_value={"ok":True,"acked":1,
+                            "already_acked":[1],"unknown":[]}
+        result=b.process_pending(lambda _:True,ack_batch_size=2)
+        self.assertEqual(result["acknowledged"],2)
+        b.ack.assert_called_once_with([1,2])
+
+    def test_opt_in_batch_ack_rejects_unknown_ids(self):
+        b=self.bridge([item(1),item(2)])
+        b.ack.side_effect=None
+        b.ack.return_value={"ok":True,"acked":1,
+                            "already_acked":[],"unknown":[2]}
+        with self.assertRaisesRegex(RuntimeError,"MCP_ACK_UNCONFIRMED"):
+            b.process_pending(lambda _:True,ack_batch_size=2)
+        b.ack.assert_called_once_with([1,2])
+
+    def test_opt_in_batch_ack_timeout_preserves_uncertainty(self):
+        b=self.bridge([item(1),item(2),item(3)])
+        b.ack.side_effect=TimeoutError("ACK_BATCH_RESPONSE_LOST")
+        observed=[]
+        with self.assertRaisesRegex(TimeoutError,"ACK_BATCH_RESPONSE_LOST"):
+            b.process_pending(lambda x: observed.append(x["id"]) or True,
+                              ack_batch_size=2)
+        self.assertEqual(observed,[1,2])
+        b.ack.assert_called_once_with([1,2])
+
+    def test_opt_in_batch_ack_releases_lock_after_error(self):
+        b=self.bridge([item(1),item(2)])
+        b.ack.side_effect=TimeoutError("FIRST_ACK_LOST")
+        with self.assertRaisesRegex(TimeoutError,"FIRST_ACK_LOST"):
+            b.process_pending(lambda _:True,ack_batch_size=2)
+        b.ack.side_effect=None
+        b.ack.return_value={"ok":True,"acked":2,"already_acked":[],"unknown":[]}
+        self.assertEqual(b.process_pending(lambda _:True,ack_batch_size=2)["acknowledged"],2)
+
     def test_standalone_without_hub_cannot_consume(self):
         b=MCPBridge(token="")
         with self.assertRaisesRegex(RuntimeError,"MCP_NOT_CONNECTED_STANDALONE"):

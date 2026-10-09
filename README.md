@@ -127,3 +127,7 @@ Persistência: quando carregado pelo MCP real, o spool SQLite local do MCP prese
 O código e os testes ficam nesta **única versão oficial do projeto na branch `main`**; o MCP permanece a ponte central e o módulo continua independente em modo standalone.
 
 HTTP redirects and proxies are disabled for this local authenticated channel. Handlers must be idempotent across separate processes; the in-process consumer lock is not a distributed lock.
+
+### ACK em lote opcional na ponte MCP
+
+O `MCPBridge.process_pending(handler, limit=20, ack_batch_size=1)` continua confirmando **cada mensagem individualmente por padrao**. Para handlers explicitamente autorizados e idempotentes, `ack_batch_size=2..20` reduz chamadas HTTP e transacoes SQLite ao agrupar somente IDs cujos callbacks retornaram exatamente `True`. Em False ou excecao do handler, tenta confirmar apenas sucessos anteriores; em ACK desconhecido/contraditorio ou timeout, propaga a incerteza e nao reexecuta efeitos automaticamente. Um crash antes de gravar a confirmacao de lote pode reentregar todos os efeitos feitos desde o ultimo ACK; nunca use lote para comandos fisicos ou operacoes nao idempotentes sem garantias proprias de negocio.
