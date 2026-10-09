@@ -15,6 +15,7 @@ _BLOB_THRESHOLD_BYTES = 4096
 _BLOB_PREFIX = "@zblob:"
 _MAX_BLOB_COMPRESSED_BYTES = 64 * 1024 * 1024
 _MAX_BLOB_DECOMPRESSED_BYTES = 128 * 1024 * 1024
+_MAX_JOURNAL_RECORD_CHARS = 16 * 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -63,9 +64,19 @@ class Journal:
                 stream = None
             if stream is not None:
                 with stream:
-                    for line in stream:
+                    # Bound each JSONL entry before parsing. An oversized or
+                    # truncated record must not consume unbounded memory or
+                    # silently erase journal truth from the recovered view.
+                    while True:
+                        line = stream.readline(_MAX_JOURNAL_RECORD_CHARS + 1)
+                        if not line:
+                            break
+                        if len(line) > _MAX_JOURNAL_RECORD_CHARS:
+                            raise ValueError("JOURNAL_RECORD_TOO_LARGE")
                         try:
                             value = json.loads(line)
+                            if not isinstance(value, dict):
+                                raise ValueError("JOURNAL_RECORD_NOT_OBJECT")
                             if value.get("type") == "meta":
                                 self._counter = max(self._counter, int(value.get("counter", 0)))
                                 self._redo = [
@@ -75,7 +86,14 @@ class Journal:
                                 ]
                                 continue
                             entry = self._compact_from_serialized(value)
-                        except (json.JSONDecodeError, TypeError, KeyError, OSError, ValueError):
+                        except (json.JSONDecodeError, TypeError, KeyError, OSError) as exc:
+                            # Bad legacy entries are kept on disk for later
+                            # analysis; no entry can be discarded because of
+                            # an untrusted payload's massive size.
+                            continue
+                        except ValueError as exc:
+                            if str(exc) == "JOURNAL_RECORD_NOT_OBJECT":
+                                raise
                             continue
                         self._entries.append(entry)
                         try:
