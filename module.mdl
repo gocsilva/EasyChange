@@ -20,7 +20,8 @@
       "/health",
       "/status",
       "/capabilities",
-      "/peers"
+      "/peers",
+      "/hub"
     ],
     "post": []
   }

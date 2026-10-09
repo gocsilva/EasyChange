@@ -16,7 +16,41 @@ def esp_online():
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*args):
         pass
+    def do_POST(self):
+        if self.path not in ("/v1/attach","/v1/detach"):
+            return self.send(404,{"error":"NOT_FOUND"})
+        if self.headers.get("Origin"):
+            return self.send(403,{"error":"BROWSER_ORIGIN_NOT_ALLOWED"})
+        if self.headers.get("Content-Type","").split(";")[0].strip().lower()!="application/json":
+            return self.send(415,{"error":"JSON_REQUIRED"})
+        try:
+            size=int(self.headers.get("Content-Length","0"))
+            if not 0<size<=512:
+                return self.send(413,{"error":"PAYLOAD_TOO_LARGE"})
+            request=json.loads(self.rfile.read(size))
+            if not isinstance(request,dict):
+                raise ValueError("ATTACH_BODY_REQUIRED")
+            from module_bridge import attach_hub,detach_hub
+            token=request.get("token")
+            if self.path=="/v1/attach":
+                return self.send(200,attach_hub(token,"easychange"))
+            return self.send(200,detach_hub(token))
+        except (ValueError,TypeError,PermissionError) as exc:
+            return self.send(403,{"error":type(exc).__name__})
+
     def do_GET(self):
+        if self.path=="/hub":
+            from module_bridge import MCPBridge
+            bridge=MCPBridge()
+            if not bridge.connected:
+                return self.send(200,{"connected":False,"standalone":True})
+            try:
+                members=bridge.peers()
+                return self.send(200,{"connected":True,"identity":members.get("self"),
+                                      "peers":members.get("peers",[]),
+                                      "tools":len(bridge.catalog().get("tools",[]))})
+            except Exception as exc:
+                return self.send(503,{"connected":False,"error":type(exc).__name__})
         if self.path=="/health":
             return self.send(200,{"ok":True,"id":"easychange","standalone":True})
         if self.path=="/status":
