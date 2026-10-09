@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 import zlib
@@ -55,12 +56,19 @@ class InboundCommandStore:
     @staticmethod
     def _atomic_write(path: Path, payload: bytes) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temp = path.with_suffix(path.suffix + ".tmp")
-        with temp.open("wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
+        # Each writer needs an isolated staging file even when two EasyChange
+        # processes receive a retransmission for the same transfer index.
+        fd, name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _meta_path(self, transfer_id: str) -> Path:
         return self._dir(transfer_id) / "meta.json"
@@ -182,6 +190,14 @@ class InboundCommandStore:
         token = str(token or "")
         if not self._CRC_RE.fullmatch(crc32):
             raise InboundTransferError("INVALID_INBOUND_CHUNK_CRC")
+        # An 8 KiB chunk cannot require an unbounded Base64 input.
+        # Reject before regex validation and decoding to avoid large copies.
+        max_token_chars = 4 * ((self.MAX_CHUNK_BYTES + 2) // 3) + 4
+        if len(token) > max_token_chars:
+            raise InboundTransferError(
+                "INBOUND_CHUNK_SIZE_LIMIT",
+                data={"token_chars": len(token),
+                      "max_token_chars": max_token_chars})
         if not token or not self._TOKEN_RE.fullmatch(token):
             raise InboundTransferError("INVALID_INBOUND_CHUNK_BASE64URL")
         try:
