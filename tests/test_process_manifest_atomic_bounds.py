@@ -94,3 +94,34 @@ def test_legacy_job_migration_bounds_reads_and_preserves_existing_targets(tmp_pa
     assert (target_root/"SAVED.json").read_bytes()==b'{"state":"NEW"}'
     assert (legacy/"LARGE.json").read_bytes()==huge
     assert not list(target_root.glob("*.tmp"))
+
+
+def test_startup_job_reconcile_selects_only_newest_and_counts_all(tmp_path):
+    import os
+
+    jobs=_store(tmp_path)
+    for index in range(70):
+        identifier=f"JOB{index:03}"
+        path=tmp_path/(identifier+".json")
+        path.write_text(json.dumps({"job_id":identifier,"state":"SUCCEEDED"}),
+                        encoding="utf-8")
+        stamp=1_700_000_000_000_000_000+index*1_000_000
+        os.utime(path,ns=(stamp,stamp))
+    visited=[]
+    read=jobs._read_job
+    def tracked(job_id):
+        visited.append(job_id)
+        return read(job_id)
+    jobs._read_job=tracked
+
+    report=jobs._reconcile_durable_jobs(limit=7)
+    assert report["available"]==70
+    assert report["checked"]==7
+    assert report["running_unattached"]==0
+    assert visited==[f"JOB{index:03}" for index in range(69,62,-1)]
+
+    visited.clear()
+    empty=jobs._reconcile_durable_jobs(limit=0)
+    assert empty["available"]==70
+    assert empty["checked"]==0
+    assert visited==[]
