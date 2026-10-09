@@ -192,7 +192,8 @@ def encode_result_chunks(
     else:
         selected: list[int] = []
         for raw_index in indexes:
-            if isinstance(raw_index, bool):
+            if (type(raw_index) is not int and
+                    not (isinstance(raw_index, str) and raw_index.strip().isdecimal())):
                 raise ValueError("invalid optical chunk index")
             index = int(raw_index)
             if index < 0 or index >= total:
