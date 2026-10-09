@@ -918,11 +918,19 @@ class ProcessService:
         return size
 
     def _durable_job_state(self, path: Path) -> str:
+        # Never treat an unreadable, unrecognized or nonterminal manifest as
+        # disposable. Its process/mutation outcome may not be known.
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-            return str(value.get("state") or "").upper() if isinstance(value, dict) else ""
-        except (OSError, json.JSONDecodeError):
-            return "CORRUPT"
+            value = self._read_job(path.stem)
+        except (OSError, ValueError):
+            return "UNKNOWN"
+        if not isinstance(value,dict):
+            return "UNKNOWN"
+        state=str(value.get("state") or "").upper()
+        return state if state in {
+            "RUNNING","QUEUED","SUCCEEDED","FAILED",
+            "CANCELLED","ORPHANED","EXITED","STOPPED"
+        } else "UNKNOWN"
 
     def maintenance(self, keep_finished: int = 8) -> dict:
         before_count = len(self._processes)
@@ -951,7 +959,7 @@ class ProcessService:
         terminal_position = 0
         for path in jobs:
             state = self._durable_job_state(path)
-            if state == "RUNNING" or path.stem in active:
+            if state in {"RUNNING","QUEUED","UNKNOWN"} or path.stem in active:
                 continue
             try:
                 age = now - path.stat().st_mtime
@@ -981,7 +989,7 @@ class ProcessService:
             if path.stem in active:
                 continue
             job_manifest = self.jobs_root / f"{path.stem}.json"
-            if job_manifest.exists() and self._durable_job_state(job_manifest) == "RUNNING":
+            if job_manifest.exists() and self._durable_job_state(job_manifest) in {"RUNNING","QUEUED","UNKNOWN"}:
                 continue
             try:
                 age = now - path.stat().st_mtime
@@ -1022,7 +1030,7 @@ class ProcessService:
             jobs = []
         grouped_stems: set[str] = set()
         for path in jobs:
-            if self._durable_job_state(path) == "RUNNING" or path.stem in active:
+            if self._durable_job_state(path) in {"RUNNING","QUEUED","UNKNOWN"} or path.stem in active:
                 continue
             grouped_stems.add(path.stem)
             try:
@@ -1047,7 +1055,7 @@ class ProcessService:
             if path.stem in grouped_stems or path.stem in active:
                 continue
             manifest = self.jobs_root / f"{path.stem}.json"
-            if manifest.exists() and self._durable_job_state(manifest) == "RUNNING":
+            if manifest.exists() and self._durable_job_state(manifest) in {"RUNNING","QUEUED","UNKNOWN"}:
                 continue
             try:
                 mtime = path.stat().st_mtime
