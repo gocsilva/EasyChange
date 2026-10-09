@@ -373,7 +373,11 @@ class FileService:
     def info(self, path: str) -> dict:
         target = self.workspace.resolve(path, must_exist=True)
         stat = target.stat()
-        raw = target.read_bytes() if stat.st_size <= MAX_TEXT_FILE_BYTES else None
+        raw = self._read_limited_text(target) if stat.st_size <= MAX_TEXT_FILE_BYTES else None
+        # A file may grow between stat() and the bounded descriptor read.
+        if raw is not None and len(raw)>MAX_TEXT_FILE_BYTES:
+            raw = None
+            stat = target.stat()
         raw_bytes = raw or b""
         is_binary = b"\0" in raw_bytes
         mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
