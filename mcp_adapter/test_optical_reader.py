@@ -73,10 +73,12 @@ class OpticalReaderTests(unittest.TestCase):
 
     def test_corrupt_first_qr_is_skipped_allowing_valid_retransmission(self):
         import json
+        import hashlib
         from easychange.core.result import Result
 
+        expected="".join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(90))
         packets=encode_result_chunks(
-            Result(True,"read",{"text":"r"*3000},sequence="QRECOVER01"))
+            Result(True,"read",{"text":expected},sequence="QRECOVER01"))
         assert len(packets) >= 2
         forged=json.loads(packets[0])
         forged["d"]="A"+forged["d"][1:]
@@ -87,14 +89,16 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertEqual(initial["received"],0)
         receipt=collector.ingest(packets)
         self.assertTrue(receipt["complete"])
-        self.assertEqual(receipt["payload"]["data"]["text"],"r"*3000)
+        self.assertEqual(receipt["payload"]["data"]["text"],expected)
 
     def test_corrupt_later_qr_does_not_poison_existing_assembly(self):
         import json
+        import hashlib
         from easychange.core.result import Result
 
+        expected="".join(hashlib.sha256(("b"+str(i)).encode()).hexdigest() for i in range(90))
         packets=encode_result_chunks(
-            Result(True,"read",{"text":"abcdef"*500},sequence="QRECOVER02"))
+            Result(True,"read",{"text":expected},sequence="QRECOVER02"))
         assert len(packets)>=2
         bad=json.loads(packets[1])
         bad["d"]="!"+bad["d"][1:]
@@ -104,7 +108,7 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertEqual(first["received"],1)
         full=collector.ingest(packets[1:])
         self.assertTrue(full["complete"])
-        self.assertEqual(full["payload"]["data"]["text"],"abcdef"*500)
+        self.assertEqual(full["payload"]["data"]["text"],expected)
 
     def test_untrusted_header_requires_real_boolean_completion(self):
         import json
