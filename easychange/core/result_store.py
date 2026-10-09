@@ -77,7 +77,9 @@ class DurableResultStore:
         self._payload_cache_bytes = 0
         self._payload_cache_max_entries = 32
         self._payload_cache_max_bytes = 16 * 1024 * 1024
-        self._terminal_header_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._terminal_header_cache: OrderedDict[
+            str, tuple[dict[str, Any], tuple[int, int, int, int]]
+        ] = OrderedDict()
         self._terminal_header_cache_max = 128
         self._stream_cache: OrderedDict[str, tuple[float, bytes, str, str, int]] = OrderedDict()
         self._stream_cache_bytes = 0
@@ -219,22 +221,37 @@ class DurableResultStore:
             "mutation_receipt": value.get("mutation_receipt"),
         }
 
+    @staticmethod
+    def _receipt_stamp(path: Path) -> tuple[int, int, int, int]:
+        stat = path.stat()
+        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
     def _terminal_header_cache_put(self, sequence: str, value: dict[str, Any]) -> None:
         base = self._terminal_header_base(value)
         if base is None:
+            self._terminal_header_cache.pop(sequence, None)
+            return
+        try:
+            stamp = self._receipt_stamp(self._path(sequence))
+        except OSError:
             self._terminal_header_cache.pop(sequence, None)
             return
         if sequence in self._terminal_header_cache:
             self._terminal_header_cache.pop(sequence, None)
         while len(self._terminal_header_cache) >= self._terminal_header_cache_max:
             self._terminal_header_cache.popitem(last=False)
-        self._terminal_header_cache[sequence] = base
+        self._terminal_header_cache[sequence] = (base, stamp)
 
     def _terminal_header_cache_get(self, sequence: str) -> dict[str, Any] | None:
-        base = self._terminal_header_cache.get(sequence)
-        if base is None:
+        entry = self._terminal_header_cache.get(sequence)
+        if entry is None:
             return None
-        if not self._path(sequence).exists():
+        base, stamp = entry
+        try:
+            if self._receipt_stamp(self._path(sequence)) != stamp:
+                self._terminal_header_cache.pop(sequence, None)
+                return None
+        except OSError:
             self._terminal_header_cache.pop(sequence, None)
             return None
         self._terminal_header_cache.move_to_end(sequence)
@@ -453,17 +470,21 @@ class DurableResultStore:
             )
             return cached
 
-        value = self.get(sequence)
-        if value is None:
-            return None
-        base = self._terminal_header_base(value)
+        # On a cache miss, read and populate under the cross-process claim
+        # lock so another writer cannot replace the receipt between get()
+        # and recording its file signature.
+        with self._claim_lock:
+            value = self.get(sequence)
+            if value is None:
+                return None
+            base = self._terminal_header_base(value)
+            if base is not None:
+                self._terminal_header_cache_put(sequence, value)
         result = value.get("result")
         result_bytes = int(value.get("result_bytes") or 0)
         size = max(256, min(4096, int(chunk_bytes)))
         chunk_count = max(1, (result_bytes + size - 1) // size) if result_bytes else 0
         if base is not None:
-            with self._lock:
-                self._terminal_header_cache_put(sequence, value)
             base["chunk_count"] = chunk_count
             return base
         return {
