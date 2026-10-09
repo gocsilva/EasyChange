@@ -452,8 +452,7 @@ class CommandService:
 
         # Durable store is authoritative for replay. A lost HDMI frame or MCP
         # restart therefore never requires a mutating command to execute twice.
-        durable = self.result_store.get(sequence)
-        if durable is not None:
+        def _reuse_durable_receipt(durable: dict[str, Any]) -> Result:
             if str(durable.get("command_hash") or "") != digest:
                 return Result(
                     False, "ec", error="Sequence reused with different command",
@@ -487,6 +486,9 @@ class CommandService:
                 },
                 sequence=sequence,
             )
+        durable = self.result_store.get(sequence)
+        if durable is not None:
+            return _reuse_durable_receipt(durable)
 
         # Preserve compatibility with the compact legacy session journal while
         # migrating successful replays to the durable store.
@@ -531,6 +533,21 @@ class CommandService:
                         sequence=sequence,
                     )
 
+            # Reading an empty spool earlier did not reserve this sequence:
+            # another EasyChange process may have claimed it in the meantime.
+            # Only the winner of the durable cross-process claim may execute.
+            try:
+                claimed_record, claimed = self.result_store.claim_running(
+                    sequence, digest, command, mutation=is_mutation)
+            except ValueError as exc:
+                if str(exc) == "RESULT_SEQUENCE_COMMAND_HASH_MISMATCH":
+                    return Result(
+                        False, "ec", error="Sequence reused with different command",
+                        code="SEQUENCE_CONFLICT", sequence=sequence)
+                raise
+            if not claimed:
+                return _reuse_durable_receipt(claimed_record)
+
             journal[sequence] = {
                 "sha256": digest,
                 "state": "RUNNING",
@@ -539,7 +556,6 @@ class CommandService:
                 "started_at": time.time(),
             }
             self.state_store.data["ec_results"] = dict(list(journal.items())[-128:])
-            self.result_store.mark_running(sequence, digest, command, mutation=is_mutation)
             if is_mutation:
                 self.result_store.update_mutation_state(
                     sequence,
