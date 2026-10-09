@@ -132,14 +132,13 @@ def test_compressed_receipt_file_read_is_bounded(tmp_path, monkeypatch):
 
     target = tmp_path / "QBOUNDED.json.zlib"
     observed = []
-    stream = io.BytesIO(b"X" * 30)
-    original_read = stream.read
 
-    def recorded_read(limit=-1):
-        observed.append(limit)
-        return original_read(limit)
+    class RecordedStream(io.BytesIO):
+        def read(self, limit=-1):
+            observed.append(limit)
+            return super().read(limit)
 
-    monkeypatch.setattr(stream, "read", recorded_read)
+    stream = RecordedStream(b"X" * 30)
     monkeypatch.setattr(result_module, "MAX_COMPRESSED_RECEIPT_BYTES", 8)
     monkeypatch.setattr(Path, "open", lambda self, mode="r": stream)
     with pytest.raises(ValueError, match="RESULT_RECEIPT_COMPRESSED_TOO_LARGE"):
