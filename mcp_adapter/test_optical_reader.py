@@ -192,6 +192,23 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertEqual(session.header["h"],valid["h"])
 
 
+    def test_recalculated_crc_cannot_make_invalid_base64url_poison_session(self):
+        import json
+        import binascii
+        from easychange.core.result import Result
+
+        packets=encode_result_chunks(
+            Result(True,"read",{"value":"hello"},sequence="QURLSAFE1"))
+        forged=json.loads(packets[0])
+        forged["d"]="!"+forged["d"]
+        forged["x"]=f"{binascii.crc32(forged['d'].encode('ascii')) & 0xffffffff:08x}"
+        assembly=OpticalAssembler()
+        state=assembly.ingest([json.dumps(forged)])
+        self.assertFalse(state["complete"])
+        self.assertIsNone(state["sequence"])
+        self.assertEqual(assembly.chunks,{})
+        self.assertTrue(assembly.ingest(packets)["complete"])
+
     def test_untrusted_header_requires_real_boolean_completion(self):
         import json
         from easychange.core.result import Result
