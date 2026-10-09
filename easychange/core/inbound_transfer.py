@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 import re
 import shutil
 import tempfile
+import sys
 import threading
 import time
 import zlib
@@ -42,6 +44,33 @@ class InboundCommandStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._process_lock_path = self.root / ".inbound-transfer.lock"
+
+    @contextmanager
+    def _transaction_lock(self):
+        # Serialize the entire check-and-replace operation across EasyChange
+        # processes using the same inbound staging directory.
+        with self._lock:
+            with self._process_lock_path.open("a+b") as handle:
+                handle.seek(0)
+                if sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    handle.seek(0, os.SEEK_END)
+                    if handle.tell() == 0:
+                        handle.write(bytes([0]))
+                        handle.flush()
+                    yield
+                finally:
+                    if sys.platform == "win32":
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     @staticmethod
     def _validated_number(value: Any, code: str) -> int:
@@ -201,7 +230,7 @@ class InboundCommandStore:
             "chunk_count": chunk_count,
             "sha256": sha256,
         }
-        with self._lock:
+        with self._transaction_lock:
             self._cleanup_locked()
             directory = self._dir(transfer_id)
             directory.mkdir(parents=True, exist_ok=True)
@@ -265,7 +294,7 @@ class InboundCommandStore:
                 data={"index": index, "expected_crc32": crc32, "actual_crc32": actual_crc},
             )
 
-        with self._lock:
+        with self._transaction_lock:
             meta = self._load_meta_locked(transfer_id)
             count = int(meta.get("chunk_count") or 0)
             if index < 0 or index >= count:
@@ -383,14 +412,14 @@ class InboundCommandStore:
 
     def assemble(self, transfer_id: str) -> tuple[str, dict[str, Any]]:
         transfer_id = self._transfer_id(transfer_id)
-        with self._lock:
+        with self._transaction_lock:
             command, info = self._assemble_locked(transfer_id)
             os.utime(self._dir(transfer_id), None)
             return command, info
 
     def status(self, transfer_id: str) -> dict[str, Any]:
         transfer_id = self._transfer_id(transfer_id)
-        with self._lock:
+        with self._transaction_lock:
             meta = self._load_meta_locked(transfer_id)
             count = int(meta.get("chunk_count") or 0)
             missing = self._missing_locked(transfer_id, count)
@@ -420,7 +449,7 @@ class InboundCommandStore:
 
     def abort(self, transfer_id: str) -> dict[str, Any]:
         transfer_id = self._transfer_id(transfer_id)
-        with self._lock:
+        with self._transaction_lock:
             directory = self._dir(transfer_id)
             existed = directory.exists()
             shutil.rmtree(directory, ignore_errors=True)
