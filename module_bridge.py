@@ -104,7 +104,26 @@ class MCPBridge:
         return self._request("/v1/tools")
 
     def call(self,tool,**arguments):
-        return self._request("/v1/tools/call",{"tool":tool,"arguments":arguments},timeout=120)
+        payload={"tool":tool,"arguments":arguments}
+        # Retry only the hub's explicit *not executed* RPC-admission response.
+        # A generic 429 or a transport timeout may follow real side effects,
+        # so neither is safe to replay automatically.
+        for attempt in range(7):
+            try:
+                return self._request("/v1/tools/call",payload,timeout=120)
+            except HTTPError as exc:
+                if exc.code!=429:
+                    raise
+                try:
+                    details=json.loads(exc.read(2048))
+                except (ValueError,UnicodeError):
+                    raise exc
+                if (not isinstance(details,dict) or
+                        details.get("error")!="MODULE_TOOL_RPC_BUSY_RETRY_LATER" or
+                        details.get("accepted") is not False or
+                        details.get("retryable") is not True or attempt==6):
+                    raise exc
+                time.sleep(min(0.5,0.025*(2**attempt)))
 
     def peers(self):
         return self._request("/v1/peers",timeout=3)
