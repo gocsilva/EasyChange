@@ -96,7 +96,23 @@ class DurableResultStore:
 
     @staticmethod
     def _decode(raw: bytes) -> dict[str, Any]:
-        return json.loads(zlib.decompress(raw).decode("utf-8"))
+        # Reject oversized compressed records and decompression bombs before
+        # allocating an unbounded JSON document.
+        max_compressed = 32 * 1024 * 1024
+        max_decoded = 64 * 1024 * 1024
+        if len(raw) > max_compressed:
+            raise ValueError("RESULT_RECEIPT_COMPRESSED_TOO_LARGE")
+        decoder = zlib.decompressobj()
+        decoded = decoder.decompress(raw, max_decoded + 1)
+        if len(decoded) > max_decoded or decoder.unconsumed_tail:
+            raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+        decoded += decoder.flush(max_decoded + 1 - len(decoded))
+        if len(decoded) > max_decoded or not decoder.eof or decoder.unused_data:
+            raise ValueError("RESULT_RECEIPT_INVALID_STREAM")
+        value = json.loads(decoded.decode("utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("RESULT_RECEIPT_NOT_OBJECT")
+        return value
 
 
     def _payload_cache_put(self, sequence: str, raw: bytes, digest: str) -> None:
