@@ -152,6 +152,13 @@ class FileService:
                     return items
         return items
 
+    @staticmethod
+    def _read_limited_text(path: Path) -> bytes:
+        # A stat-before-read check is not a memory limit: the file may grow
+        # concurrently. Always cap the actual file descriptor read as well.
+        with path.open("rb") as stream:
+            return stream.read(MAX_TEXT_FILE_BYTES + 1)
+
     def read(self, path: str, start: int = 1, count: int = 120) -> dict:
         target = self.workspace.resolve(path, must_exist=True)
         if not target.is_file():
@@ -163,7 +170,7 @@ class FileService:
         cached = self._read_cache_get(relative, stat.st_size, stat.st_mtime_ns)
         cache_hit = cached is not None
         if cached is None:
-            data = target.read_bytes()
+            data = self._read_limited_text(target)
             if b"\0" in data:
                 raise ValueError("Binary files cannot be read as text")
             if len(data) > MAX_TEXT_FILE_BYTES:
@@ -201,7 +208,7 @@ class FileService:
         target = self.workspace.resolve(path, must_exist=True)
         if not target.is_file():
             raise IsADirectoryError(str(target))
-        data = target.read_bytes()
+        data = self._read_limited_text(target)
         if b"\0" in data:
             raise ValueError("Binary files cannot be edited as text")
         if len(data) > MAX_TEXT_FILE_BYTES:
@@ -228,7 +235,7 @@ class FileService:
         before = ""
         before_hash = None
         if not created:
-            previous_bytes = target.read_bytes()
+            previous_bytes = self._read_limited_text(target)
             if b"\0" in previous_bytes:
                 raise ValueError("Binary files cannot be overwritten as text")
             if len(previous_bytes) > MAX_TEXT_FILE_BYTES:
@@ -259,7 +266,7 @@ class FileService:
 
         # Do not make the caller issue a read-after-write just to know whether
         # the mutation committed. Verify the exact bytes before returning.
-        actual_bytes = target.read_bytes()
+        actual_bytes = self._read_limited_text(target)
         actual_after_hash = hashlib.sha256(actual_bytes).hexdigest()
         if actual_after_hash != expected_after_hash:
             # Best-effort restoration protects against an exotic short/corrupt
@@ -321,7 +328,12 @@ class FileService:
 
     def append(self, path: str, value: str) -> dict:
         target = self.workspace.resolve(path)
-        before = target.read_text(encoding="utf-8") if target.exists() else ""
+        before = ""
+        if target.exists():
+            existing = self._read_limited_text(target)
+            if len(existing)>MAX_TEXT_FILE_BYTES:
+                raise ValueError(f"File exceeds text write limit ({MAX_TEXT_FILE_BYTES} bytes)")
+            before = existing.decode("utf-8")
         separator = "" if not before or before.endswith(("\n", "\r")) else "\n"
         self.write(path, before + separator + value)
         return {"path": path, "appended_chars": len(value)}
