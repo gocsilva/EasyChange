@@ -81,7 +81,8 @@ def test_automatic_cleanup_prunes_only_easychange_owned_stale_artifacts(tmp_path
     assert source.read_text(encoding="utf-8") == "class Program {}"
     assert git_config.exists()
     assert unrelated_tmp.exists()
-    assert not result_file.exists()
+    # Even an unreadable legacy receipt is evidence that a sequence existed.
+    assert result_file.exists()
     assert not terminal_job.exists()
     assert not stale_running.exists()
     assert active_running.exists()
@@ -349,7 +350,8 @@ def test_automatic_cleanup_preserves_active_durable_result_receipts(tmp_path):
     report = MaintenanceService(tmp_path).automatic_cleanup(now=time.time())
 
     assert active_path.exists()
-    assert not terminal_path.exists()
+    assert terminal_path.exists()
+    assert store.get(terminal)["state"] == "DONE"
     assert report["categories"].get("active_results_stale", 0) == 0
 
 
@@ -380,6 +382,41 @@ def test_disk_budget_never_uses_active_result_as_pressure_candidate(tmp_path, mo
     assert not evidence.exists()
     assert "results_pressure" not in report["categories"]
 
+
+
+def test_maintenance_never_erases_durable_receipts_after_ttl_or_under_pressure(tmp_path):
+    from easychange.core.result_store import DurableResultStore
+
+    root = tmp_path / ".easychange" / "results"
+    store = DurableResultStore(root,ttl_seconds=60,active_ttl_seconds=3600)
+    ids = ("QNEVEREXECUTE1","QNEVERMUTATE1","QNEVERRUNNING1")
+    store.mark_running(ids[0],"a"*64,":state",mutation=False)
+    store.complete(ids[0],"a"*64,":state",
+                   {"ok":True,"command":"state","data":{"text":"completed"},
+                    "sequence":ids[0]})
+    store.mark_running(ids[1],"b"*64,":write",mutation=True)
+    store.complete(ids[1],"b"*64,":write",
+                   {"ok":True,"command":"write","data":{"verified":True},
+                    "sequence":ids[1]},
+                   mutation_receipt={"state":"COMMITTED","lifecycle_state":"APPLIED"})
+    store.mark_running(ids[2],"c"*64,":slow",mutation=True)
+    broken=root/"QCORRUPT1.json.zlib"
+    broken.write_bytes(b"corrupt receipt - never erase")
+    old=time.time()-10*24*3600
+    for path in root.glob("Q*.json.zlib"):
+        os.utime(path,(old,old))
+
+    service=MaintenanceService(tmp_path)
+    service.max_state_bytes=1  # Force pressure, even after other candidates vanish.
+    report=service.automatic_cleanup(now=time.time())
+    for seq in ids:
+        assert store.get(seq) is not None
+        assert root.joinpath(seq+".json.zlib").exists()
+    assert broken.read_bytes()==b"corrupt receipt - never erase"
+    assert "results" not in report["categories"]
+    assert "results_pressure" not in report["categories"]
+    assert "active_results_stale" not in report["categories"]
+    assert report["disk_budget"]["over_budget"] is True
 
 
 def test_maintenance_uses_per_result_retention_without_changing_global_default(tmp_path):
