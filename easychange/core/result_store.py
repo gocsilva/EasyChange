@@ -74,7 +74,7 @@ class DurableResultStore:
         self._claim_lock_path = self.root / ".receipt-claim.lock"
         self._writes_since_cleanup = 0
         self._last_cleanup_monotonic = time.monotonic()
-        self._payload_cache: OrderedDict[str, tuple[float, bytes, str]] = OrderedDict()
+        self._payload_cache: OrderedDict[str, tuple[float, bytes, str, tuple[int, int, int, int]]] = OrderedDict()
         self._payload_cache_bytes = 0
         self._payload_cache_max_entries = 32
         self._payload_cache_max_bytes = 16 * 1024 * 1024
@@ -82,7 +82,7 @@ class DurableResultStore:
             str, tuple[dict[str, Any], tuple[int, int, int, int]]
         ] = OrderedDict()
         self._terminal_header_cache_max = 128
-        self._stream_cache: OrderedDict[str, tuple[float, bytes, str, str, int]] = OrderedDict()
+        self._stream_cache: OrderedDict[str, tuple[float, bytes, str, str, int, tuple[int, int, int, int]]] = OrderedDict()
         self._stream_cache_bytes = 0
         self._stream_cache_max_entries = 16
         self._stream_cache_max_bytes = 16 * 1024 * 1024
@@ -180,15 +180,23 @@ class DurableResultStore:
         ):
             _, stale = self._payload_cache.popitem(last=False)
             self._payload_cache_bytes -= len(stale[1])
-        self._payload_cache[sequence] = (time.monotonic(), raw, digest)
+        try:
+            stamp = self._receipt_stamp(self._path(sequence))
+        except OSError:
+            return
+        self._payload_cache[sequence] = (time.monotonic(), raw, digest, stamp)
         self._payload_cache_bytes += size
 
     def _payload_cache_get(self, sequence: str) -> tuple[bytes, str] | None:
         cached = self._payload_cache.get(sequence)
         if cached is None:
             return None
-        created, raw, digest = cached
-        if time.monotonic() - created > self.ttl_seconds or not self._path(sequence).exists():
+        created, raw, digest, stamp = cached
+        try:
+            unchanged = self._receipt_stamp(self._path(sequence)) == stamp
+        except OSError:
+            unchanged = False
+        if time.monotonic() - created > self.ttl_seconds or not unchanged:
             self._payload_cache.pop(sequence, None)
             self._payload_cache_bytes -= len(raw)
             return None
@@ -699,12 +707,17 @@ class DurableResultStore:
         ):
             _, stale = self._stream_cache.popitem(last=False)
             self._stream_cache_bytes -= len(stale[1])
+        try:
+            stamp = self._receipt_stamp(self._path(sequence))
+        except OSError:
+            return
         self._stream_cache[sequence] = (
             time.monotonic(),
             stream,
             stream_hash,
             result_hash,
             int(result_bytes),
+            stamp,
         )
         self._stream_cache_bytes += size
 
@@ -715,8 +728,12 @@ class DurableResultStore:
         cached = self._stream_cache.get(sequence)
         if cached is None:
             return None
-        created, stream, stream_hash, result_hash, result_bytes = cached
-        if time.monotonic() - created > self.ttl_seconds or not self._path(sequence).exists():
+        created, stream, stream_hash, result_hash, result_bytes, stamp = cached
+        try:
+            unchanged = self._receipt_stamp(self._path(sequence)) == stamp
+        except OSError:
+            unchanged = False
+        if time.monotonic() - created > self.ttl_seconds or not unchanged:
             self._stream_cache.pop(sequence, None)
             self._stream_cache_bytes -= len(stream)
             return None
