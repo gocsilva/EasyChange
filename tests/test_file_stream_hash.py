@@ -85,3 +85,28 @@ def test_text_fd_read_is_bounded_even_if_stat_was_stale():
         raw=FileService._read_limited_text(Path("stale.txt"))
     assert len(raw)==MAX_TEXT_FILE_BYTES+1
     assert called==[MAX_TEXT_FILE_BYTES+1]
+
+
+def test_cached_text_invalidates_on_atomic_replacement_with_same_size_and_time(tmp_path):
+    import os
+
+    original=tmp_path/"same.txt"
+    original.write_bytes(b"AAAA\n")
+    files=FileService(Workspace.open(tmp_path))
+    first=files.read("same.txt")
+    assert first["cache_hit"] is False
+    assert files.read("same.txt")["cache_hit"] is True
+    stat=original.stat()
+    replacement=tmp_path/"same.pending"
+    replacement.write_bytes(b"BBBB\n")
+    os.utime(replacement,ns=(stat.st_atime_ns,stat.st_mtime_ns))
+    os.replace(replacement,original)
+    current=original.stat()
+    assert current.st_size==stat.st_size
+    assert current.st_mtime_ns==stat.st_mtime_ns
+    assert (current.st_dev,current.st_ino)!=(stat.st_dev,stat.st_ino)
+    refreshed=files.read("same.txt")
+    assert refreshed["cache_hit"] is False
+    assert refreshed["lines"]==["1|BBBB"]
+    assert refreshed["hash"]!=first["hash"]
+    assert files.read("same.txt")["cache_hit"] is True
