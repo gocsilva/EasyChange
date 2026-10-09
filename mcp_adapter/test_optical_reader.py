@@ -146,6 +146,32 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertTrue(result["complete"])
         self.assertEqual(result["payload"]["data"]["text"],sample)
 
+    def test_mismatched_completion_header_cannot_poison_valid_qr_replay(self):
+        import json
+        import hashlib
+        from easychange.core.result import Result
+
+        content="".join(hashlib.sha256(str(i).encode()).hexdigest()
+                        for i in range(90))
+        packets=encode_result_chunks(
+            Result(True,"read",{"text":content},sequence="QHEADERSAFE"))
+        self.assertGreaterEqual(len(packets),2)
+        first=json.loads(packets[0])
+        session=OpticalAssembler()
+        session.ingest(packets[:1])
+        foreign={"p":"EC2H","s":"QHEADERSAFE","f":True,
+                 "h":"0"*64 if first["h"]!="0"*16 else "1"*64}
+        pending=session.ingest([json.dumps(foreign)])
+        self.assertEqual(pending["header"],{})
+        self.assertEqual(session.header,{})
+        self.assertTrue(session.ingest(packets[1:])["verified"])
+        valid={"p":"EC2H","s":"QHEADERSAFE","f":True,
+               "h":first["h"]+"0"*48}
+        complete=session.ingest([json.dumps(valid)])
+        self.assertTrue(complete["verified"])
+        self.assertEqual(session.header["h"],valid["h"])
+
+
     def test_untrusted_header_requires_real_boolean_completion(self):
         import json
         from easychange.core.result import Result
