@@ -93,6 +93,12 @@ class MCPBridge:
         payload=None
         if body is not None:
             payload=json.dumps(body,ensure_ascii=False).encode("utf-8")
+            # Mirror the server's admission limits before sending anything.
+            # The ordinary mailbox/ACK plane must not inherit the larger
+            # tool-RPC allowance.
+            request_limit=(1_048_576 if path=="/v1/tools/call" else 16384+1024)
+            if len(payload)>request_limit:
+                raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
             headers["Content-Type"]="application/json"
         req=Request(BUS+path,data=payload,method="POST" if payload is not None else "GET",headers=headers)
         # The hub limits tool results to 8 MiB, plus a small JSON envelope.
