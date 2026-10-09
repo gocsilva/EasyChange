@@ -123,7 +123,7 @@ class TestHubRedirectBoundary(unittest.TestCase):
 
     def test_hub_response_is_bounded_before_json_decode(self):
         import io
-        from unittest.mock import Mock,patch
+        from unittest.mock import MagicMock,patch
 
         client=module_bridge.MCPBridge(token="local-test-token")
         healthy=io.BytesIO(b'{"ok":true,"self":"easychange"}')
@@ -132,10 +132,9 @@ class TestHubRedirectBoundary(unittest.TestCase):
         opener.assert_called_once()
 
         maximum=8_388_608+131_072
-        oversized=Mock()
+        oversized=MagicMock()
         oversized.read.return_value=b"x"*(maximum+1)
-        oversized.__enter__=Mock(return_value=oversized)
-        oversized.__exit__=Mock(return_value=False)
+        oversized.__enter__.return_value=oversized
         with patch.object(module_bridge._local_opener,"open",return_value=oversized):
             with patch.object(module_bridge.json,"loads",
                               side_effect=AssertionError("unbounded parse")):
