@@ -6,6 +6,7 @@ from .subprocess_utils import hidden_console_kwargs
 import difflib
 import hashlib
 import mimetypes
+import tempfile
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -230,6 +231,25 @@ class FileService:
             # detection while avoiding CommandService pre/post reads.
             self._baselines[relative] = actual_hash
         return target, relative, data.decode("utf-8")
+    @staticmethod
+    def _atomic_write_bytes(target: Path, payload: bytes) -> None:
+        # Thread identifiers may repeat across multiple EasyChange processes.
+        # A kernel-assigned unique staging name prevents cross-process clobber.
+        stage = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",dir=target.parent,prefix=f".{target.name}.easychange-",
+                suffix=".tmp",delete=False
+            ) as stream:
+                stage=Path(stream.name)
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            stage.replace(target)
+        finally:
+            if stage is not None:
+                stage.unlink(missing_ok=True)
+
     def write(self, path: str, content: str, *, force: bool = False) -> dict:
         target = self.workspace.resolve(path)
         relative = target.relative_to(self.workspace.root_path).as_posix()
@@ -260,15 +280,7 @@ class FileService:
         expected_after_hash = hashlib.sha256(new_bytes).hexdigest()
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f".{target.name}.easychange-{threading.get_ident()}.tmp")
-        try:
-            with temporary.open("wb") as stream:
-                stream.write(new_bytes)
-                stream.flush()
-                os.fsync(stream.fileno())
-            temporary.replace(target)
-        finally:
-            temporary.unlink(missing_ok=True)
+        self._atomic_write_bytes(target,new_bytes)
 
         # Do not make the caller issue a read-after-write just to know whether
         # the mutation committed. Verify the exact bytes before returning.
@@ -280,9 +292,7 @@ class FileService:
             if created:
                 target.unlink(missing_ok=True)
             else:
-                recovery = target.with_name(f".{target.name}.easychange-recovery.tmp")
-                recovery.write_bytes(previous_bytes)
-                recovery.replace(target)
+                self._atomic_write_bytes(target,previous_bytes)
             raise IOError("POST_WRITE_HASH_MISMATCH")
 
         self._opened[path] = target
