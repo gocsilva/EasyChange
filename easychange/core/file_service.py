@@ -31,7 +31,7 @@ class FileService:
         self._guard = threading.RLock()
         # Read-only hot cache. Mutation paths deliberately bypass this cache and
         # hash the actual file again so external-change protection is unchanged.
-        self._read_cache: OrderedDict[str, tuple[int, int, str, list[str]]] = OrderedDict()
+        self._read_cache: OrderedDict[str, tuple[int, int, int, int, str, list[str]]] = OrderedDict()
         self._read_cache_bytes = 0
         self._read_cache_max_entries = 32
         self._read_cache_max_bytes = 16 * 1024 * 1024
@@ -40,13 +40,15 @@ class FileService:
     def baselines(self) -> dict[str, str]:
         with self._guard: return dict(self._baselines)
 
-    def _read_cache_get(self, relative: str, size: int, mtime_ns: int):
+    def _read_cache_get(self, relative: str, size: int, mtime_ns: int,
+                        device: int, inode: int):
         with self._guard:
             cached = self._read_cache.get(relative)
             if cached is None:
                 return None
-            cached_size, cached_mtime, digest, lines = cached
-            if cached_size != size or cached_mtime != mtime_ns:
+            cached_size, cached_mtime, cached_dev, cached_ino, digest, lines = cached
+            if (cached_size != size or cached_mtime != mtime_ns
+                    or cached_dev != device or cached_ino != inode):
                 self._read_cache.pop(relative, None)
                 self._read_cache_bytes = max(0, self._read_cache_bytes - cached_size)
                 return None
@@ -54,14 +56,15 @@ class FileService:
             return digest, lines
 
     def _read_cache_put(self, relative: str, size: int, mtime_ns: int,
-                        digest: str, lines: list[str]) -> None:
+                        digest: str, lines: list[str], *,
+                        device: int, inode: int) -> None:
         if size > self._read_cache_max_bytes:
             return
         with self._guard:
             previous = self._read_cache.pop(relative, None)
             if previous is not None:
                 self._read_cache_bytes = max(0, self._read_cache_bytes - previous[0])
-            self._read_cache[relative] = (size, mtime_ns, digest, lines)
+            self._read_cache[relative] = (size, mtime_ns, device, inode, digest, lines)
             self._read_cache_bytes += size
             while (
                 len(self._read_cache) > self._read_cache_max_entries
@@ -167,7 +170,8 @@ class FileService:
         stat = target.stat()
         if stat.st_size > MAX_TEXT_FILE_BYTES:
             raise ValueError(f"File exceeds text read limit ({MAX_TEXT_FILE_BYTES} bytes)")
-        cached = self._read_cache_get(relative, stat.st_size, stat.st_mtime_ns)
+        cached = self._read_cache_get(
+            relative,stat.st_size,stat.st_mtime_ns,stat.st_dev,stat.st_ino)
         cache_hit = cached is not None
         if cached is None:
             data = self._read_limited_text(target)
@@ -178,7 +182,9 @@ class FileService:
             lines = data.decode("utf-8-sig").splitlines()
             digest = hashlib.sha256(data).hexdigest()
             post = target.stat()
-            self._read_cache_put(relative, post.st_size, post.st_mtime_ns, digest, lines)
+            self._read_cache_put(
+                relative,post.st_size,post.st_mtime_ns,digest,lines,
+                device=post.st_dev,inode=post.st_ino)
         else:
             digest, lines = cached
         with self._guard:
@@ -286,6 +292,7 @@ class FileService:
         self._read_cache_put(
             relative, written_stat.st_size, written_stat.st_mtime_ns,
             actual_after_hash, content.splitlines(),
+            device=written_stat.st_dev,inode=written_stat.st_ino,
         )
 
         return {
