@@ -71,29 +71,31 @@ class ModuleGUI:
         def probe():
             try:
                 report=status()
-                if self._closing:
-                    return
-                def update():
+            except Exception:
+                report={"running":False}
+            if self._closing:
+                self._refresh_inflight=False
+                return
+            def update():
+                try:
                     if self._closing:
                         return
                     owned=self.process
                     if (not report["running"] and owned is not None
                             and owned.poll() is None):
-                        # 700 ms is not enough for a cold Python service.
-                        # Keep polling at low rate until it answers /health
-                        # or the owned process exits; do not spawn a thread
-                        # for every missed readiness check.
                         self.message.set("Serviço iniciando; aguardando /health...")
                         self.root.after(1600,self.refresh)
                     else:
                         self.message.set(
                             "Serviço ativo" if report["running"] else "Serviço parado")
-                try:
-                    self.root.after(0,update)
-                except (RuntimeError,tk.TclError):
-                    # Closing while health I/O is in flight is normal.
-                    pass
-            finally:
+                finally:
+                    # The worker is not done until Tk has consumed its result:
+                    # releasing here (not after I/O) prevents callback storms.
+                    self._refresh_inflight=False
+            try:
+                self.root.after(0,update)
+            except (RuntimeError,tk.TclError):
+                # A closing Tk interpreter cannot receive the callback.
                 self._refresh_inflight=False
         try:
             threading.Thread(target=probe,daemon=True).start()
