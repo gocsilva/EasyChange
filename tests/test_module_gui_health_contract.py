@@ -149,3 +149,13 @@ def test_standalone_gui_launches_real_python_package_not_nested_script(tmp_path)
     assert args[1:]==["-B","-m",service[:-3].replace("/",".")]
     assert launched.call_args.kwargs["cwd"]==tmp_path
     assert gui.process is fake_process
+
+    linux_python=tmp_path/".venv"/"bin"/"python"
+    linux_python.parent.mkdir(parents=True)
+    linux_python.write_bytes(b"")
+    gui.process=None
+    with patch("subprocess.Popen",return_value=fake_process) as launched_venv:
+        gui.start()
+    assert launched_venv.call_args.args[0][0]==str(linux_python)
+    assert launched_venv.call_args.args[0][1:]==[
+        "-B","-m",service[:-3].replace("/",".")]
