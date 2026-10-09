@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import json
 import threading
 from unittest.mock import patch
 
@@ -56,3 +58,50 @@ def test_failed_chunk_atomic_replace_preserves_previous_bytes_and_cleans_temp(tm
             InboundCommandStore._atomic_write(path,b"replacement")
     assert path.read_bytes()==b"original"
     assert list(path.parent.glob(".*.tmp"))==[]
+
+
+@pytest.mark.parametrize("field,invalid",(
+    ("chunk_count",10**12),
+    ("chunk_count",True),
+    ("raw_bytes",10**12),
+    ("compressed_bytes",-1),
+    ("version",2),
+    ("transfer_id","UOTHER999"),
+    ("codec","untrusted"),
+    ("sha256","invalid"),
+))
+def test_corrupt_persisted_metadata_cannot_start_unbounded_chunk_scan(
+        tmp_path,monkeypatch,field,invalid):
+    store=InboundCommandStore(tmp_path/"inbound")
+    transfer_id="UMETACHECK01"
+    raw=b"valid command"
+    compressed=inbound_module.zlib.compress(raw)
+    store.begin(transfer_id,raw_bytes=len(raw),
+                compressed_bytes=len(compressed),chunk_count=1,
+                sha256=hashlib.sha256(raw).hexdigest())
+    path=store._meta_path(transfer_id)
+    metadata=json.loads(path.read_text(encoding="utf-8"))
+    metadata[field]=invalid
+    raw_meta=json.dumps(metadata).encode("utf-8")
+    path.write_bytes(raw_meta)
+    monkeypatch.setattr(store,"_missing_locked",
+                        lambda *_: (_ for _ in ()).throw(
+                            AssertionError("untrusted count iterated")))
+    with pytest.raises(InboundTransferError,match="INBOUND_TRANSFER_META_CORRUPT"):
+        store.status(transfer_id)
+    assert path.read_bytes()==raw_meta
+
+
+def test_large_persisted_transfer_metadata_rejected_without_decoding(tmp_path,monkeypatch):
+    store=InboundCommandStore(tmp_path/"inbound")
+    transfer_id="ULARGEMETA01"
+    path=store._meta_path(transfer_id)
+    path.parent.mkdir(parents=True)
+    payload=b'{"junk":"' + b"x"*20000 + b'"}'
+    path.write_bytes(payload)
+    with patch.object(inbound_module.json,"loads",
+                      side_effect=AssertionError("oversized meta parsed")) as decoder:
+        with pytest.raises(InboundTransferError,match="INBOUND_TRANSFER_META_CORRUPT"):
+            store.status(transfer_id)
+    decoder.assert_not_called()
+    assert path.read_bytes()==payload
