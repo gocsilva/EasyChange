@@ -74,6 +74,18 @@ def test_ec2_v2_compact_envelope_reduces_qr_packet_overhead():
     assert decode_result_chunks(packets)["sequence"] == "QPACKET1"
 
 
+def test_ec2_rejects_invalid_base64url_even_with_recalculated_crc():
+    import binascii
+    import pytest
+
+    packet=json.loads(encode_result_chunks(
+        Result(True,"read",{"value":"verified"},sequence="QSTRICTURL"))[0])
+    packet["d"]="!"+packet["d"]
+    packet["x"]=f"{binascii.crc32(packet['d'].encode('ascii')) & 0xffffffff:08x}"
+    with pytest.raises(ValueError,match="invalid optical base64url fragment"):
+        decode_result_chunks([json.dumps(packet)])
+
+
 def test_ec2_fragment_crc_rejects_corruption():
     import json
     import pytest
