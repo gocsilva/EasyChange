@@ -16,6 +16,7 @@ from easychange.remote.optical_protocol import (
 )
 
 MAX_EC2_ASSEMBLY_TEXT_CHARS = 48 * 1024 * 1024
+MAX_EC2_ASSEMBLY_IDLE_SECONDS = 120.0
 
 @dataclass
 class OpticalAssembler:
@@ -31,6 +32,21 @@ class OpticalAssembler:
     updated_at: float = field(default_factory=time.monotonic)
 
     def ingest(self, payloads: list[str]) -> dict:
+        # A partial or completed carousel must not own a reusable receiver
+        # indefinitely. Expire only when new frames arrive: ingest([]) is
+        # allowed to retrieve the last verified receipt without mutation.
+        if (payloads and self.sequence
+                and time.monotonic() - self.updated_at >= MAX_EC2_ASSEMBLY_IDLE_SECONDS):
+            self.sequence=""
+            self.chunks.clear()
+            self.total=0
+            self.stored_chars=0
+            self.stored_token_chars=0
+            self.packet_identity=None
+            self.verified_payload=None
+            self.header={}
+            self.pending_provisional_header={}
+            self.updated_at=time.monotonic()
         for raw in payloads:
             try:
                 if (not isinstance(raw,str) or
