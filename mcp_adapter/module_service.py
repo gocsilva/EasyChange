@@ -9,7 +9,10 @@ from mcp_adapter.integration import module_status,capabilities
 def esp_online():
     try:
         with urlopen("http://127.0.0.1:8782/health",timeout=0.6) as response:
-            return json.load(response).get("ok") is True
+            status=json.load(response)
+        # The loopback port is not an identity: another service may occupy it.
+        return (isinstance(status,dict) and status.get("ok") is True
+                and status.get("id")=="esp")
     except Exception:
         return False
 
