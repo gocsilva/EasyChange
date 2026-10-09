@@ -163,6 +163,31 @@ class TestHubRedirectBoundary(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"INVALID_MCP_HUB_RESPONSE"):
                 client.peers()
 
+    def test_module_bridge_rejects_oversized_http_before_network(self):
+        import io
+        from unittest.mock import patch
+
+        bridge=module_bridge.MCPBridge(token="local-test-token")
+        with patch.object(module_bridge._local_opener,"open") as network:
+            with self.assertRaisesRegex(ValueError,"MCP_BUS_REQUEST_TOO_LARGE"):
+                bridge._request("/v1/send",{"payload":"x"*18000})
+            with self.assertRaisesRegex(ValueError,"MCP_BUS_REQUEST_TOO_LARGE"):
+                bridge._request("/v1/inbox/ack",{"ids":["x"*18000]})
+            with self.assertRaisesRegex(ValueError,"MCP_BUS_REQUEST_TOO_LARGE"):
+                bridge._request("/v1/tools/call",
+                                {"arguments":{"value":"x"*1_048_577}})
+        network.assert_not_called()
+
+        # Tool RPCs have a larger contract than mailbox/ACK control calls.
+        with patch.object(module_bridge._local_opener,"open",
+                          return_value=io.BytesIO(b'{"ok":true}')) as network:
+            self.assertEqual(
+                bridge._request("/v1/tools/call",
+                                {"arguments":{"value":"x"*20000}}),
+                {"ok":True})
+        self.assertGreater(len(network.call_args.args[0].data),17408)
+
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
