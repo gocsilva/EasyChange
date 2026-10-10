@@ -1,6 +1,9 @@
 from __future__ import annotations
 import html
 
+import errno
+import stat
+from contextlib import contextmanager
 import json
 import os
 import re
@@ -26,6 +29,61 @@ _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SENSITIVE_ENV_RE = re.compile(r"(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|CONNECTION_?STRING)", re.I)
 _ENV_REF_PREFIXES = {"PROCESS_ENV", "REMOTE_ENV", "ENV", "MCP_HOST_ENV"}
 _MAX_RUNTIME_PROFILE_BYTES = 1_048_576
+
+
+@contextmanager
+def _runtime_profile_lock(path: Path):
+    """Serialize the entire profile read/merge/replace across local processes.
+
+    A stable owner-only lock inode prevents both lost updates and a second
+    consumer race. A dead process releases its OS lock automatically.
+    """
+    path.parent.mkdir(parents=True,exist_ok=True)
+    target=path.with_name(path.name+".lock")
+    if target.is_symlink():
+        raise RuntimeError("RUNTIME_PROFILE_LOCK_UNSAFE")
+    flags=(os.O_CREAT|os.O_RDWR|getattr(os,"O_BINARY",0)|
+           getattr(os,"O_NOFOLLOW",0))
+    fd=os.open(target,flags,0o600)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:
+            raise RuntimeError("RUNTIME_PROFILE_LOCK_UNSAFE")
+        if os.name=="posix" and (
+                info.st_uid!=os.getuid() or info.st_mode&0o022):
+            raise RuntimeError("RUNTIME_PROFILE_LOCK_UNSAFE")
+        if os.name=="nt":
+            import msvcrt
+            if info.st_size==0:
+                os.write(fd,b"0")
+            os.lseek(fd,0,os.SEEK_SET)
+        else:
+            import fcntl
+        deadline=time.monotonic()+5.0
+        while True:
+            try:
+                if os.name=="nt":
+                    msvcrt.locking(fd,msvcrt.LK_NBLCK,1)
+                else:
+                    fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES,errno.EAGAIN,errno.EDEADLK):
+                    raise
+                if time.monotonic()>=deadline:
+                    raise RuntimeError("RUNTIME_PROFILE_LOCK_BUSY") from exc
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            if os.name=="nt":
+                os.lseek(fd,0,os.SEEK_SET)
+                msvcrt.locking(fd,msvcrt.LK_UNLCK,1)
+            else:
+                fcntl.flock(fd,fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
 
 
 def _rel(root: Path, path: Path) -> str:
@@ -443,55 +501,56 @@ class ProjectRuntimeService:
         env_values = self._env_values(env)
         safe_refs = self._env_refs(env_refs)
         safe_allowlist = self._env_allowlist(env_allowlist)
-        existing = self._configured_profiles()
-        row = {
-            "id": profile_id, "ecosystem": "custom", "kind": str(kind or "custom"),
-            "project": "runtime_profiles.json", "runnable": bool(run),
-            "run_argv": run, "test_argv": test, "build_argv": build, "urls": safe_urls,
-            "swagger_candidates": self._swagger_candidates(safe_urls),
-            "configured": True,
-            "env": env_values,
-            "env_refs": safe_refs,
-            "inherit_env": bool(inherit_env),
-            "env_allowlist": safe_allowlist,
-        }
-        by_id = {item["id"]: item for item in existing}
-        by_id[profile_id] = row
-        if len(by_id)>256:
-            raise ValueError("RUNTIME_PROFILE_CONFIG_TOO_LARGE")
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        # A crash during write_text() can truncate every configured profile.
-        # Write a private, unique sibling and atomically replace the old JSON
-        # only after its complete UTF-8 contents reach the file descriptor.
-        temporary=self.config_path.with_name(
-            f".{self.config_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-        try:
-            flags=(os.O_CREAT|os.O_EXCL|os.O_WRONLY|
-                   getattr(os,"O_BINARY",0)|getattr(os,"O_NOFOLLOW",0))
-            # Static env values may include credentials. Never create a
-            # world-readable replacement when the user's umask is permissive.
-            descriptor=os.open(temporary,flags,0o600)
+        with _runtime_profile_lock(self.config_path):
+            existing = self._configured_profiles()
+            row = {
+                "id": profile_id, "ecosystem": "custom", "kind": str(kind or "custom"),
+                "project": "runtime_profiles.json", "runnable": bool(run),
+                "run_argv": run, "test_argv": test, "build_argv": build, "urls": safe_urls,
+                "swagger_candidates": self._swagger_candidates(safe_urls),
+                "configured": True,
+                "env": env_values,
+                "env_refs": safe_refs,
+                "inherit_env": bool(inherit_env),
+                "env_allowlist": safe_allowlist,
+            }
+            by_id = {item["id"]: item for item in existing}
+            by_id[profile_id] = row
+            if len(by_id)>256:
+                raise ValueError("RUNTIME_PROFILE_CONFIG_TOO_LARGE")
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            # A crash during write_text() can truncate every configured profile.
+            # Write a private, unique sibling and atomically replace the old JSON
+            # only after its complete UTF-8 contents reach the file descriptor.
+            temporary=self.config_path.with_name(
+                f".{self.config_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
             try:
-                output=os.fdopen(descriptor,"w",encoding="utf-8")
-            except BaseException:
-                os.close(descriptor)
-                raise
-            with output:
-                # A written profile must remain readable by _configured_profiles.
-                # Stream JSON fragments and refuse a total above the read cap
-                # before atomically replacing the last valid configuration.
-                emitted=0
-                encoder=json.JSONEncoder(ensure_ascii=False,indent=2,allow_nan=False)
-                for fragment in encoder.iterencode({"profiles":list(by_id.values())}):
-                    emitted+=len(fragment.encode("utf-8"))
-                    if emitted>_MAX_RUNTIME_PROFILE_BYTES:
-                        raise ValueError("RUNTIME_PROFILE_CONFIG_TOO_LARGE")
-                    output.write(fragment)
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary,self.config_path)
-        finally:
-            temporary.unlink(missing_ok=True)
+                flags=(os.O_CREAT|os.O_EXCL|os.O_WRONLY|
+                       getattr(os,"O_BINARY",0)|getattr(os,"O_NOFOLLOW",0))
+                # Static env values may include credentials. Never create a
+                # world-readable replacement when the user's umask is permissive.
+                descriptor=os.open(temporary,flags,0o600)
+                try:
+                    output=os.fdopen(descriptor,"w",encoding="utf-8")
+                except BaseException:
+                    os.close(descriptor)
+                    raise
+                with output:
+                    # A written profile must remain readable by _configured_profiles.
+                    # Stream JSON fragments and refuse a total above the read cap
+                    # before atomically replacing the last valid configuration.
+                    emitted=0
+                    encoder=json.JSONEncoder(ensure_ascii=False,indent=2,allow_nan=False)
+                    for fragment in encoder.iterencode({"profiles":list(by_id.values())}):
+                        emitted+=len(fragment.encode("utf-8"))
+                        if emitted>_MAX_RUNTIME_PROFILE_BYTES:
+                            raise ValueError("RUNTIME_PROFILE_CONFIG_TOO_LARGE")
+                        output.write(fragment)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary,self.config_path)
+            finally:
+                temporary.unlink(missing_ok=True)
         _resolved, env_meta = self.resolve_environment(row, require_all=False)
         public_row = {**row, **env_meta}
         return {"profile": public_row, "config": ".easychange/runtime_profiles.json"}
