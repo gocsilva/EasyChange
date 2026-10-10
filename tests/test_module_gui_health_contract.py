@@ -176,15 +176,26 @@ def test_standalone_gui_launches_real_python_package_not_nested_script(tmp_path)
     assert gui.process is fake_process
 
     linux_python=tmp_path/".venv"/"bin"/"python"
-    linux_python.parent.mkdir(parents=True)
-    linux_python.write_bytes(b"")
+    windows_python=tmp_path/".venv"/"Scripts"/"python.exe"
+    for candidate in (linux_python,windows_python):
+        candidate.parent.mkdir(parents=True,exist_ok=True)
+        candidate.write_bytes(b"")
+    preferred=windows_python if os.name=="nt" else linux_python
     gui.process=None
     with patch("subprocess.Popen",return_value=fake_process) as launched_venv, \
          patch("socket.create_connection",side_effect=ConnectionRefusedError):
         gui.start()
-    assert launched_venv.call_args.args[0][0]==str(linux_python)
+    assert launched_venv.call_args.args[0][0]==str(preferred)
     assert launched_venv.call_args.args[0][1:]==[
         "-B","-m",service[:-3].replace("/",".")]
+    # A checkout from the other OS may contain a stale venv executable.
+    # It must never be chosen after this platform's interpreter disappears.
+    preferred.unlink()
+    gui.process=None
+    with patch("subprocess.Popen",return_value=fake_process) as fallback, \
+         patch("socket.create_connection",side_effect=ConnectionRefusedError):
+        gui.start()
+    assert fallback.call_args.args[0][0]==sys.executable
 
 
 def test_module_gui_startup_failures_stay_in_status_instead_of_raising(tmp_path):
