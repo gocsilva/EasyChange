@@ -267,7 +267,12 @@ class InboundCommandStore:
         raw_bytes = self._validated_number(raw_bytes, "INBOUND_RAW_SIZE_LIMIT")
         compressed_bytes = self._validated_number(compressed_bytes, "INBOUND_COMPRESSED_SIZE_LIMIT")
         chunk_count = self._validated_number(chunk_count, "INBOUND_CHUNK_COUNT_LIMIT")
-        sha256 = str(sha256 or "").casefold()
+        # Untrusted transport values must already be wire-format strings.
+        # Calling str() on a huge list/dict (or an arbitrary Python object)
+        # allocates a repr before any configured transfer-size guard.
+        if type(sha256) is not str or len(sha256) != 64:
+            raise InboundTransferError("INVALID_INBOUND_SHA256")
+        sha256 = sha256.casefold()
         if raw_bytes <= 0 or raw_bytes > self.MAX_RAW_BYTES:
             raise InboundTransferError(
                 "INBOUND_RAW_SIZE_LIMIT",
@@ -332,8 +337,11 @@ class InboundCommandStore:
     ) -> dict[str, Any]:
         transfer_id = self._transfer_id(transfer_id)
         index = self._validated_number(index, "INBOUND_CHUNK_INDEX_OUT_OF_RANGE")
-        crc32 = str(crc32 or "").casefold()
-        token = str(token or "")
+        if type(crc32) is not str or len(crc32) != 8:
+            raise InboundTransferError("INVALID_INBOUND_CHUNK_CRC")
+        crc32 = crc32.casefold()
+        if type(token) is not str:
+            raise InboundTransferError("INVALID_INBOUND_CHUNK_BASE64URL")
         if not self._CRC_RE.fullmatch(crc32):
             raise InboundTransferError("INVALID_INBOUND_CHUNK_CRC")
         # An 8 KiB chunk cannot require an unbounded Base64 input.
