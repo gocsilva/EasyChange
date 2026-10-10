@@ -262,7 +262,7 @@ class InboundCommandStore:
             "chunk_count": chunk_count,
             "sha256": sha256,
         }
-        with self._transaction_lock:
+        with self._transaction_lock():
             self._cleanup_locked()
             directory = self._dir(transfer_id)
             directory.mkdir(parents=True, exist_ok=True)
@@ -326,7 +326,7 @@ class InboundCommandStore:
                 data={"index": index, "expected_crc32": crc32, "actual_crc32": actual_crc},
             )
 
-        with self._transaction_lock:
+        with self._transaction_lock():
             meta = self._load_meta_locked(transfer_id)
             count = int(meta.get("chunk_count") or 0)
             if index < 0 or index >= count:
@@ -444,14 +444,14 @@ class InboundCommandStore:
 
     def assemble(self, transfer_id: str) -> tuple[str, dict[str, Any]]:
         transfer_id = self._transfer_id(transfer_id)
-        with self._transaction_lock:
+        with self._transaction_lock():
             command, info = self._assemble_locked(transfer_id)
             os.utime(self._dir(transfer_id), None)
             return command, info
 
     def status(self, transfer_id: str) -> dict[str, Any]:
         transfer_id = self._transfer_id(transfer_id)
-        with self._transaction_lock:
+        with self._transaction_lock():
             meta = self._load_meta_locked(transfer_id)
             count = int(meta.get("chunk_count") or 0)
             missing = self._missing_locked(transfer_id, count)
@@ -481,7 +481,7 @@ class InboundCommandStore:
 
     def abort(self, transfer_id: str) -> dict[str, Any]:
         transfer_id = self._transfer_id(transfer_id)
-        with self._transaction_lock:
+        with self._transaction_lock():
             directory = self._dir(transfer_id)
             existed = directory.exists()
             shutil.rmtree(directory, ignore_errors=True)
