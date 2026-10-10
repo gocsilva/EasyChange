@@ -424,6 +424,20 @@ class MCPBridge:
                         ("recipient" in page and
                          message.get("target") != CANONICAL_MODULE_ID)):
                     raise ValueError("MCP_INBOX_TARGET_MISMATCH")
+                # Treat the hub response as an untrusted transport
+                # envelope until every selected message passes preflight.
+                # Do not execute or ACK forged/invalid source and topic data.
+                source=message.get("source")
+                topic=message.get("topic")
+                cid=message.get("correlation_id","")
+                if (type(source) is not str or
+                        source not in ("mcp","bmollm","esp","android","easychange") or
+                        type(topic) is not str or
+                        not 1<=len(topic)<=100 or
+                        any(not (c.isascii() and (c.isalnum() or c in "-._"))
+                            for c in topic) or
+                        type(cid) is not str or len(cid)>128):
+                    raise ValueError("INVALID_MCP_INBOX_MESSAGE")
                 if message["id"] in unique:
                     raise ValueError("DUPLICATE_MCP_INBOX_ID")
                 unique.add(message["id"])
