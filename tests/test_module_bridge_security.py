@@ -89,6 +89,49 @@ class TestHubRedirectBoundary(unittest.TestCase):
                 handler.send.assert_called_once_with(
                     403,{"error":"ValueError"})
 
+    def test_nonfinite_attach_json_cannot_reach_credential_transition(self):
+        import io
+        from unittest.mock import Mock,patch
+        from mcp_adapter.module_service import Handler
+
+        invalid=(
+            b'{"token":"test-token","unused":NaN}',
+            b'{"token":"test-token","unused":Infinity}',
+            b'{"token":"test-token","unused":-Infinity}',
+            b'{"token":"test-token","unused":1e999}',
+        )
+        for route in ("/v1/attach","/v1/detach"):
+            for payload in invalid:
+                with self.subTest(route=route,payload=payload):
+                    handler=object.__new__(Handler)
+                    handler.path=route
+                    handler.headers={"Content-Type":"application/json",
+                                     "Content-Length":str(len(payload))}
+                    handler.rfile=io.BytesIO(payload)
+                    handler.send=Mock()
+                    with patch("module_bridge.attach_hub") as attach, \
+                         patch("module_bridge.detach_hub") as detach:
+                        handler.do_POST()
+                    handler.send.assert_called_once_with(
+                        403,{"error":"ValueError"})
+                    attach.assert_not_called()
+                    detach.assert_not_called()
+
+        # Finite numeric metadata stays compatible with existing clients.
+        payload=b'{"token":"test-token","unused":1.25}'
+        handler=object.__new__(Handler)
+        handler.path="/v1/attach"
+        handler.headers={"Content-Type":"application/json",
+                         "Content-Length":str(len(payload))}
+        handler.rfile=io.BytesIO(payload)
+        handler.send=Mock()
+        with patch("module_bridge.attach_hub",
+                   return_value={"connected":True,"id":"easychange"}) as attach:
+            handler.do_POST()
+        attach.assert_called_once_with("test-token","easychange")
+        handler.send.assert_called_once_with(
+            200,{"connected":True,"id":"easychange"})
+
     def test_duplicate_peer_health_cannot_fake_esp_connectivity(self):
         import io
         from unittest.mock import patch
