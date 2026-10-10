@@ -897,7 +897,10 @@ class DurableResultStore:
         stamp: tuple[int, int, int, int] | None = None,
     ) -> None:
         size = len(stream)
-        if size <= 0 or size > self._stream_cache_max_bytes:
+        # An empty stream is the bounded compressor's negative-cache entry.
+        # Retain it for the normal cache TTL: repeated EC2H polls must not
+        # recompress an incompressible 64 MiB receipt every time.
+        if size > self._stream_cache_max_bytes:
             return
         previous = self._stream_cache.pop(sequence, None)
         if previous is not None:
