@@ -590,10 +590,25 @@ class CommandService:
                     return replay
                 legacy = previous.get("result")
                 if previous.get("state") == "DONE" and isinstance(legacy, dict):
-                    replay = Result(**legacy)
+                    # A journal is legacy/untrusted state. Malformed replay
+                    # objects must not escape as Python exceptions, nor
+                    # authorize a second filesystem mutation.
+                    try:
+                        replay = Result(**legacy)
+                        if (type(replay.ok) is not bool
+                                or not isinstance(replay.command, str)
+                                or not isinstance(replay.data, dict)):
+                            raise ValueError("MALFORMED_LEGACY_RESULT")
+                    except (TypeError, ValueError):
+                        return Result(
+                            False, "ec",
+                            error="Completed sequence has no replayable result",
+                            code="SEQUENCE_RESULT_MISSING", sequence=sequence,
+                            data={"state": "DONE", "duplicate": True},
+                        )
                     replay.sequence = sequence
-                    replay.data = {**(replay.data or {}), "duplicate": True}
-                    receipt = replay.data.get("mutation_receipt") if isinstance(replay.data, dict) else None
+                    replay.data = {**replay.data, "duplicate": True}
+                    receipt = replay.data.get("mutation_receipt")
                     _record, refusal = _claim_durable()
                     if refusal is not None:
                         return refusal
