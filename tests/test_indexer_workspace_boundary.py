@@ -90,6 +90,51 @@ def test_concurrent_indexers_merge_protected_paths_without_losing_exclusions(tmp
         b.close()
 
 
+def test_protected_legacy_sqlite_rows_cannot_escape_search_or_file_listing(tmp_path):
+    root=tmp_path/"project"
+    root.mkdir()
+    secret=root/"Secrets.py"
+    secret.write_text("def SecretSymbol(): return 'HIDDEN_INDEX_MARKER'\n",encoding="utf-8")
+    visible=root/"Public.py"
+    visible.write_text("def PublicSymbol(): return 'VISIBLE_INDEX_MARKER'\n",encoding="utf-8")
+    idx=Indexer(root)
+    try:
+        assert idx.refresh(force=True)["files"]==2
+        idx.protect_path("secrets.py",scrub=False)
+        # Simulate a racing/legacy SQLite writer that recreates a now
+        # protected row after the cleanup, with matching stat data.
+        stat=secret.stat()
+        with idx._connect() as db:
+            db.execute(
+                """INSERT OR REPLACE INTO files
+                   (path,extension,size,mtime_ns,sha256,language,content)
+                   VALUES(?,?,?,?,?,?,?)""",
+                ("Secrets.py",".py",stat.st_size,stat.st_mtime_ns,
+                 "legacy-hash","python",secret.read_text(encoding="utf-8")),
+            )
+            db.execute("""INSERT INTO symbols(path,name,kind,line,column_no,
+                        signature,file_hash) VALUES(?,?,?,?,?,?,?)""",
+                       ("Secrets.py","SecretSymbol","function",1,1,
+                        "def SecretSymbol():","legacy-hash"))
+            if idx._fts_enabled:
+                db.execute("INSERT INTO files_fts(path,content) VALUES(?,?)",
+                           ("Secrets.py",secret.read_text(encoding="utf-8")))
+        assert idx.search("HIDDEN_INDEX_MARKER")==[]
+        assert idx.symbols(name="SecretSymbol")==[]
+        listing=idx.files(offset=0,limit=10)
+        assert [item["path"] for item in listing]==["Public.py"]
+        assert idx.files(offset=0,limit=1)[0]["path"]=="Public.py"
+        assert idx.files(offset=1,limit=1)==[]
+        assert idx.search("VISIBLE_INDEX_MARKER")
+        if idx._fts_enabled:
+            # Repeat through the ordinary SQLite fallback instead of FTS.
+            idx._fts_enabled=False
+            assert idx.search("HIDDEN_INDEX_MARKER")==[]
+            idx._fts_enabled=True
+    finally:
+        idx.close()
+
+
 def test_corrupt_persisted_protection_metadata_fails_closed(tmp_path):
     root=tmp_path/"project"
     root.mkdir()
