@@ -935,7 +935,8 @@ class Indexer:
                                 if self._is_protected_path(relative):
                                     continue
                             target = self.root / Path(relative)
-                            if (target.is_symlink() or not target.is_file() or
+                            if (self._has_symlink_component(relative) or
+                                    not target.is_file() or
                                     not target.resolve().is_relative_to(trusted_root)):
                                 continue
                         except (ValueError, OSError, RuntimeError):
