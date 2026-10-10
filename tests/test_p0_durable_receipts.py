@@ -955,6 +955,41 @@ def test_cleanup_skips_invalid_legacy_sequence_and_continues_other_receipts(tmp_
     assert store.claim_running(valid,"a"*64,":state",mutation=False)[1] is False
 
 
+def test_legacy_receipt_with_corrupt_duration_preserves_replay_identity(tmp_path):
+    import pytest
+    import time
+
+    store=DurableResultStore(tmp_path / "receipts")
+    sequence="QBADTIMING01"
+    hash_value="a"*64
+    store.mark_running(sequence,hash_value,":state",mutation=False)
+    finished=store.complete(
+        sequence,hash_value,":state",
+        {"ok":True,"command":"state","data":{"value":"existing result"}})
+    assert finished["state"]=="DONE"
+    for field,value in (("started_at","not-a-time"),
+                        ("finished_at",[]),
+                        ("started_at",float("inf")),
+                        ("finished_at",-1.0)):
+        with pytest.raises(RuntimeError,match="RESULT_RECEIPT_UNREADABLE"):
+            current=store.get(sequence)
+            current["started_at"]=finished["started_at"]
+            current["finished_at"]=finished["finished_at"]
+            current[field]=value
+            # Even if a recent update timestamp is valid, an invalid elapsed
+            # timestamp cannot be exposed as a trustworthy execution duration.
+            current["updated_at"]=time.time()
+            store._write(sequence,current,run_cleanup=False)
+            store.status(sequence)
+        # Corrupt metadata must never allow reexecution of an existing
+        # sequence; claim_running still returns the durable record.
+        _,is_new=store.claim_running(sequence,hash_value,":state",mutation=False)
+        assert is_new is False
+
+        # Restore the original receipt before testing the next bad field.
+        store._write(sequence,finished,run_cleanup=False)
+
+
 def test_recursive_corrupt_receipt_does_not_break_other_durable_commits(tmp_path):
     import os
     import time
