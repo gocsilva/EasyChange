@@ -14,9 +14,15 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request,build_opener,HTTPRedirectHandler,ProxyHandler
 
-BUS=os.environ.get("MCP_MODULE_BUS_URL","http://127.0.0.1:8786")
-if BUS not in ("http://127.0.0.1:8786","http://localhost:8786"):
+def _canonical_bus_url(value):
+    # The core listens on IPv4 loopback. Accept the documented localhost
+    # alias but never let OS name resolution select ::1 or an overridden host.
+    if value in ("http://127.0.0.1:8786", "http://localhost:8786"):
+        return "http://127.0.0.1:8786"
     raise ValueError("MCP_BUS_MUST_USE_LOOPBACK")
+
+BUS=_canonical_bus_url(
+    os.environ.get("MCP_MODULE_BUS_URL","http://127.0.0.1:8786"))
 
 class _NoRedirect(HTTPRedirectHandler):
     """Never forward MCP credentials to redirect destinations."""
