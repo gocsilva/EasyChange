@@ -166,14 +166,17 @@ class MCPBridge:
                 # Use iterator frames, not one temporary list reference
                 # per member of a large RPC dictionary. This keeps scan
                 # memory proportional to nesting depth.
-                pending=[iter((body,))]
-                seen_containers=set()
+                pending=[(iter((body,)),None)]
+                active_containers=set()
                 visits=0
                 while pending:
+                    iterator,owner=pending[-1]
                     try:
-                        item=next(pending[-1])
+                        item=next(iterator)
                     except StopIteration:
                         pending.pop()
+                        if owner is not None:
+                            active_containers.remove(owner)
                         continue
                     visits+=1
                     if visits>request_limit:
@@ -182,20 +185,25 @@ class MCPBridge:
                         if len(item)>request_limit:
                             raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
                     elif isinstance(item,(dict,list,tuple)):
-                        if id(item) in seen_containers:
+                        identity=id(item)
+                        if identity in active_containers:
+                            # Let the JSON encoder reject a cycle. The
+                            # preflight must not recurse forever.
                             continue
-                        seen_containers.add(id(item))
                         if len(item)>request_limit:
                             raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
                         if isinstance(item,dict):
-                            # Python accepts non-string mapping keys; JSON
-                            # stringifies them, allowing collisions such as
-                            # 1 and "1". Reject before network admission.
+                            # Native nonstring keys can alias string keys in
+                            # JSON; never send an ambiguous payload.
                             if any(type(key) is not str for key in item):
                                 raise ValueError("MCP_BUS_INVALID_JSON_KEY")
-                            pending.append(itertools.chain(item.keys(),item.values()))
+                            children=itertools.chain(item.keys(),item.values())
                         else:
-                            pending.append(iter(item))
+                            children=iter(item)
+                        # Only ancestors belong in the active set. A global
+                        # visited set grows with every unrelated child node.
+                        active_containers.add(identity)
+                        pending.append((children,identity))
             # Shared object graphs can expand exponentially in JSON.
             # json.dumps() materializes that expansion before a length check;
             # stream encoder fragments into a byte-limited buffer instead.
