@@ -1644,6 +1644,39 @@ def test_payload_cache_survives_unchanged_receipt_without_redecode(tmp_path, mon
         assert original.stream_meta(sequence) is not None
 
 
+def test_local_thread_contention_fails_before_creating_claim_file(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    import pytest
+
+    store=DurableResultStore(tmp_path/"claims")
+    refused=Mock()
+    refused.acquire.return_value=False
+    with monkeypatch.context() as patcher:
+        patcher.setattr(store,"_lock",refused)
+        with pytest.raises(RuntimeError,match="RESULT_CLAIM_LOCK_BUSY"):
+            store.claim_running("QLOCALBUSY1","a"*64,":one",mutation=True)
+    refused.acquire.assert_called_once_with(timeout=2.0)
+    refused.release.assert_not_called()
+    assert not store._claim_lock_path.exists()
+    assert not store._path("QLOCALBUSY1").exists()
+
+    record,acquired=store.claim_running(
+        "QLOCALBUSY1","a"*64,":one",mutation=True)
+    assert acquired is True and record["state"]=="RUNNING"
+
+
+def test_nested_same_thread_claim_lock_preserves_rlock_reentrancy(tmp_path):
+    store=DurableResultStore(tmp_path/"claims")
+    with store._bounded_local_claim_lock():
+        claimed,won=store.claim_running(
+            "QREENTRANT1","b"*64,":one",mutation=True)
+    assert won is True
+    duplicate,won_again=store.claim_running(
+        "QREENTRANT1","b"*64,":one",mutation=True)
+    assert won_again is False
+    assert duplicate["execution_id"]==claimed["execution_id"]
+
+
 def test_claim_lock_contention_has_bounded_deadline_and_never_claims(tmp_path, monkeypatch):
     import errno
     import sys
