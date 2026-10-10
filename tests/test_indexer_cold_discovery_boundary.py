@@ -76,3 +76,52 @@ def test_cold_discovery_rejects_nonliteral_outside_scope_before_git(
         with pytest.raises(ValueError, match="INVALID_PROTECTED_INDEX_PATH"):
             index.discover_many(["CANARY"], path_prefix=scope)
     git.assert_not_called()
+
+
+def test_cold_git_output_has_bounded_disk_spool_and_explicit_truncation(
+        tmp_path, monkeypatch):
+    import easychange.core.indexer as source
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "source.py").write_text(
+        "def CANARY(): pass\n", encoding="utf-8")
+    index = Indexer(tmp_path)
+    index.start_background_refresh = lambda: None
+    monkeypatch.setattr(source, "MAX_COLD_GIT_BYTES", 80)
+
+    def fake_git(argv, **kwargs):
+        # The real subprocess streams into a temporary file, not a captured
+        # CompletedProcess.stdout allocation. Model output beyond the cap.
+        assert kwargs.get("capture_output") is None
+        assert kwargs["stdout"].writable()
+        kwargs["stdout"].write(
+            b"source.py:1:def CANARY(): pass\n" + b"x" * 500)
+        return subprocess.CompletedProcess(argv, 0, None, None)
+
+    with patch("easychange.core.indexer.subprocess.run",
+               side_effect=fake_git) as called:
+        report = index.discover_many(["CANARY"])
+    called.assert_called_once()
+    assert report["truncated"] is True
+    assert report["files"] == ["source.py"]
+    assert len(report["by_term"]["CANARY"]["references"]) == 1
+
+
+def test_cold_git_bounds_number_of_retained_match_rows(tmp_path, monkeypatch):
+    import easychange.core.indexer as source
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "source.py").write_text(
+        "def CANARY(): pass\n" * 5, encoding="utf-8")
+    index = Indexer(tmp_path)
+    index.start_background_refresh = lambda: None
+    monkeypatch.setattr(source, "MAX_COLD_GIT_ROWS", 2)
+    matches = "".join(
+        f"source.py:{line}:def CANARY(): pass\n" for line in range(1, 6))
+    with patch("easychange.core.indexer.subprocess.run",
+               return_value=subprocess.CompletedProcess(
+                   ["git", "grep"], 0, matches, "")):
+        report = index.discover_many(["CANARY"])
+    assert report["truncated"] is True
+    assert len(report["by_term"]["CANARY"]["references"]) == 2
+    assert report["by_term"]["CANARY"]["occurrences"] == 2
