@@ -159,6 +159,24 @@ def test_writer_keeps_malformed_existing_runtime_profiles_untouched(tmp_path):
         assert not list(root.glob(".runtime_profiles.json.*.tmp"))
 
 
+def test_strict_writer_identifies_duplicate_ids_without_discarding_rows(tmp_path):
+    import pytest
+    root=tmp_path/".easychange"
+    root.mkdir()
+    runtime=object.__new__(ProjectRuntimeService)
+    runtime.workspace=SimpleNamespace(root_path=tmp_path)
+    runtime.config_path=root/"runtime_profiles.json"
+    runtime.resolve_environment=lambda *_a,**_k: (
+        {},{"resolved_env_keys":[],"unresolved_env_refs":[]})
+    valid={**_valid_row(),"urls":["http://localhost:5000"]}
+    payload=json.dumps({"profiles":[valid,valid]}).encode()
+    runtime.config_path.write_bytes(payload)
+    assert len(runtime._configured_profiles())==2
+    with pytest.raises(ValueError,match="RUNTIME_PROFILE_CONFIG_DUPLICATE_ID"):
+        runtime.configure_profile("next")
+    assert runtime.config_path.read_bytes()==payload
+
+
 def test_writer_rejects_new_profile_id_the_reader_would_ignore(tmp_path):
     import pytest
 
