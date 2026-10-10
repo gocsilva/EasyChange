@@ -484,7 +484,10 @@ class DurableResultStore:
                 if old_stream is not None:
                     self._stream_cache_bytes -= len(old_stream[1])
                 self._terminal_header_cache.pop(sequence, None)
-            except OSError:
+            except (OSError, ValueError):
+                # A decoded but malformed legacy receipt can contain a
+                # sequence that _path() rejects. Preserve its evidence and
+                # continue cleaning independent receipts.
                 continue
 
     def get(self, sequence: str) -> dict[str, Any] | None:
