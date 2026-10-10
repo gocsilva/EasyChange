@@ -140,5 +140,28 @@ class AttachConcurrencyTests(unittest.TestCase):
 
 
 
+    def test_attach_probe_budget_rejects_saturation_without_probing_hub(self):
+        from unittest.mock import patch
+        canonical=bridge.CANONICAL_MODULE_ID
+        limit=threading.BoundedSemaphore(4)
+        for _ in range(4):
+            self.assertTrue(limit.acquire(blocking=False))
+        try:
+            guards=self._isolated()
+            with guards[0],guards[1],guards[2], \
+                 patch.object(bridge,"_attach_probe_slots",limit), \
+                 patch.object(bridge.MCPBridge,"peers") as peers:
+                with self.assertRaisesRegex(RuntimeError,"HUB_ATTACH_BUSY"):
+                    bridge.attach_hub("N"*48,canonical)
+                peers.assert_not_called()
+                self.assertEqual(bridge._runtime_token,"A"*48)
+                self.assertFalse(bridge._runtime_detached)
+                self.assertEqual(bridge._runtime_state_epoch,0)
+        finally:
+            for _ in range(4):
+                limit.release()
+
+
+
 if __name__=="__main__":
     unittest.main()
