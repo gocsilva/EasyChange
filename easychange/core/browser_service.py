@@ -166,7 +166,10 @@ class _WebSocket:
             if not chunk:
                 break
             response.extend(chunk)
-        text = bytes(response).split(b"\r\n\r\n", 1)[0].decode("latin-1", errors="replace")
+        header, separator, first_frame = bytes(response).partition(b"\r\n\r\n")
+        if not separator:
+            raise CdpError("CDP_WEBSOCKET_HANDSHAKE_TRUNCATED")
+        text = header.decode("latin-1", errors="replace")
         lines = text.splitlines()
         if not lines or " 101 " not in lines[0]:
             raise CdpError(f"CDP_WEBSOCKET_HANDSHAKE_FAILED:{text[:300]}")
@@ -185,11 +188,19 @@ class _WebSocket:
         )
         if accept != expected:
             raise CdpError("CDP_WEBSOCKET_ACCEPT_MISMATCH")
+        # recv() can return the HTTP upgrade AND the first WebSocket frame
+        # together. Losing those trailing bytes desynchronizes the reader.
+        self._recv_buffer = bytearray(first_frame)
 
     def _recv_exact(self, count: int) -> bytes:
         if count < 0 or count > MAX_CDP_WS_MESSAGE_BYTES:
             raise CdpError("CDP_WEBSOCKET_MESSAGE_TOO_LARGE")
         output = bytearray()
+        prebuffer = getattr(self, "_recv_buffer", None)
+        if prebuffer:
+            taken = min(count, len(prebuffer))
+            output.extend(prebuffer[:taken])
+            del prebuffer[:taken]
         while len(output) < count:
             chunk = self.sock.recv(count - len(output))
             if not chunk:
