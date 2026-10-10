@@ -114,6 +114,26 @@ def test_nonfinite_session_save_rejects_before_replacing_existing_file(tmp_path,
     assert not list(path.parent.glob(".session.json.*.tmp"))
 
 
+@pytest.mark.parametrize("payload", (
+    '{"workspace":"demo","session_id":"SVALID","session_id":"SOVERWRITE"}',
+    '{"workspace":"demo","aliases":{"o":"open","o":"write"}}',
+    '{"workspace":"demo","history":[":open"],"history":[":delete"]}',
+    '{"workspace":"wrong","workspace":"demo","session_id":"SFORGED"}',
+))
+def test_duplicate_machine_session_fields_fail_closed_without_rewriting(tmp_path, payload):
+    folder=tmp_path / ".easychange"
+    folder.mkdir()
+    path=folder / "session.json"
+    path.write_text(payload,encoding="utf-8")
+    imported=MachineSession(path,"demo")
+    assert imported.data["workspace"]=="demo"
+    assert imported.data["history"]==[]
+    assert imported.data["aliases"]["o"]=="open"
+    assert imported.data["session_id"].startswith("S")
+    assert imported.data["session_id"] not in ("SVALID","SOVERWRITE","SFORGED")
+    assert path.read_text(encoding="utf-8")==payload
+
+
 def test_nonmatching_workspace_cannot_import_other_workspace_state(tmp_path):
     path = tmp_path / ".easychange" / "session.json"
     path.parent.mkdir()
