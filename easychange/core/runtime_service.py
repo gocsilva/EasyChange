@@ -8,6 +8,7 @@ import shutil
 import ssl
 import subprocess
 import time
+import uuid
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
@@ -1264,8 +1265,10 @@ class ProjectRuntimeService:
             return {"ok": False, "profile": profile, "probe": probe, "process": started_process}
 
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        folder = self.evidence_root / f"{stamp}-swagger"
-        folder.mkdir(parents=True, exist_ok=True)
+        # Per-run identity prevents two evidence requests in the same second
+        # from overwriting each other or mixing HTTP and screenshot artifacts.
+        folder = self.evidence_root / f"{stamp}-swagger-{uuid.uuid4().hex}"
+        folder.mkdir(parents=True, exist_ok=False)
         body = probe.pop("body", b"") or b""
         suffix = ".json" if "json" in str(probe.get("content_type", "")).casefold() else ".html"
         response_path = folder / f"response{suffix}"
@@ -1352,8 +1355,8 @@ class ProjectRuntimeService:
     def evidence(self, title: str = "test-evidence", process_id: str = "") -> dict:
         started_at = time.monotonic()
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        folder = self.evidence_root / f"{stamp}-{_slug(title)}"
-        folder.mkdir(parents=True, exist_ok=True)
+        folder = self.evidence_root / f"{stamp}-{_slug(title)}-{uuid.uuid4().hex}"
+        folder.mkdir(parents=True, exist_ok=False)
         logs = self.processes.logs(process_id, limit=30000) if process_id else None
         execution = self.processes.last_execution
         data = {"created_utc": stamp, "title": title, "process_id": process_id or None,
