@@ -388,6 +388,10 @@ class DurableResultStore:
         # actually eligible for removal, not every stored payload.
         for path in files:
             try:
+                # Never follow a forged receipt symlink outside the store
+                # during retention; unreadable receipts remain evidence.
+                if path.is_symlink():
+                    continue
                 stat = path.stat()
                 age = now - stat.st_mtime
                 if age <= self.ttl_seconds:
@@ -439,6 +443,11 @@ class DurableResultStore:
     def get(self, sequence: str) -> dict[str, Any] | None:
         with self._lock:
             target = self._path(sequence)
+            # A present symlink (including a dangling one) is not an absent
+            # sequence. Reject it before replay/claim to prevent unrelated
+            # filesystem content being interpreted as an execution receipt.
+            if target.is_symlink():
+                raise RuntimeError("RESULT_RECEIPT_UNREADABLE")
             if not target.exists():
                 return None
             try:
