@@ -157,6 +157,43 @@ def test_symlinked_transfer_directory_cannot_redirect_staging_or_abort(tmp_path)
                        chunk_count=1,sha256="a"*64)["duplicate"] is False
 
 
+def test_transfer_metadata_symlink_is_never_read_or_overwritten(tmp_path):
+    store=InboundCommandStore(tmp_path / "inbound")
+    key="UMETASAFE1"
+    params={"raw_bytes":3,"compressed_bytes":3,
+            "chunk_count":1,"sha256":"a"*64}
+    store.begin(key,**params)
+    target=store._meta_path(key)
+    target.unlink()
+    private=tmp_path / "private.json"
+    private.write_text('{"confidential":true}',encoding="utf-8")
+    try:
+        target.symlink_to(private)
+    except (OSError,NotImplementedError) as exc:
+        pytest.skip("Symlinks unavailable: "+type(exc).__name__)
+    for operation in (lambda:store.status(key),lambda:store.begin(key,**params)):
+        with pytest.raises(InboundTransferError,match="INBOUND_TRANSFER_META_CORRUPT"):
+            operation()
+    assert private.read_text(encoding="utf-8")=='{"confidential":true}'
+    target.unlink()
+    assert store.begin(key,**params)["duplicate"] is False
+
+
+def test_transfer_metadata_fifo_does_not_block_status(tmp_path):
+    import os
+    if not (hasattr(os,"mkfifo") and hasattr(os,"O_NONBLOCK")):
+        pytest.skip("Platform lacks nonblocking FIFO")
+    store=InboundCommandStore(tmp_path / "inbound")
+    key="UMETAFIFO1"
+    store.begin(key,raw_bytes=3,compressed_bytes=3,
+                chunk_count=1,sha256="a"*64)
+    target=store._meta_path(key)
+    target.unlink()
+    os.mkfifo(target)
+    with pytest.raises(InboundTransferError,match="INBOUND_TRANSFER_META_CORRUPT"):
+        store.status(key)
+
+
 def test_inbound_transfer_ascii_casefold_preserves_existing_directory(tmp_path):
     store=InboundCommandStore(tmp_path / "inbound")
     first=store.begin("uss234567",raw_bytes=10,compressed_bytes=8,
