@@ -1644,6 +1644,79 @@ def test_payload_cache_survives_unchanged_receipt_without_redecode(tmp_path, mon
         assert original.stream_meta(sequence) is not None
 
 
+def test_claim_lock_contention_has_bounded_deadline_and_never_claims(tmp_path, monkeypatch):
+    import errno
+    import sys
+    import pytest
+    import easychange.core.result_store as store_module
+
+    if sys.platform == "win32":
+        pytest.skip("POSIX flock contention contract")
+    import fcntl
+
+    store=DurableResultStore(tmp_path/"claims")
+    clock=iter((0.0,1.0,2.1))
+    wait=[]
+    original=fcntl.flock
+
+    def always_busy(fd,mode):
+        if mode & fcntl.LOCK_EX:
+            raise OSError(errno.EAGAIN,"other process owns claim")
+        return original(fd,mode)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(fcntl,"flock",always_busy)
+        patcher.setattr(store_module.time,"monotonic",lambda:next(clock))
+        patcher.setattr(store_module.time,"sleep",lambda seconds:wait.append(seconds))
+        with pytest.raises(RuntimeError,match="RESULT_CLAIM_LOCK_BUSY"):
+            store.claim_running("QLOCKBUSY1","a"*64,":one",mutation=True)
+
+    assert wait==[0.05]
+    assert not store._path("QLOCKBUSY1").exists()
+    # No owner was granted; the same sequence can be claimed when contention
+    # disappears, rather than returning an invented RUNNING receipt.
+    receipt,claimed=store.claim_running(
+        "QLOCKBUSY1","a"*64,":one",mutation=True)
+    assert claimed is True and receipt["state"]=="RUNNING"
+
+
+def test_claim_lock_retries_transient_contention_without_duplicate_claim(tmp_path, monkeypatch):
+    import errno
+    import sys
+    import pytest
+    import easychange.core.result_store as store_module
+
+    if sys.platform == "win32":
+        pytest.skip("POSIX flock contention contract")
+    import fcntl
+
+    store=DurableResultStore(tmp_path/"claims")
+    original=fcntl.flock
+    attempts=[]
+    sleeps=[]
+
+    def temporary_busy(fd,mode):
+        if mode & fcntl.LOCK_EX:
+            attempts.append(mode)
+            if len(attempts)<=2:
+                raise OSError(errno.EAGAIN,"contended")
+        return original(fd,mode)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(fcntl,"flock",temporary_busy)
+        patcher.setattr(store_module.time,"sleep",lambda seconds:sleeps.append(seconds))
+        receipt,claimed=store.claim_running(
+            "QLOCKRETRY1","b"*64,":one",mutation=True)
+
+    assert len(attempts)==3
+    assert sleeps==[0.05,0.05]
+    assert claimed is True
+    replay,claimed_again=store.claim_running(
+        "QLOCKRETRY1","b"*64,":one",mutation=True)
+    assert claimed_again is False
+    assert replay["execution_id"]==receipt["execution_id"]
+
+
 def test_claim_lock_rejects_symlink_without_touching_foreign_file(tmp_path):
     import pytest
 
