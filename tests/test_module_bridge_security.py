@@ -838,6 +838,38 @@ class TestHubRedirectBoundary(unittest.TestCase):
                     self.assertFalse(service.esp_online())
                 self.assertTrue(stream.closed)
 
+    def test_bridge_credentials_with_header_whitespace_fail_before_network(self):
+        from unittest.mock import patch
+
+        invalid=("contains space", "token\nsecond", "token\rsecond",
+                 "token\tsecond", "token\x7f", "not-a-token ")
+        for token in invalid:
+            with self.subTest(token=repr(token)), \
+                 patch.object(module_bridge._local_opener,"open") as opened:
+                client=module_bridge.MCPBridge(token=token)
+                self.assertFalse(client.connected)
+                with self.assertRaisesRegex(
+                        RuntimeError,"MCP_NOT_CONNECTED_STANDALONE"):
+                    client.catalog()
+                opened.assert_not_called()
+
+        # Direct and inherited valid ASCII credentials keep the existing API.
+        with patch.object(module_bridge._local_opener,"open") as opened:
+            self.assertTrue(
+                module_bridge.MCPBridge(token="valid-bridge-token").connected)
+            opened.assert_not_called()
+        with patch.dict(module_bridge.os.environ,
+                        {"MCP_MODULE_BUS_TOKEN":"token\nwith-control"}), \
+             patch.object(module_bridge,"_runtime_token",""), \
+             patch.object(module_bridge,"_runtime_detached",False), \
+             patch.object(module_bridge._local_opener,"open") as opened:
+            client=module_bridge.MCPBridge()
+            self.assertFalse(client.connected)
+            with self.assertRaisesRegex(
+                    RuntimeError,"MCP_NOT_CONNECTED_STANDALONE"):
+                client.peers()
+            opened.assert_not_called()
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
