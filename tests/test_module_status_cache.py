@@ -36,3 +36,30 @@ def test_module_status_reuses_version_for_same_file_and_invalidates_on_change(tm
 
 def test_status_metadata_cache_is_bounded():
     assert integration._project_version.cache_info().maxsize==8
+
+
+def test_missing_source_pyproject_keeps_packaged_module_status_readable(tmp_path):
+    with patch.object(integration,"ROOT",tmp_path):
+        result=integration.module_status(esp_enabled=True)
+    assert result["installed"] is True
+    assert result["version"]=="unknown"
+    assert result["esp_selected"] is True
+
+
+def test_oversized_project_toml_never_reaches_parser(tmp_path):
+    manifest=tmp_path/"pyproject.toml"
+    manifest.write_bytes(b"x"*(integration.MAX_PROJECT_METADATA_BYTES+1))
+    try:
+        integration._project_version.cache_clear()
+        with patch.object(integration,"ROOT",tmp_path), \
+             patch.object(integration.tomllib,"load",
+                          side_effect=AssertionError("TOML_PARSE_TOO_LARGE")) as parse:
+            try:
+                integration.module_status()
+            except ValueError as exc:
+                assert str(exc)=="MODULE_PROJECT_METADATA_TOO_LARGE"
+            else:
+                raise AssertionError("Oversized project metadata accepted")
+            parse.assert_not_called()
+    finally:
+        integration._project_version.cache_clear()
