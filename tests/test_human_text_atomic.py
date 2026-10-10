@@ -277,3 +277,68 @@ def test_human_text_fifo_metadata_does_not_block_recovery(tmp_path):
     recovered=service.info()
     assert recovered["sha256"]==saved["sha256"]
     assert service.meta_path.is_file()
+
+def test_human_text_buffer_symlink_never_reads_foreign_text(tmp_path):
+    import os
+
+    service=HumanTextService(tmp_path/"workspace")
+    foreign=tmp_path/"external-private.txt"
+    foreign.write_text("FOREIGN SECRET",encoding="utf-8")
+    try:
+        service.path.symlink_to(foreign)
+    except (OSError,NotImplementedError):
+        pytest.skip("symlink creation unavailable on this host")
+    with pytest.raises(ValueError,match="HUMAN_TEXT_UNSAFE_BUFFER"):
+        service.load()
+    with pytest.raises(ValueError,match="HUMAN_TEXT_UNSAFE_BUFFER"):
+        service.info()
+    with pytest.raises(ValueError,match="HUMAN_TEXT_UNSAFE_BUFFER"):
+        service.read(cursor=0)
+    assert foreign.read_text(encoding="utf-8")=="FOREIGN SECRET"
+
+
+def test_human_text_fifo_buffer_is_rejected_without_blocking(tmp_path):
+    import os
+
+    if not hasattr(os,"mkfifo") or not hasattr(os,"O_NONBLOCK"):
+        pytest.skip("FIFO/nonblocking open unsupported")
+    service=HumanTextService(tmp_path)
+    os.mkfifo(service.path)
+    with pytest.raises(ValueError,match="HUMAN_TEXT_UNSAFE_BUFFER"):
+        service.load()
+    with pytest.raises(ValueError,match="HUMAN_TEXT_UNSAFE_BUFFER"):
+        service.info()
+
+
+def test_human_text_buffer_reader_rejects_hardlinks(tmp_path):
+    service=HumanTextService(tmp_path/"workspace")
+    foreign=tmp_path/"external-private.txt"
+    foreign.write_text("confidential",encoding="utf-8")
+    try:
+        os.link(foreign,service.path)
+    except OSError:
+        pytest.skip("hard links unavailable")
+    with pytest.raises(ValueError,match="HUMAN_TEXT_UNSAFE_BUFFER"):
+        service.load()
+    with pytest.raises(ValueError,match="HUMAN_TEXT_UNSAFE_BUFFER"):
+        service.info()
+    assert foreign.read_text(encoding="utf-8")=="confidential"
+
+
+def test_human_text_regular_buffer_still_paginates_and_reloads(tmp_path):
+    service=HumanTextService(tmp_path)
+    payload="ábc 🚀 linha nova"
+    service.save(payload)
+    assert service.load()==payload
+    assert service.info()["bytes"]==len(payload.encode("utf-8"))
+    pages=[]
+    cursor=0
+    while True:
+        page=service.read(cursor=cursor,max_bytes=512)
+        pages.append(page["text"])
+        if page["complete"]:
+            break
+        cursor=page["next_cursor"]
+    assert "".join(pages)==payload
+
+
