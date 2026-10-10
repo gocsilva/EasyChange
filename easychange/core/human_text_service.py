@@ -77,6 +77,10 @@ class HumanTextService:
             raise
 
     def _scan_info(self) -> dict[str, Any]:
+        # Path.exists() follows links: a dangling symlink would otherwise
+        # masquerade as an absent buffer and bypass the safe-open checks.
+        if self.path.is_symlink():
+            raise ValueError("HUMAN_TEXT_UNSAFE_BUFFER")
         if not self.path.exists():
             return self._empty_info()
 
@@ -227,6 +231,8 @@ class HumanTextService:
         return meta
 
     def load(self) -> str:
+        if self.path.is_symlink():
+            raise ValueError("HUMAN_TEXT_UNSAFE_BUFFER")
         if not self.path.exists():
             return ""
         # A size check followed by read_text() is vulnerable to a writer
