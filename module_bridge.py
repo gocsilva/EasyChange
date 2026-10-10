@@ -239,6 +239,11 @@ class MCPBridge:
                     details=_decode_hub_response(exc.read(2048))
                 except (ValueError,UnicodeError):
                     raise exc
+                finally:
+                    # Every acknowledged 429 is consumed by this retry path.
+                    # Release its HTTP socket before the backoff delay rather
+                    # than waiting for GC while the local hub is saturated.
+                    exc.close()
                 if (not isinstance(details,dict) or
                         details.get("error")!="MODULE_TOOL_RPC_BUSY_RETRY_LATER" or
                         details.get("accepted") is not False or
@@ -265,6 +270,11 @@ class MCPBridge:
                     details=_decode_hub_response(exc.read(2048))
                 except (ValueError,UnicodeError):
                     raise exc
+                finally:
+                    # Every acknowledged 429 is consumed by this retry path.
+                    # Release its HTTP socket before the backoff delay rather
+                    # than waiting for GC while the local hub is saturated.
+                    exc.close()
                 if (not isinstance(details,dict) or
                         details.get("error")!="MODULE_INBOX_FULL_RETRY_LATER" or
                         details.get("accepted") is not False or
