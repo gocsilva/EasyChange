@@ -608,6 +608,45 @@ def test_cdp_boolean_response_id_cannot_spoof_pending_call_one():
     assert ws._responses[1]["result"]["value"]=="authentic"
 
 
+@pytest.mark.parametrize("malformed",(
+    '{"id":1,"id":1,"result":{"value":"spoof"}}',
+    '{"id":1,"result":{"value":NaN}}',
+    '{"id":1,"result":{"value":Infinity}}',
+    '{"id":1,"result":{"value":1e9999}}',
+    '{"method":"Network.event","params":{"token":"a","token":"b"}}',
+))
+def test_cdp_reader_rejects_ambiguous_json_before_rpc_correlation(
+        malformed, monkeypatch):
+    ws=_bare_async_websocket()
+    ws._pending_ids.add(1)
+    frames=iter([malformed])
+    def read():
+        try:
+            return next(frames)
+        except StopIteration:
+            raise browser_module.CdpError("CDP_WEBSOCKET_CLOSED")
+    monkeypatch.setattr(ws,"_recv_text",read)
+    ws._reader_loop()
+    assert ws._responses=={}
+    events=ws.drain_events(5)
+    assert len(events)==1
+    assert events[0]["method"]=="EasyChange.cdpMalformedMessage"
+    assert events[0]["params"]["chars"]==len(malformed)
+
+
+def test_cdp_reader_still_correlates_valid_numeric_id(monkeypatch):
+    ws=_bare_async_websocket()
+    ws._pending_ids.add(1)
+    frames=iter(['{"id":1,"result":{"value":42}}'])
+    def read():
+        try:return next(frames)
+        except StopIteration:raise browser_module.CdpError("CLOSED")
+    monkeypatch.setattr(ws,"_recv_text",read)
+    ws._reader_loop()
+    assert ws._responses[1]["result"]["value"]==42
+    assert ws.drain_events(5)==[]
+
+
 def test_cdp_websocket_continuous_reader_correlates_calls_and_buffers_events(monkeypatch):
     ws = _bare_async_websocket()
     sent = []
