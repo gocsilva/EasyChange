@@ -308,6 +308,8 @@ def _preflight_ec2_header_fields(fields: dict[str, Any]) -> None:
         if value is None or type(value) is bool:
             continue
         if type(value) is str:
+            if any(0xD800 <= ord(ch) <= 0xDFFF for ch in value):
+                raise ValueError("OPTICAL_HEADER_FIELD_INVALID")
             if len(value) > MAX_EC2_QR_RENDER_BYTES:
                 raise ValueError("OPTICAL_QR_CAPACITY_EXCEEDED")
         elif type(value) is int:
@@ -352,7 +354,8 @@ def encode_durable_result_header(header: dict[str, Any]) -> str:
     if not isinstance(header, dict):
         raise ValueError("durable result header object required")
     sequence=header.get("sequence")
-    if type(sequence) is not str or not 1<=len(sequence)<=256:
+    if (type(sequence) is not str or not 1<=len(sequence)<=256 or
+            any(0xD800 <= ord(ch) <= 0xDFFF for ch in sequence)):
         raise ValueError("durable result sequence required")
     if header.get("finished") is not True:
         raise ValueError("durable result is not terminal")
