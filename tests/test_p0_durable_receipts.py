@@ -764,6 +764,43 @@ def test_payload_cache_survives_unchanged_receipt_without_redecode(tmp_path, mon
         assert original.stream_meta(sequence) is not None
 
 
+def test_claim_lock_rejects_symlink_without_touching_foreign_file(tmp_path):
+    import pytest
+
+    store = DurableResultStore(tmp_path / "results")
+    foreign = tmp_path / "not-a-lock.txt"
+    foreign.write_bytes(b"must-stay-unchanged")
+    lock_path = store._claim_lock_path
+    try:
+        lock_path.symlink_to(foreign)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks not available with this account")
+    with pytest.raises(RuntimeError, match="RESULT_CLAIM_UNSAFE_LOCK_PATH"):
+        store.claim_running("QLOCK01", "a" * 64, ":write", mutation=True)
+    assert foreign.read_bytes() == b"must-stay-unchanged"
+    assert store.get("QLOCK01") is None
+    lock_path.unlink()
+    receipt, acquired = store.claim_running(
+        "QLOCK01", "a" * 64, ":write", mutation=True)
+    assert acquired is True
+    assert receipt["state"] == "RUNNING"
+
+
+def test_claim_lock_rejects_nonregular_fd_without_stranding_lock(tmp_path, monkeypatch):
+    import pytest
+    import easychange.core.result_store as result_store
+
+    store = DurableResultStore(tmp_path / "results")
+    with monkeypatch.context() as ctx:
+        ctx.setattr(result_store.stat, "S_ISREG", lambda _mode: False)
+        with pytest.raises(RuntimeError, match="RESULT_CLAIM_UNSAFE_LOCK_TYPE"):
+            store.claim_running("QLOCK02", "a" * 64, ":write", mutation=True)
+    record, acquired = store.claim_running(
+        "QLOCK02", "a" * 64, ":write", mutation=True)
+    assert acquired is True
+    assert record["state"] == "RUNNING"
+
+
 def test_cross_instance_durable_claim_has_single_execution_owner(tmp_path):
     import pytest
 
