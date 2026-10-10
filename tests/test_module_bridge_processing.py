@@ -181,6 +181,23 @@ class TestProcessPending(unittest.TestCase):
         handler.assert_called_once_with(message)
         bridge.ack.assert_called_once_with([942])
 
+    def test_signed_sqlite_message_id_boundary_precedes_mutating_handler(self):
+        for invalid in ((1<<63), (1<<128), -(1<<63), True):
+            with self.subTest(ident=invalid):
+                bridge=self.bridge([item(invalid)])
+                handler=Mock(return_value=True)
+                with self.assertRaisesRegex(ValueError,
+                                            "INVALID_MCP_INBOX_MESSAGE"):
+                    bridge.process_pending(handler)
+                handler.assert_not_called()
+                bridge.ack.assert_not_called()
+        upper=(1<<63)-1
+        bridge=self.bridge([item(upper)])
+        handler=Mock(return_value=True)
+        result=bridge.process_pending(handler)
+        self.assertEqual(result["acknowledged"],1)
+        bridge.ack.assert_called_once_with([upper])
+
     def test_bad_message_structure_fails_closed(self):
         b=self.bridge([{"id":"7","topic":"test"}])
         with self.assertRaisesRegex(ValueError,"INVALID_MCP_INBOX_MESSAGE"):
