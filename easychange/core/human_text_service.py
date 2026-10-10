@@ -94,7 +94,14 @@ class HumanTextService:
             prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         temporary = Path(name)
         try:
-            with os.fdopen(fd, "wb") as handle:
+            try:
+                handle = os.fdopen(fd, "wb")
+            except BaseException:
+                # The temporary file is removed below, but its raw descriptor
+                # must also be closed if fdopen never takes ownership.
+                os.close(fd)
+                raise
+            with handle:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
