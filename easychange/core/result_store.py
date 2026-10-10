@@ -817,16 +817,23 @@ class DurableResultStore:
         if not isinstance(indexes, list) or not indexes:
             raise ValueError("RESULT_STREAM_CHUNK_INDEXES_REQUIRED")
         limit = max(1, min(16, int(max_chunks)))
+        # The returned batch is capped at 16, but duplicate raw indexes could
+        # otherwise make parsing cost grow without a bound. Check the raw
+        # request before iterating, and deduplicate in O(1) per index.
+        if len(indexes) > 256:
+            raise ValueError("RESULT_STREAM_CHUNK_REQUEST_TOO_LARGE")
         unique: list[int] = []
+        seen: set[int] = set()
         for raw_index in indexes:
             if (type(raw_index) is not int and
                     not (isinstance(raw_index, str) and raw_index.strip().isdecimal())):
                 raise ValueError("INVALID_RESULT_STREAM_CHUNK_INDEX")
             index = int(raw_index)
-            if index not in unique:
+            if index not in seen:
+                seen.add(index)
                 unique.append(index)
-        if len(unique) > limit:
-            raise ValueError(f"RESULT_STREAM_CHUNK_BATCH_LIMIT:{limit}")
+                if len(unique) > limit:
+                    raise ValueError(f"RESULT_STREAM_CHUNK_BATCH_LIMIT:{limit}")
 
         payload = self._result_stream_payload(sequence)
         if payload is None:
