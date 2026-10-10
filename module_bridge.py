@@ -24,8 +24,22 @@ class _NoRedirect(HTTPRedirectHandler):
 _local_opener=build_opener(ProxyHandler({}),_NoRedirect)
 
 _runtime_token=""
+CANONICAL_MODULE_ID="easychange"
 # Single consumer in this module process, including multiple MCPBridge objects.
 _processing_lock=threading.Lock()
+
+
+def _consumer_lease_path():
+    """Stable per module, independent of checkout path or symlink aliases.
+
+    The bus endpoint is fixed to local port 8786. Two copies of the same
+    module must never acquire different consumer leases for its inbox.
+    Other module identities retain independent leases.
+    """
+    key=hashlib.sha256(
+        ("mcp-local-8786|"+CANONICAL_MODULE_ID).encode("ascii")
+    ).hexdigest()[:24]
+    return os.path.join(tempfile.gettempdir(),"mcp-module-inbox-"+key+".lock")
 
 
 def _acquire_consumer_lease():
@@ -34,10 +48,7 @@ def _acquire_consumer_lease():
     Keep the OS lock file in place: unlinking it while leased creates a
     second-inode race. A crashed process releases its file descriptor.
     """
-    key=hashlib.sha256(
-        os.path.normcase(os.path.abspath(__file__)).encode("utf-8")
-    ).hexdigest()[:24]
-    path=os.path.join(tempfile.gettempdir(),"mcp-module-inbox-"+key+".lock")
+    path=_consumer_lease_path()
     flags=os.O_CREAT|os.O_RDWR|getattr(os,"O_BINARY",0)|getattr(os,"O_NOFOLLOW",0)
     try:
         fd=os.open(path,flags,0o600)
