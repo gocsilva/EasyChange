@@ -910,14 +910,9 @@ class DurableResultStore:
         max_chunks: int = 8,
         max_ratio: float = 0.85,
     ) -> dict[str, Any] | None:
-        payload = self._result_stream_payload(sequence)
-        if payload is None:
-            return None
-        meta = self._stream_metadata(
-            sequence, payload, chunk_bytes=chunk_bytes, max_ratio=max_ratio,
-        )
-        if not meta["eligible"]:
-            return {**meta, "requested_indexes": [], "chunks": [], "complete": False}
+        # Validate untrusted indexes before decoding and recompressing a
+        # potentially multi-megabyte result. Rejecting a bogus request should
+        # not consume the entire EC2 recovery CPU/memory budget.
         if not isinstance(indexes, list) or not indexes:
             raise ValueError("RESULT_STREAM_CHUNK_INDEXES_REQUIRED")
         limit = max(1, min(16, int(max_chunks)))
@@ -941,6 +936,15 @@ class DurableResultStore:
                 unique.append(index)
                 if len(unique) > limit:
                     raise ValueError(f"RESULT_STREAM_CHUNK_BATCH_LIMIT:{limit}")
+
+        payload = self._result_stream_payload(sequence)
+        if payload is None:
+            return None
+        meta = self._stream_metadata(
+            sequence, payload, chunk_bytes=chunk_bytes, max_ratio=max_ratio,
+        )
+        if not meta["eligible"]:
+            return {**meta, "requested_indexes": [], "chunks": [], "complete": False}
 
         stream, stream_hash, result_hash, result_bytes = payload
         size = int(meta["chunk_bytes"])
@@ -982,7 +986,7 @@ class DurableResultStore:
     ) -> dict[str, Any] | None:
         batch = self.stream_chunks(
             sequence,
-            [int(index)],
+            [index],
             chunk_bytes=chunk_bytes,
             max_chunks=1,
             max_ratio=max_ratio,
@@ -1116,6 +1120,13 @@ class DurableResultStore:
         chunk_bytes: int = 640,
         compress_payload: bool = False,
     ) -> dict[str, Any] | None:
+        # The single-chunk shortcut must enforce the same bounded integer
+        # format as chunks() before decoding the underlying receipt.
+        if (type(index) is not int and
+                not (isinstance(index, str) and len(index) <= 32
+                     and index.strip().isdecimal())):
+            raise ValueError("INVALID_RESULT_CHUNK_INDEX")
+        index = int(index)
         payload = self._result_payload(sequence)
         if payload is None:
             return None
