@@ -689,6 +689,47 @@ def test_cdp_reader_still_correlates_valid_numeric_id(monkeypatch):
     assert ws.drain_events(5)==[]
 
 
+def test_cdp_serialization_failure_releases_pending_id_before_next_call(monkeypatch):
+    ws=_bare_async_websocket()
+    dispatched=[]
+    def respond(payload,opcode=1):
+        request=json.loads(payload)
+        dispatched.append(request)
+        ws._dispatch_message({"id":request["id"],"result":{"ready":True}})
+    monkeypatch.setattr(ws,"_send_frame",respond)
+    with pytest.raises(TypeError):
+        ws.call("Runtime.evaluate",{"value":{1,2}},timeout=0.1)
+    assert ws._pending_ids==set()
+    assert ws._responses=={}
+    with pytest.raises(ValueError):
+        ws.call("Runtime.evaluate",{"value":float("nan")},timeout=0.1)
+    assert ws._pending_ids==set()
+    assert ws._responses=={}
+    with monkeypatch.context() as limit:
+        limit.setattr(browser_module,"MAX_CDP_WS_MESSAGE_BYTES",128)
+        with pytest.raises(browser_module.CdpError,
+                           match="CDP_WEBSOCKET_MESSAGE_TOO_LARGE"):
+            ws.call("Runtime.evaluate",{"expression":"x"*200},timeout=0.1)
+    assert ws._pending_ids==set()
+    assert ws._responses=={}
+    assert dispatched==[]
+    assert ws.call("Browser.getVersion",timeout=0.1)=={"ready":True}
+    assert len(dispatched)==1
+    assert ws._pending_ids==set()
+
+
+def test_cdp_cyclic_outgoing_params_do_not_send_or_leak_call_ids(monkeypatch):
+    ws=_bare_async_websocket()
+    sent=[]
+    monkeypatch.setattr(ws,"_send_frame",lambda *args:sent.append(args))
+    cyclic={}
+    cyclic["self"]=cyclic
+    with pytest.raises(ValueError,match="Circular reference"):
+        ws.call("Runtime.evaluate",cyclic,timeout=0.1)
+    assert sent==[]
+    assert ws.event_status()["pending_calls"]==0
+
+
 def test_cdp_websocket_continuous_reader_correlates_calls_and_buffers_events(monkeypatch):
     ws = _bare_async_websocket()
     sent = []
