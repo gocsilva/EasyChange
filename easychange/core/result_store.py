@@ -955,6 +955,21 @@ class DurableResultStore:
         raise RuntimeError("RESULT_RECEIPT_CHANGED_DURING_READ")
 
     @staticmethod
+    def _validated_chunk_size(value: int) -> int:
+        # The plain receipt path needs the same cheap preflight as EC2
+        # streams: do not read/decompress a 64 MiB record only to discover
+        # an absurd chunk-size parameter afterward.
+        if (isinstance(value, bool) or
+                not isinstance(value, (int, float, str)) or
+                (isinstance(value, str) and len(value) > 32)):
+            raise ValueError("INVALID_RESULT_CHUNK_BYTES")
+        try:
+            size = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("INVALID_RESULT_CHUNK_BYTES") from exc
+        return max(256, min(4096, size))
+
+    @staticmethod
     def _validated_batch_limit(value: int, error_code: str) -> int:
         # A caller-controlled text value must not trigger unbounded decimal
         # parsing before the chunk's own bounded result read.
@@ -1153,11 +1168,11 @@ class DurableResultStore:
             )
         }
     def chunk_meta(self, sequence: str, *, chunk_bytes: int = 640) -> dict[str, Any] | None:
+        size = self._validated_chunk_size(chunk_bytes)
         payload = self._result_payload(sequence)
         if payload is None:
             return None
         _, raw, digest = payload
-        size = max(256, min(4096, int(chunk_bytes)))
         total = max(1, (len(raw) + size - 1) // size)
         return {"sequence": sequence, "total_chunks": total, "chunk_bytes": size,
                 "result_bytes": len(raw), "result_hash": digest}
@@ -1227,11 +1242,11 @@ class DurableResultStore:
                 if len(unique) > limit:
                     raise ValueError(f"RESULT_CHUNK_BATCH_LIMIT:{limit}")
 
+        size = self._validated_chunk_size(chunk_bytes)
         payload = self._result_payload(sequence)
         if payload is None:
             return None
         _, raw, result_hash = payload
-        size = max(256, min(4096, int(chunk_bytes)))
         total = max(1, (len(raw) + size - 1) // size)
         chunks: list[dict[str, Any]] = []
         for index in unique:
@@ -1284,11 +1299,11 @@ class DurableResultStore:
                      and index.strip().isdecimal())):
             raise ValueError("INVALID_RESULT_CHUNK_INDEX")
         index = int(index)
+        size = self._validated_chunk_size(chunk_bytes)
         payload = self._result_payload(sequence)
         if payload is None:
             return None
         _, raw, digest = payload
-        size = max(256, min(4096, int(chunk_bytes)))
         total = max(1, (len(raw) + size - 1) // size)
         if index < 0 or index >= total:
             raise IndexError("RESULT_CHUNK_OUT_OF_RANGE")
