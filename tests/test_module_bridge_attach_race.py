@@ -79,3 +79,57 @@ def test_failed_attach_verification_cannot_replace_existing_credential():
             raise AssertionError("mismatched hub was allowed")
         assert bridge._runtime_token==existing
         assert bridge._runtime_detached is False
+
+
+def test_implicit_client_sees_atomic_revoked_state_not_inherited_token():
+    inherited="i"*48
+    started=threading.Event()
+    finished=threading.Event()
+    result=[]
+
+    def make_client():
+        started.set()
+        result.append(bridge.MCPBridge().token)
+        finished.set()
+
+    with patch.object(bridge,"_runtime_token",inherited), \
+         patch.object(bridge,"_runtime_detached",False), \
+         patch.dict(bridge.os.environ,{"MCP_MODULE_BUS_TOKEN":inherited}):
+        with bridge._runtime_state_lock:
+            thread=threading.Thread(target=make_client,daemon=True)
+            thread.start()
+            assert started.wait(timeout=3)
+            # A consistent snapshot must wait for this transition's lock.
+            assert not finished.wait(timeout=.05)
+            bridge._runtime_token=""
+            bridge._runtime_detached=True
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+        assert result==[""]
+
+
+def test_implicit_client_connection_check_observes_revocation_atomically():
+    credential="c"*48
+    started=threading.Event()
+    finished=threading.Event()
+    result=[]
+
+    with patch.object(bridge,"_runtime_token",credential), \
+         patch.object(bridge,"_runtime_detached",False):
+        client=bridge.MCPBridge()
+
+        def check():
+            started.set()
+            result.append(client.connected)
+            finished.set()
+
+        with bridge._runtime_state_lock:
+            thread=threading.Thread(target=check,daemon=True)
+            thread.start()
+            assert started.wait(timeout=3)
+            assert not finished.wait(timeout=.05)
+            bridge._runtime_token=""
+            bridge._runtime_detached=True
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+        assert result==[False]
