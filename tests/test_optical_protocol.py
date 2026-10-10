@@ -227,6 +227,27 @@ def test_ec2_direct_decoder_rejects_invalid_transfer_identity_early():
             decode_result_chunks([json.dumps(forged)])
 
 
+def test_ec2_decoder_requires_real_crc_for_every_fragment():
+    import json
+    import pytest
+    from easychange.core.result import Result
+
+    packets=encode_result_chunks(
+        Result(True,"read",{"data":"crc contract"},sequence="QCRC2026"))
+    assert packets
+    assert decode_result_chunks(packets)["sequence"]=="QCRC2026"
+    original=json.loads(packets[0])
+    for missing in (None, "", False, 0, "0000000", "00000000",
+                    "fffffffff", "FFFFFFFF", [], {}):
+        altered=dict(original)
+        if missing is None:
+            altered.pop("x")
+        else:
+            altered["x"]=missing
+        with pytest.raises(ValueError,match="optical chunk crc32 mismatch"):
+            decode_result_chunks([json.dumps(altered)])
+
+
 def test_ec2_rejects_untrusted_packet_counts_and_invalid_indexes():
     import pytest
     result=Result(True,"read",{"text":"ok"},sequence="QBADCOUNT")
