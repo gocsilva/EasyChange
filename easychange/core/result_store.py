@@ -634,9 +634,20 @@ class DurableResultStore:
         # No writer needs the receipt lock while a potentially large tool
         # result is serialized. Re-check under the lock afterward: another
         # process may have completed this sequence during serialization.
-        serialized = json.dumps(
-            result, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8")
+        # A caller can provide a huge result or a compact shared DAG whose
+        # JSON expansion is enormous. Enforce the same receipt-size budget
+        # *during* encoding, before constructing an unbounded json.dumps().
+        serialized_parts = bytearray()
+        encoder = json.JSONEncoder(
+            ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        for piece in encoder.iterencode(result):
+            if len(piece) > MAX_DECODED_RECEIPT_BYTES:
+                raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+            encoded_piece = piece.encode("utf-8")
+            if len(serialized_parts) + len(encoded_piece) > MAX_DECODED_RECEIPT_BYTES:
+                raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+            serialized_parts.extend(encoded_piece)
+        serialized = bytes(serialized_parts)
         serialized_hash = hashlib.sha256(serialized).hexdigest()
         execution_summary = _find_execution_summary(result)
         with self._claim_lock():
