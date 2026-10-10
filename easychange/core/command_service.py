@@ -3013,7 +3013,13 @@ class CommandService:
             raise ValueError("SECRET_SOURCE_EMPTY")
         if size > 64 * 1024:
             raise ValueError("SECRET_SOURCE_FILE_TOO_LARGE")
-        raw = resolved.read_bytes()
+        # st_size is only a preflight: another process may grow or replace
+        # the file between stat() and read(). Cap the actual read as well,
+        # including secret sources that are concurrently updated.
+        with resolved.open("rb") as stream:
+            raw = stream.read(64 * 1024 + 1)
+        if len(raw) > 64 * 1024:
+            raise ValueError("SECRET_SOURCE_FILE_TOO_LARGE")
         if b"\0" in raw:
             raise ValueError("SECRET_SOURCE_BINARY_FORBIDDEN")
         try:
