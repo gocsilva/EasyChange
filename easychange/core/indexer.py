@@ -562,15 +562,27 @@ class Indexer:
         elif ext:
             argv.append(f":(glob)**/*{ext}")
         try:
-            completed = subprocess.run(argv, cwd=self.root, text=True, capture_output=True,
-                                       timeout=8, check=False, shell=False,
-                                       **hidden_console_kwargs())
+            # A huge Git workspace can emit millions of grep hits within the
+            # eight-second deadline. Spool output outside the Python heap and
+            # avoid presenting a truncated prefix as a complete search.
+            with tempfile.TemporaryFile(mode="w+b") as output:
+                completed = subprocess.run(
+                    argv, cwd=self.root, stdout=output,
+                    stderr=subprocess.DEVNULL, timeout=8,
+                    check=False, shell=False, **hidden_console_kwargs())
+                output.seek(0)
+                raw = (completed.stdout if completed.stdout is not None
+                       else output.read(MAX_COLD_GIT_BYTES + 1))
+            if len(raw) > MAX_COLD_GIT_BYTES:
+                return []
+            stdout = (raw.decode("utf-8", errors="replace")
+                      if isinstance(raw, bytes) else raw)
         except (OSError, subprocess.TimeoutExpired):
             return []
         if completed.returncode not in {0, 1}:
             return []
         rows: list[tuple[str, str]] = []
-        for line in (completed.stdout or "").splitlines():
+        for line in stdout.splitlines():
             parts = line.split(":", 2)
             if len(parts) != 3:
                 continue
@@ -599,6 +611,8 @@ class Indexer:
             except (OSError, RuntimeError):
                 continue
             rows.append((relative, parts[1] + ":" + parts[2]))
+            if len(rows) >= MAX_COLD_GIT_ROWS:
+                break
         return rows
 
     @classmethod
