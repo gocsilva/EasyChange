@@ -955,6 +955,45 @@ def test_cleanup_skips_invalid_legacy_sequence_and_continues_other_receipts(tmp_
     assert store.claim_running(valid,"a"*64,":state",mutation=False)[1] is False
 
 
+def test_recursive_corrupt_receipt_does_not_break_other_durable_commits(tmp_path):
+    import os
+    import time
+    import zlib
+
+    store=DurableResultStore(tmp_path / "receipts",ttl_seconds=60)
+    corrupt=store.root/"QRECURSIVELEGACY.json.zlib"
+    # This is valid JSON but exceeds Python's safe parser nesting depth.
+    # Such a legacy receipt must remain evidence, not prevent future writes.
+    wire=zlib.compress(
+        b'{"sequence":"QRECURSIVELEGACY","value":'+
+        b"["*2000+b"0"+b"]"*2000+b"}")
+    corrupt.write_bytes(wire)
+    expired=time.time()-store.ttl_seconds-120
+    os.utime(corrupt,(expired,expired))
+
+    # Force maintenance on the same call that commits a new result: cleanup
+    # must never turn a successfully persisted receipt into a reported error.
+    store._last_cleanup_monotonic=0.0
+    record=store.mark_running(
+        "QAFTERCORRUPT","a"*64,":state",mutation=False)
+    assert record["state"]=="RUNNING"
+    terminal=store.complete(
+        "QAFTERCORRUPT","a"*64,":state",
+        {"ok":True,"command":"state","data":{"text":"replayable"}})
+    assert terminal["state"]=="DONE"
+    assert corrupt.read_bytes()==wire
+
+    good=store._path("QAFTERCORRUPT")
+    os.utime(good,(expired,expired))
+    store._cleanup()
+    tombstone=store.get("QAFTERCORRUPT")
+    assert tombstone["state"]=="DONE"
+    assert tombstone["result_expired"] is True
+    assert store.claim_running(
+        "QAFTERCORRUPT","a"*64,":state",mutation=False)[1] is False
+    assert corrupt.read_bytes()==wire
+
+
 def test_cleanup_compacts_non_q_read_receipts_but_keeps_owned_tombstones(tmp_path):
     import hashlib
     import os
