@@ -71,6 +71,37 @@ class TestHubRedirectBoundary(unittest.TestCase):
             self.assertEqual(module_bridge.MCPBridge().token,new_token)
             self.assertFalse(module_bridge.self_test()["standalone"])
 
+    def test_bootstrap_credential_can_detach_but_cannot_reactivate_itself(self):
+        from unittest.mock import patch
+
+        inherited="B"*48
+        with patch.dict(module_bridge.os.environ,
+                        {"MCP_MODULE_BUS_TOKEN":inherited}), \
+             patch.object(module_bridge,"_runtime_token",""), \
+             patch.object(module_bridge,"_runtime_detached",False):
+            self.assertEqual(module_bridge.MCPBridge().token,inherited)
+            with self.assertRaisesRegex(
+                    PermissionError,"INVALID_DETACH_CREDENTIAL"):
+                module_bridge.detach_hub("wrong-credential")
+            self.assertEqual(module_bridge.MCPBridge().token,inherited)
+
+            self.assertEqual(module_bridge.detach_hub(inherited),
+                             {"connected":False})
+            self.assertFalse(module_bridge.MCPBridge().connected)
+            self.assertTrue(module_bridge.self_test()["standalone"])
+            with self.assertRaisesRegex(
+                    PermissionError,"INVALID_DETACH_CREDENTIAL"):
+                module_bridge.detach_hub(inherited)
+
+            # The bootstrap secret can no longer be implicitly recovered.
+            canonical=module_bridge.CANONICAL_MODULE_ID
+            fresh="N"*48
+            with patch.object(module_bridge.MCPBridge,"peers",
+                              return_value={"ok":True,"self":canonical}):
+                self.assertEqual(module_bridge.attach_hub(fresh,canonical),
+                                 {"connected":True,"id":canonical})
+            self.assertEqual(module_bridge.MCPBridge().token,fresh)
+
     def test_no_external_proxy_config(self):
         from urllib.request import ProxyHandler
         handlers=[h for h in module_bridge._local_opener.handlers
