@@ -911,6 +911,68 @@ def test_cleanup_skips_invalid_legacy_sequence_and_continues_other_receipts(tmp_
     assert store.claim_running(valid,"a"*64,":state",mutation=False)[1] is False
 
 
+def test_cleanup_compacts_non_q_read_receipts_but_keeps_owned_tombstones(tmp_path):
+    import hashlib
+    import os
+    import time
+
+    store=DurableResultStore(tmp_path / "receipts",ttl_seconds=60)
+    sequence="ALTREAD07"
+    content="".join(hashlib.sha256(f"item-{i}".encode()).hexdigest()
+                    for i in range(100))
+    store.mark_running(sequence,"a"*64,":state",mutation=False)
+    finished=store.complete(
+        sequence,"a"*64,":state",
+        {"ok":True,"command":"state","data":{"text":content},
+         "sequence":sequence})
+    target=store._path(sequence)
+    old_size=target.stat().st_size
+    expired=time.time()-store.ttl_seconds-120
+    os.utime(target,(expired,expired))
+
+    store._cleanup()
+    assert target.stat().st_size<old_size
+    record=store.get(sequence)
+    assert record["state"]=="DONE"
+    assert record["result_expired"] is True
+    assert record["result"] is None
+    assert record["expired_result_hash"]==finished["result_hash"]
+    assert store.claim_running(sequence,"a"*64,":state",mutation=False)[1] is False
+
+    # Scan all receipt-shaped paths, but never compact a differently named
+    # foreign artifact even if its embedded sequence is otherwise valid.
+    foreign=store.root / "OTHER_DATA.json.zlib"
+    wire=store._encode({"sequence":"ALTREAD07","state":"DONE",
+                        "mutation":False,"result":{"ok":True}})
+    foreign.write_bytes(wire)
+    os.utime(foreign,(expired,expired))
+    store._cleanup()
+    assert foreign.read_bytes()==wire
+
+
+def test_cleanup_never_compacts_non_q_mutating_execution(tmp_path):
+    import os
+    import time
+
+    store=DurableResultStore(tmp_path / "receipts",ttl_seconds=60)
+    sequence="ALTMUT07"
+    store.mark_running(sequence,"b"*64,":operation",mutation=True)
+    store.complete(
+        sequence,"b"*64,":operation",
+        {"ok":True,"command":"operation","data":{"applied":True},
+         "sequence":sequence},
+        mutation_receipt={"state":"APPLIED","lifecycle_state":"APPLIED"})
+    target=store._path(sequence)
+    original=target.read_bytes()
+    expired=time.time()-store.ttl_seconds-120
+    os.utime(target,(expired,expired))
+    store._cleanup()
+    assert target.read_bytes()==original
+    receipt=store.get(sequence)
+    assert receipt["mutation"] is True
+    assert receipt.get("result_expired") is not True
+
+
 def test_cleanup_compacts_expired_read_result_but_keeps_replay_tombstone(tmp_path):
     import hashlib
     import os
