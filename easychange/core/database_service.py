@@ -144,6 +144,10 @@ class DatabaseService:
 
     def query(self, connection: str, sql: str, *, allow_write: bool = False,
               max_rows: int = 200, timeout: int = 30) -> dict[str, Any]:
+        # Mutation permission must be an explicit JSON boolean. Strings like
+        # "false" are truthy in Python and must never authorize SQL writes.
+        if type(allow_write) is not bool:
+            raise ValueError("ALLOW_WRITE_BOOLEAN_REQUIRED")
         sql = str(sql or "").strip()
         if not sql:
             raise ValueError("SQL_REQUIRED")
