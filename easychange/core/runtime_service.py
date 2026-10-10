@@ -1328,7 +1328,18 @@ class ProjectRuntimeService:
             return False
         if raw.lstrip().startswith(b"{"):
             try:
-                document=json.loads(raw)
+                def unique_fields(pairs):
+                    result={}
+                    for key,value in pairs:
+                        if key in result:
+                            raise ValueError("SWAGGER_DUPLICATE_JSON_KEY")
+                        result[key]=value
+                    return result
+                def no_nonfinite(_value):
+                    raise ValueError("SWAGGER_NONFINITE_JSON")
+                document=json.loads(
+                    raw,object_pairs_hook=unique_fields,
+                    parse_constant=no_nonfinite)
             except (UnicodeError,ValueError,TypeError,RecursionError):
                 return False
             if not isinstance(document,dict):
