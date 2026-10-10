@@ -426,9 +426,15 @@ class ProjectRuntimeService:
                         raise ValueError("RUNTIME_PROFILE_CONFIG_DUPLICATE_KEY")
                     fields[key]=item
                 return fields
+            def reject_nonfinite(_value):
+                # Python's permissive JSON decoder accepts NaN/Infinity even
+                # though these aren't JSON values. Never repair an invalid
+                # historical profile by silently rewriting it on update.
+                raise ValueError("RUNTIME_PROFILE_CONFIG_NONFINITE")
             value=json.loads(
                 raw.decode("utf-8-sig"),
-                object_pairs_hook=unique_fields if strict else dict)
+                object_pairs_hook=unique_fields if strict else dict,
+                parse_constant=reject_nonfinite)
         except (OSError, ValueError, UnicodeError, RecursionError) as exc:
             if strict:
                 raise ValueError("RUNTIME_PROFILE_CONFIG_UNREADABLE") from exc
