@@ -182,8 +182,16 @@ class HumanTextService:
         fd=os.open(path,flags)
         try:
             info=os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            # O_NOFOLLOW is unavailable on some hosts. Recheck the actual
+            # pathname after open so a symlink swap cannot make us read an
+            # external metadata file as a trusted cached workspace receipt.
+            path_info=path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or not stat.S_ISREG(path_info.st_mode)
+                    or path_info.st_nlink != 1):
                 raise ValueError("HUMAN_TEXT_METADATA_UNSAFE_TYPE")
+            if (info.st_dev,info.st_ino)!=(path_info.st_dev,path_info.st_ino):
+                raise ValueError("HUMAN_TEXT_METADATA_FILE_CHANGED_RETRY")
             raw=os.read(fd,MAX_HUMAN_TEXT_METADATA_BYTES+1)
         finally:
             os.close(fd)
