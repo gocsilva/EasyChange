@@ -318,3 +318,37 @@ def test_consumer_lease_key_is_canonical_across_installations(tmp_path):
     # Independent canonical module identities must not block each other.
     with patch.object(module_bridge,"CANONICAL_MODULE_ID",declared+"-other"):
         assert module_bridge._consumer_lease_path()!=initial
+
+    def test_exact_acked_ids_must_cover_all_processed_messages(self):
+        bad_confirmations=(
+            [41,41],
+            [41,99],
+            [41],
+            ["41",42],
+            "41,42",
+            None,
+        )
+        for confirmed in bad_confirmations:
+            with self.subTest(confirmed=confirmed):
+                b=self.bridge([item(41),item(42)])
+                b.ack.side_effect=None
+                b.ack.return_value={
+                    "ok":True,"acked":2,"already_acked":[],"unknown":[],
+                    "acked_ids":confirmed}
+                if confirmed is None:
+                    # An explicit JSON null is treated as an old hub receipt;
+                    # preserve compatibility with legacy responses.
+                    self.assertEqual(
+                        b.process_pending(lambda _:True,ack_batch_size=2)[
+                            "acknowledged"],2)
+                    continue
+                with self.assertRaisesRegex(RuntimeError,"MCP_ACK_UNCONFIRMED"):
+                    b.process_pending(lambda _:True,ack_batch_size=2)
+                b.ack.assert_called_once_with([41,42])
+        b=self.bridge([item(41),item(42)])
+        b.ack.side_effect=None
+        b.ack.return_value={
+            "ok":True,"acked":2,"acked_ids":[42,41],
+            "already_acked":[],"unknown":[]}
+        self.assertEqual(
+            b.process_pending(lambda _:True,ack_batch_size=2)["acknowledged"],2)
