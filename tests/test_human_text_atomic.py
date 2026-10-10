@@ -168,35 +168,20 @@ def test_empty_buffer_metadata_is_cached_without_full_rescan(tmp_path, monkeypat
 
 
 def test_oversized_metadata_falls_back_to_verified_text_without_unbounded_read(tmp_path,monkeypatch):
-    from pathlib import Path
-
     service=HumanTextService(tmp_path)
     saved=service.save("persisted content")
     oversized=b'{"bytes":17,"padding":"' + b"x"*2048 + b'"}'
     service.meta_path.write_bytes(oversized)
     observed=[]
-    original_open=Path.open
+    original_read=human_module.os.read
 
-    class MeasuredReader:
-        def __init__(self,inner):
-            self.inner=inner
-        def __enter__(self):
-            return self
-        def __exit__(self,*args):
-            return self.inner.__exit__(*args)
-        def read(self,size=-1):
-            observed.append(size)
-            return self.inner.read(size)
-
-    def guarded_open(path,*args,**kwargs):
-        handle=original_open(path,*args,**kwargs)
-        if path==service.meta_path and args and args[0]=="rb":
-            return MeasuredReader(handle)
-        return handle
+    def guarded_read(fd,size):
+        observed.append(size)
+        return original_read(fd,size)
 
     with monkeypatch.context() as ctx:
         ctx.setattr(human_module,"MAX_HUMAN_TEXT_METADATA_BYTES",128)
-        ctx.setattr(Path,"open",guarded_open)
+        ctx.setattr(human_module.os,"read",guarded_read)
         refreshed=service.info()
     assert observed==[129]
     assert refreshed["sha256"]==saved["sha256"]
@@ -262,3 +247,33 @@ def test_human_text_page_options_preserve_exact_large_cursor_contract(tmp_path):
     assert service.read(cursor=0,max_bytes=0)["text"]=="abc"
     with pytest.raises(ValueError,match="HUMAN_TEXT_CURSOR_OUT_OF_RANGE"):
         service.read(cursor=(1<<53)+1)
+
+
+def test_human_text_symlinked_metadata_cannot_read_or_mutate_foreign_file(tmp_path):
+    service=HumanTextService(tmp_path)
+    saved=service.save("actual content")
+    outside=tmp_path/"foreign-record.json"
+    outside.write_text('{"secret":"unrelated"}',encoding="utf-8")
+    service.meta_path.unlink()
+    try:
+        service.meta_path.symlink_to(outside)
+    except (OSError,NotImplementedError) as exc:
+        pytest.skip("Symlinks unavailable: "+type(exc).__name__)
+    recovered=service.info()
+    assert recovered["sha256"]==saved["sha256"]
+    assert service.meta_path.is_file()
+    assert not service.meta_path.is_symlink()
+    assert outside.read_text(encoding="utf-8")=='{"secret":"unrelated"}'
+
+
+@pytest.mark.skipif(__import__("os").name!="posix",reason="POSIX FIFO nonblocking safety")
+def test_human_text_fifo_metadata_does_not_block_recovery(tmp_path):
+    import os
+
+    service=HumanTextService(tmp_path)
+    saved=service.save("plain text")
+    service.meta_path.unlink()
+    os.mkfifo(service.meta_path)
+    recovered=service.info()
+    assert recovered["sha256"]==saved["sha256"]
+    assert service.meta_path.is_file()
