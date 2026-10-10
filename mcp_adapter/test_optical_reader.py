@@ -141,6 +141,39 @@ class OpticalReaderTests(unittest.TestCase):
         out=a.ingest(one+other)
         self.assertTrue(out["verified"])
         self.assertEqual(out["sequence"],"one")
+    def test_duplicate_json_fields_and_nonfinite_numbers_cannot_claim_qr_slots(self):
+        import json
+        from mcp_adapter.optical_reader import OpticalAssembler
+
+        packets=encode_result_chunks({
+            "sequence":"QSTRICTQR2026","ok":True,"data":{"text":"valid"}
+        })
+        self.assertTrue(packets)
+        packet=packets[0]
+        # The normal wire JSON already has an s field, so this prefixed s
+        # creates a duplicate key even if both values happen to match.
+        invalid=(
+            '{"s":"FOREIGN",' + packet[1:],
+            '{"noise":NaN,' + packet[1:],
+            '{"noise":Infinity,' + packet[1:],
+            '{"p":"EC2H","p":"EC2",' + packet[1:],
+        )
+        assembler=OpticalAssembler()
+        for raw in invalid:
+            with self.subTest(raw=raw[:70]):
+                result=assembler.ingest([raw])
+                self.assertFalse(result["complete"])
+                self.assertIsNone(result["sequence"])
+                self.assertEqual(assembler.chunks,{})
+                self.assertEqual(assembler.stored_token_chars,0)
+                self.assertEqual(assembler.header,{})
+                self.assertEqual(assembler.pending_provisional_header,{})
+        verified=assembler.ingest(packets)
+        self.assertTrue(verified["complete"])
+        self.assertTrue(verified["verified"])
+        self.assertEqual(verified["sequence"],"QSTRICTQR2026")
+        self.assertEqual(verified["payload"]["data"]["text"],"valid")
+
     def test_malformed_or_oversized_qr_does_not_claim_session(self):
         import json
         from unittest.mock import patch
