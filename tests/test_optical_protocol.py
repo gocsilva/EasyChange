@@ -23,6 +23,38 @@ def test_ec2_encoder_rejects_identity_receiver_would_drop(monkeypatch):
     assert optical.decode_result_chunks(valid)["sequence"]=="Q"*256
 
 
+def test_ec2_sender_rejects_coerced_sequence_before_encoding():
+    import pytest
+    from easychange.remote.optical_protocol import encode_result_bundle
+
+    for bad in (False,True,0,1,[],{},["QINVALID"]):
+        with pytest.raises(ValueError,match="OPTICAL_SEQUENCE_STRING_REQUIRED"):
+            encode_result_bundle({"sequence":bad,"ok":True,
+                                  "data":{"content":"valid"}})
+    valid, _header=encode_result_bundle({
+        "sequence":"QVALID1","ok":True,"data":{"content":"valid"}})
+    assert decode_result_chunks(valid)["sequence"]=="QVALID1"
+
+
+def test_durable_ec2_rejects_falsy_nonboolean_mutations_and_invalid_lengths():
+    import pytest
+    from easychange.remote.optical_protocol import encode_durable_result_header
+
+    accepted={"sequence":"QHDRTYPES1","finished":True,"success":True,
+              "sha256":"a"*64,"payload_length":16,"mutation":False}
+    for value in ("false","true",0,1,None,[],{}):
+        with pytest.raises(ValueError,match="OPTICAL_MUTATION_BOOLEAN_REQUIRED"):
+            encode_durable_result_header({**accepted,"mutation":value})
+    for value in (True,False,"16","",None,-1,64*1024*1024+1):
+        with pytest.raises(ValueError,match="invalid durable result payload length"):
+            encode_durable_result_header({**accepted,"payload_length":value})
+    for value in (False,1,[],{},None,""):
+        with pytest.raises(ValueError,match="durable result sequence required"):
+            encode_durable_result_header({**accepted,"sequence":value})
+    literal=json.loads(encode_durable_result_header(accepted))
+    assert literal["m"] is None and literal["l"]==16 and literal["s"]=="QHDRTYPES1"
+
+
 def test_ec2_never_interprets_truthy_nonboolean_as_success():
     import pytest
     from easychange.remote import optical_protocol as optical
