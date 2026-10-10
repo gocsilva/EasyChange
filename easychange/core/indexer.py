@@ -138,15 +138,23 @@ class Indexer:
     def _read_candidate(item: tuple[Path, str, int, int]) -> tuple[str, int, int, str, str | None, list[tuple[str, str, int, int, str]]]:
         path, relative, size, mtime_ns = item
         try:
-            raw = path.read_bytes()
+            with path.open("rb") as stream:
+                # Hash large assets in bounded chunks; only small source
+                # files need to reside in memory for symbol extraction.
+                prefix = stream.read(MAX_INDEX_BYTES + 1)
+                hasher = hashlib.sha256(prefix)
+                oversized = len(prefix) > MAX_INDEX_BYTES
+                if oversized:
+                    for block in iter(lambda: stream.read(128 * 1024), b""):
+                        hasher.update(block)
         except OSError:
             return relative, size, mtime_ns, "", None, []
-        digest = hashlib.sha256(raw).hexdigest()
+        digest = hasher.hexdigest()
         content = None
         symbols: list[tuple[str, str, int, int, str]] = []
-        if len(raw) <= MAX_INDEX_BYTES and b"\0" not in raw:
+        if not oversized and b"\0" not in prefix:
             try:
-                content = raw.decode("utf-8-sig")
+                content = prefix.decode("utf-8-sig")
                 symbols = _extract_symbols(relative, content)
             except UnicodeDecodeError:
                 content = None
