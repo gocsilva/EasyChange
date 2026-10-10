@@ -755,3 +755,27 @@ def test_gui_stop_keeps_ownership_when_process_poll_is_unreliable():
     gui.process=process
     assert gui.stop() is True
     assert gui.process is None
+
+
+def test_uncertain_existing_pid_never_allows_duplicate_standalone_start():
+    from unittest.mock import Mock
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    klass=next(node for node in ast.parse(source).body
+               if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+    ns={}
+    exec(compile(ast.Module(body=[klass],type_ignores=[]),
+                 "<standalone-uncertain-start>","exec"),ns)
+    gui=object.__new__(ns["ModuleGUI"])
+    gui.message=Mock()
+    gui.refresh=Mock()
+    for exc in (OSError("INVALID_HANDLE"),ValueError("INVALID_STATE")):
+        previous=Mock()
+        previous.poll.side_effect=exc
+        gui.process=previous
+        gui.start()
+        previous.terminate.assert_not_called()
+        gui.refresh.assert_not_called()
+        assert gui.process is previous
+        assert "Estado do serviço desconhecido" in gui.message.set.call_args.args[0]
