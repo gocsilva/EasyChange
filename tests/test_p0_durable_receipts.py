@@ -292,6 +292,37 @@ def test_malformed_durable_done_result_never_reexecutes_mutation(tmp_path, monke
         service.close()
 
 
+def test_durable_lock_contention_returns_retryable_sequence_busy_without_mutating(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    target=tmp_path/"receipt-target.txt"
+    target.write_text("before\n",encoding="utf-8")
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        command={"op":"operation","type":"replace_exact",
+                 "path":"receipt-target.txt",
+                 "old_text":"before","new_text":"after",
+                 "expected_occurrences":1}
+        execute=Mock(side_effect=AssertionError("MUTATION_EXECUTED_WITHOUT_CLAIM"))
+        monkeypatch.setattr(service,"_execute_structured",execute)
+        for index,error in enumerate(("RESULT_CLAIM_LOCK_BUSY",
+                                      "RESULT_CLAIM_LOCK_UNAVAILABLE")):
+            sequence=f"QLOCKFAIL{index}"
+            with monkeypatch.context() as patcher:
+                patcher.setattr(
+                    service.result_store,"claim_running",
+                    Mock(side_effect=RuntimeError(error)))
+                reply=service.execute(":ec "+sequence+" :j1 "+json.dumps(command))
+            assert reply.ok is False
+            assert reply.code=="SEQUENCE_BUSY"
+            assert reply.sequence==sequence
+            assert service.result_store.get(sequence) is None
+        assert target.read_text(encoding="utf-8")=="before\n"
+        execute.assert_not_called()
+    finally:
+        service.close()
+
+
 def test_legacy_done_journal_without_result_cannot_reexecute_mutation(tmp_path, monkeypatch):
     import hashlib
 
