@@ -13,6 +13,35 @@ import easychange.core.inbound_transfer as inbound_module
 from easychange.core.inbound_transfer import InboundCommandStore, InboundTransferError
 
 
+@pytest.mark.parametrize("identifier", (
+    "Uß234567", "Uı234567", "U１２３４５６７", "U١٢٣٤٥٦٧",
+    "U😀234567", "U/path123", "U.dot123", "U" * 65,
+    "", None, 123,
+))
+def test_inbound_transfer_id_rejects_unicode_aliases_before_staging(tmp_path, identifier):
+    store=InboundCommandStore(tmp_path / "inbound")
+    with pytest.raises(InboundTransferError) as exc:
+        store.begin(identifier,raw_bytes=10,compressed_bytes=8,
+                    chunk_count=1,sha256="a"*64)
+    assert exc.value.code=="INVALID_INBOUND_TRANSFER_ID"
+    assert not any(item.is_dir() for item in store.root.iterdir())
+
+
+def test_inbound_transfer_ascii_casefold_preserves_existing_directory(tmp_path):
+    store=InboundCommandStore(tmp_path / "inbound")
+    first=store.begin("uss234567",raw_bytes=10,compressed_bytes=8,
+                      chunk_count=1,sha256="a"*64)
+    assert first["transfer_id"]=="USS234567"
+    with pytest.raises(InboundTransferError) as exc:
+        store.begin("Uß234567",raw_bytes=10,compressed_bytes=8,
+                    chunk_count=1,sha256="b"*64)
+    assert exc.value.code=="INVALID_INBOUND_TRANSFER_ID"
+    second=store.begin("USS234567",raw_bytes=10,compressed_bytes=8,
+                       chunk_count=1,sha256="a"*64)
+    assert second["duplicate"] is True
+    assert len([p for p in store.root.iterdir() if p.is_dir()])==1
+
+
 @pytest.mark.parametrize("invalid", (True, False, 1.5, float("nan"), float("inf"),
                                      None, "3.5", "9"*500))
 def test_inbound_numeric_fields_reject_invalid_types_with_protocol_code(tmp_path, invalid):
