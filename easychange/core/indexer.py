@@ -166,10 +166,34 @@ class Indexer:
         self._last_refresh_at = 0.0
 
     @staticmethod
-    def _read_candidate(item: tuple[Path, str, int, int]) -> tuple[str, int, int, str, str | None, list[tuple[str, str, int, int, str]]]:
+    def _read_candidate(
+        item: tuple[Path, str, int, int], *,
+        trusted_root: Path | None = None,
+    ) -> tuple[str, int, int, str, str | None, list[tuple[str, str, int, int, str]]]:
         path, relative, size, mtime_ns = item
+        skipped = (relative, size, mtime_ns, "", None, [])
         try:
+            if trusted_root is not None:
+                root = trusted_root.resolve()
+                # The directory walker checked this earlier, but a file or
+                # ancestor may have become a symlink while waiting for a read
+                # worker. Check immediately before opening the candidate.
+                current = root
+                for part in Path(relative).parts:
+                    current = current / part
+                    if current.is_symlink():
+                        return skipped
+                if not path.resolve().is_relative_to(root):
+                    return skipped
             with path.open("rb") as stream:
+                if trusted_root is not None:
+                    if (path.is_symlink() or
+                            not path.resolve().is_relative_to(root)):
+                        return skipped
+                    metadata = os.fstat(stream.fileno())
+                    if (metadata.st_size != size or
+                            metadata.st_mtime_ns != mtime_ns):
+                        return skipped
                 # Hash large assets in bounded chunks; only small source
                 # files need to reside in memory for symbol extraction.
                 prefix = stream.read(MAX_INDEX_BYTES + 1)
@@ -178,8 +202,8 @@ class Indexer:
                 if oversized:
                     for block in iter(lambda: stream.read(128 * 1024), b""):
                         hasher.update(block)
-        except OSError:
-            return relative, size, mtime_ns, "", None, []
+        except (OSError, RuntimeError):
+            return skipped
         digest = hasher.hexdigest()
         content = None
         symbols: list[tuple[str, str, int, int, str]] = []
@@ -326,8 +350,17 @@ class Indexer:
                 return {"path": relative, "removed": True}
             stat = target.stat()
             relative, size, mtime_ns, digest, content, symbols = self._read_candidate(
-                (target, relative, stat.st_size, stat.st_mtime_ns)
+                (target, relative, stat.st_size, stat.st_mtime_ns),
+                trusted_root=self.root,
             )
+            if not digest:
+                # A disappearing/replaced file must not revive stale symbols
+                # or be indexed as a valid source with an empty SHA-256.
+                db.execute("DELETE FROM files WHERE path=?", (relative,))
+                db.execute("DELETE FROM symbols WHERE path=?", (relative,))
+                if self._fts_enabled:
+                    db.execute("DELETE FROM files_fts WHERE path=?", (relative,))
+                return {"path": relative, "removed": True}
             self._replace_index_row(db, relative, target.suffix.lower(), size, mtime_ns, digest, content, symbols)
         self._last_refresh_at = time.monotonic()
         return {"path": relative, "updated": True, "hash": digest[:12]}
@@ -387,7 +420,9 @@ class Indexer:
             with ThreadPoolExecutor(max_workers=_INDEX_WORKERS, thread_name_prefix="easychange-read") as pool:
                 for offset in range(0, len(changed), batch_size):
                     batch = changed[offset:offset + batch_size]
-                    loaded = list(pool.map(self._read_candidate, batch))
+                    loaded = list(pool.map(
+                        lambda item: self._read_candidate(
+                            item, trusted_root=trusted_root), batch))
                     loaded_count += len(loaded)
                     with self._lock, self._connect() as db:
                         for (path, relative, _, _), row in zip(batch, loaded):
@@ -399,6 +434,14 @@ class Indexer:
                                     db.execute("DELETE FROM files_fts WHERE path=?", (rel,))
                                 continue
                             if not digest:
+                                # If a previously indexed file vanished or
+                                # changed identity after enumeration, retire
+                                # its old content rather than leaving stale
+                                # code or protected symbols queryable.
+                                db.execute("DELETE FROM files WHERE path=?", (rel,))
+                                db.execute("DELETE FROM symbols WHERE path=?", (rel,))
+                                if self._fts_enabled:
+                                    db.execute("DELETE FROM files_fts WHERE path=?", (rel,))
                                 continue
                             self._replace_index_row(db, rel, path.suffix.lower(), size, mtime_ns, digest, content, symbols)
                     # Do not retain the completed batch while the next one
