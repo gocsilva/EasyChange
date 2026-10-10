@@ -209,7 +209,9 @@ class UbuntuService:
                     available = budget - len(captured[index])
                     if available > 0:
                         captured[index].extend(piece[:available])
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
+                # A stream closed concurrently with process teardown raises
+                # ValueError on read(). This must not look like valid output.
                 failures.append(type(exc).__name__)
             finally:
                 try:
