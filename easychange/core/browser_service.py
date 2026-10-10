@@ -231,15 +231,23 @@ class _WebSocket:
                 (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
             ).digest()
         ).decode("ascii")
-        accept = next(
-            (
-                line.split(":", 1)[1].strip()
-                for line in lines[1:]
-                if line.casefold().startswith("sec-websocket-accept:")
-            ),
-            "",
-        )
-        if accept != expected:
+        headers = {}
+        for line in lines[1:]:
+            if ":" not in line:
+                raise CdpError("CDP_WEBSOCKET_HANDSHAKE_INVALID_HEADERS")
+            name, value = line.split(":", 1)
+            name = name.strip().casefold()
+            # Duplicate upgrade/accept headers cannot have a trustworthy
+            # interpretation and may hide a malformed intermediary reply.
+            if name in {"upgrade", "connection", "sec-websocket-accept"}:
+                if name in headers:
+                    raise CdpError("CDP_WEBSOCKET_HANDSHAKE_DUPLICATE_HEADER")
+                headers[name] = value.strip()
+        if (headers.get("upgrade", "").casefold() != "websocket" or
+                "upgrade" not in {token.strip().casefold() for token in
+                                  headers.get("connection", "").split(",")}):
+            raise CdpError("CDP_WEBSOCKET_HANDSHAKE_INVALID_HEADERS")
+        if headers.get("sec-websocket-accept", "") != expected:
             raise CdpError("CDP_WEBSOCKET_ACCEPT_MISMATCH")
         # recv() can return the HTTP upgrade AND the first WebSocket frame
         # together. Losing those trailing bytes desynchronizes the reader.
