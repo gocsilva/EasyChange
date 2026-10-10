@@ -154,3 +154,36 @@ def test_large_unicode_response_keeps_exact_json_wire_format():
     payload={"text":"á🙂"*2200}
     encoded=module_service._bounded_service_json(payload)
     assert json.loads(encoded)==payload
+
+
+def test_service_response_rejects_ambiguous_mapping_keys_before_encoding():
+    import pytest
+    samples=(
+        {1:"number"},
+        {"ok":True,"nested":{True:"bool"}},
+        {"ok":True,"nested":{1:"integer","1":"string"}},
+        {None:"null-key"},
+    )
+    for payload in samples:
+        with patch.object(module_service.json.JSONEncoder,"iterencode",
+                          side_effect=AssertionError("ENCODER_CALLED")) as encoder:
+            with pytest.raises(ValueError,match="INVALID_SERVICE_RESPONSE"):
+                module_service._bounded_service_json(payload)
+            encoder.assert_not_called()
+    expected={"ok":True,"nested":{"1":"string","false":False}}
+    assert json.loads(module_service._bounded_service_json(expected))==expected
+
+
+def test_service_json_preflight_bounded_on_wide_and_cyclic_containers():
+    import pytest
+    cyclic={"ok":True}
+    cyclic["recursive"]=[cyclic]
+    with patch.object(module_service.json.JSONEncoder,"iterencode",
+                      side_effect=AssertionError("ENCODER_CALLED")) as encoder:
+        with pytest.raises(ValueError,match="INVALID_SERVICE_RESPONSE"):
+            module_service._bounded_service_json(cyclic)
+        encoder.assert_not_called()
+        with patch.object(module_service,"MAX_SERVICE_RESPONSE_BYTES",8):
+            with pytest.raises(ValueError,match="MODULE_SERVICE_RESPONSE_TOO_LARGE"):
+                module_service._bounded_service_json({"items":list(range(9))})
+        encoder.assert_not_called()
