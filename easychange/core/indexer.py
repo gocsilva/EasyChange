@@ -361,6 +361,21 @@ class Indexer:
                 raise ValueError("INVALID_PROTECTED_INDEX_PATH")
         except (OSError, RuntimeError) as exc:
             raise ValueError("INVALID_PROTECTED_INDEX_PATH") from exc
+        # Hash the candidate before reserving SQLite's single-writer lock.
+        # A large binary file can take seconds to read; only the short
+        # exclusion recheck and SQL changes belong inside the transaction.
+        candidate = None
+        if (not self._is_protected_path(relative) and
+                not any(part in SKIP_DIRS for part in Path(relative).parts)):
+            try:
+                if target.is_file():
+                    metadata = target.stat()
+                    candidate = self._read_candidate(
+                        (target, relative, metadata.st_size, metadata.st_mtime_ns),
+                        trusted_root=self.root,
+                    )
+            except (OSError, RuntimeError):
+                candidate = None
         with self._lock, self._connect() as db:
             # protect_path() may commit in another process after our initial
             # _sync_protected_paths(). Hold SQLite's writer reservation and
@@ -394,11 +409,21 @@ class Indexer:
                 if self._fts_enabled:
                     db.execute("DELETE FROM files_fts WHERE path=?", (relative,))
                 return {"path": relative, "removed": True}
-            stat = target.stat()
-            relative, size, mtime_ns, digest, content, symbols = self._read_candidate(
-                (target, relative, stat.st_size, stat.st_mtime_ns),
-                trusted_root=self.root,
-            )
+            if candidate is None:
+                digest = ""
+            else:
+                _, size, mtime_ns, digest, content, symbols = candidate
+                try:
+                    current = target.stat()
+                    # The bytes were read without the database writer lock.
+                    # Do not persist a snapshot of a file that was replaced,
+                    # redirected through a symlink, or modified meanwhile.
+                    if (current.st_size != size or current.st_mtime_ns != mtime_ns
+                            or self._has_symlink_component(relative)
+                            or not target.resolve().is_relative_to(self.root.resolve())):
+                        digest = ""
+                except (OSError, RuntimeError):
+                    digest = ""
             if not digest:
                 # A disappearing/replaced file must not revive stale symbols
                 # or be indexed as a valid source with an empty SHA-256.
