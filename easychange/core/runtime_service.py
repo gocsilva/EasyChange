@@ -372,8 +372,10 @@ class ProjectRuntimeService:
                     type(row.get("id")) is not str or
                     not 1<=len(row["id"].strip())<=128):
                 continue
-            raw_urls=row.get("urls",[])
-            raw_swagger=row.get("swagger_candidates",[])
+            # Legacy null fields mean "not configured", unlike a malformed
+            # string/dictionary which must not be treated as an iterable.
+            raw_urls=[] if row.get("urls") is None else row["urls"]
+            raw_swagger=[] if row.get("swagger_candidates") is None else row["swagger_candidates"]
             inherit_env=row.get("inherit_env",True)
             # A string is an iterable of characters, not a URL collection;
             # a dict can hide executable-looking URLs in arbitrary keys.
