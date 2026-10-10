@@ -459,7 +459,6 @@ class Indexer:
                     loaded = list(pool.map(
                         lambda item: self._read_candidate(
                             item, trusted_root=trusted_root), batch))
-                    loaded_count += len(loaded)
                     with self._lock, self._connect() as db:
                         for (path, relative, _, _), row in zip(batch, loaded):
                             rel, size, mtime_ns, digest, content, symbols = row
@@ -480,6 +479,7 @@ class Indexer:
                                     db.execute("DELETE FROM files_fts WHERE path=?", (rel,))
                                 continue
                             self._replace_index_row(db, rel, path.suffix.lower(), size, mtime_ns, digest, content, symbols)
+                            loaded_count += 1
                     # Do not retain the completed batch while the next one
                     # hashes large, potentially binary files.
                     del loaded
