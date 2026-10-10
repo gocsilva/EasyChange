@@ -641,6 +641,8 @@ class UbuntuService:
         timeout: float = 15.0,
         max_bytes: int = 65536,
     ) -> dict:
+        if type(continue_on_error) is not bool:
+            raise ValueError("CONTINUE_ON_ERROR_BOOLEAN_REQUIRED")
         if not isinstance(commands, list) or not 1 <= len(commands) <= 32:
             raise ValueError("UBUNTU_BATCH_REQUIRES_1_TO_32_COMMANDS")
         # Validate the entire batch before even its first command can run.
