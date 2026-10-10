@@ -460,6 +460,19 @@ class Indexer:
                         lambda item: self._read_candidate(
                             item, trusted_root=trusted_root), batch))
                     with self._lock, self._connect() as db:
+                        # A second process can protect a source after this
+                        # batch read it, but before we save its decoded text.
+                        # Serialize with protect_path() via BEGIN IMMEDIATE,
+                        # then refresh the exclusion list under that lock.
+                        db.execute("BEGIN IMMEDIATE")
+                        protected_row = db.execute(
+                            "SELECT value FROM index_meta WHERE key='protected_paths_v1'"
+                        ).fetchone()
+                        latest = self._decode_protected_paths(
+                            protected_row[0] if protected_row else None)
+                        self._protected_paths.update(latest)
+                        self._protected_keys.update(
+                            item.casefold() for item in latest)
                         for (path, relative, _, _), row in zip(batch, loaded):
                             rel, size, mtime_ns, digest, content, symbols = row
                             if self._is_protected_path(rel):
