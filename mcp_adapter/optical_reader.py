@@ -211,8 +211,14 @@ def decode_hdmi_qr(frame) -> list[str]:
             # is reset. Leave the thread-local slot empty for a later retry.
             detector=cv2.QRCodeDetector()
             _qr_detectors.detector=detector
-        ok, texts, _points, _rectified=detector.detectAndDecodeMulti(frame)
-        decoded=[value for value in texts if isinstance(value,str) and value] if ok and texts else []
+        # Some OpenCV builds expose only the single-QR API. Do not make a
+        # valid EC2 receipt unreadable merely because multi-QR is unavailable.
+        multi=getattr(detector,"detectAndDecodeMulti",None)
+        if callable(multi):
+            ok, texts, _points, _rectified=multi(frame)
+            decoded=[value for value in texts if isinstance(value,str) and value] if ok and texts else []
+        else:
+            decoded=[]
         if not decoded:
             single,_points,_rectified=detector.detectAndDecode(frame)
             if isinstance(single,str) and single:decoded=[single]
