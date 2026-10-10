@@ -72,6 +72,32 @@ def test_machine_mode_uses_compact_overflow_handoff_for_large_results(tmp_path):
 
 
 
+def test_qr_pixmap_cache_is_bounded_and_keeps_complete_burst_page(tmp_path):
+    from PySide6.QtGui import QPixmap
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    try:
+        pixmap = QPixmap(16, 16)
+        for index in range(100):
+            window._cache_optical_pixmap(f"qr-{index}", pixmap)
+        assert len(window._optical_pixmaps) == window._OPTICAL_PIXMAP_CACHE_ENTRIES
+        assert "qr-0" not in window._optical_pixmaps
+        assert all(f"qr-{index}" in window._optical_pixmaps
+                   for index in range(84, 100))
+        # A tight byte budget must not evict the 16 symbols that can be
+        # simultaneously displayed on a single HDMI burst page.
+        window._OPTICAL_PIXMAP_CACHE_BYTES = 200
+        for index in range(100, 145):
+            window._cache_optical_pixmap(f"qr-{index}", pixmap)
+        assert len(window._optical_pixmaps) == window._OPTICAL_BURST_SLOTS
+        assert all(f"qr-{index}" in window._optical_pixmaps
+                   for index in range(129, 145))
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_machine_mode_reuses_cached_qr_pixmaps(tmp_path):
     app = QApplication.instance() or QApplication([])
     source = tmp_path / "large.py"
