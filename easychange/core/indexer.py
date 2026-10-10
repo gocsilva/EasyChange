@@ -353,6 +353,13 @@ class Indexer:
             return int(db.execute("SELECT COUNT(*) FROM files").fetchone()[0])
 
     def symbols(self, name: str | None = None, path: str | None = None) -> list[dict]:
+        # A cold symbol lookup must obey the same path protections as the
+        # indexed/warm path. Otherwise a supplied ../ path or a protected
+        # secret could be read directly before the index has warmed.
+        if path is not None:
+            path = self._normalize_relative_path(path)
+            if path in self._protected_paths:
+                return []
         def load_rows() -> list[tuple]:
             clauses: list[str] = []
             params: list[object] = []
@@ -387,11 +394,28 @@ class Indexer:
                 ))
             if candidate_paths:
                 output: list[dict] = []
-                for file_path in candidate_paths[:64]:
-                    target = self.root / Path(file_path)
+                trusted_root = self.root.resolve()
+                for candidate in candidate_paths[:64]:
                     try:
-                        content = target.read_text(encoding="utf-8-sig")
-                    except (OSError, UnicodeDecodeError):
+                        file_path = self._normalize_relative_path(candidate)
+                        if (file_path in self._protected_paths or
+                                any(part in SKIP_DIRS for part in Path(file_path).parts)):
+                            continue
+                        target = self.root / Path(file_path)
+                        if (target.is_symlink() or
+                                not target.resolve().is_relative_to(trusted_root) or
+                                not target.is_file() or
+                                target.stat().st_size > MAX_INDEX_BYTES):
+                            continue
+                        # Cold discovery must not bypass the 2 MiB text limit.
+                        # A growing file is rejected before decoding rather
+                        # than loaded entirely by Path.read_text().
+                        with target.open("rb") as stream:
+                            raw = stream.read(MAX_INDEX_BYTES + 1)
+                        if len(raw) > MAX_INDEX_BYTES or b"\0" in raw:
+                            continue
+                        content = raw.decode("utf-8-sig")
+                    except (OSError, UnicodeDecodeError, ValueError, RuntimeError):
                         continue
                     for symbol_name, kind, line, column, signature in _extract_symbols(file_path, content):
                         if name is not None and symbol_name != name:
