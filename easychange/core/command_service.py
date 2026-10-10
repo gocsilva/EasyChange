@@ -47,6 +47,12 @@ from ..remote.agent_profile import REMOTE_PROFILE, remote_guide_markdown
 from .. import __version__
 
 
+# Defensive restart budgets: normal edited text is capped at 4 MiB by
+# FileService; allow generous headroom for legacy JSON escaping/snapshots.
+MAX_ACTIVE_TRANSACTION_HEADER_BYTES = 64 * 1024 * 1024
+MAX_ACTIVE_TRANSACTION_RECORD_CHARS = 64 * 1024 * 1024
+
+
 @dataclass
 class Change:
     path: str
@@ -4582,7 +4588,11 @@ class CommandService:
         if not self.transaction_path.exists():
             return
         try:
-            value = json.loads(self.transaction_path.read_text(encoding="utf-8"))
+            with self.transaction_path.open("rb") as transaction_header:
+                raw = transaction_header.read(MAX_ACTIVE_TRANSACTION_HEADER_BYTES + 1)
+            if len(raw) > MAX_ACTIVE_TRANSACTION_HEADER_BYTES:
+                raise ValueError("ACTIVE_TRANSACTION_HEADER_TOO_LARGE")
+            value = json.loads(raw.decode("utf-8"))
             if (not isinstance(value, dict) or
                     not isinstance(value.get("transaction_id"), str) or
                     not value["transaction_id"]):
@@ -4596,7 +4606,12 @@ class CommandService:
                     # materialized two extra copies of the entire journal.
                     # Stream records in order, retaining only real Changes.
                     with self.transaction_log_path.open("r", encoding="utf-8") as stream:
-                        for line in stream:
+                        while True:
+                            line = stream.readline(MAX_ACTIVE_TRANSACTION_RECORD_CHARS + 1)
+                            if not line:
+                                break
+                            if len(line) > MAX_ACTIVE_TRANSACTION_RECORD_CHARS:
+                                raise ValueError("ACTIVE_TRANSACTION_RECORD_TOO_LARGE")
                             if not line.strip():
                                 continue
                             try:
