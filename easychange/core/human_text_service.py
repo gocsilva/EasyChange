@@ -189,7 +189,10 @@ class HumanTextService:
                 # or externally replaced file must not allocate unbounded RAM
                 # before the primary text buffer's size guard runs.
                 value = json.loads(self._read_metadata(self.meta_path).decode("utf-8"))
-                file_stat = self.path.stat()
+                # Even a matching cached metadata signature is not proof that
+                # the path is still a regular, unaliased workspace buffer.
+                with self._open_regular_buffer(self.path) as opened:
+                    file_stat = os.fstat(opened.fileno())
                 if (
                     isinstance(value, dict)
                     and value.get("bytes") is not None
