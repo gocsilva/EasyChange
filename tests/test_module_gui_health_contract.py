@@ -26,6 +26,7 @@ def _source_and_status():
 
 
 def _probe(method, name, port, payload):
+    from urllib.error import HTTPError
     reads=[]
     class FakeResponse(io.BytesIO):
         def read(self,size=-1):
@@ -33,7 +34,8 @@ def _probe(method, name, port, payload):
             return super().read(size)
     response=FakeResponse(payload)
     namespace={"json":json,"MODULE_ID":name,"PORT":port,
-               "urlopen":lambda url,timeout: response}
+               "urlopen":lambda url,timeout: response,
+               "HTTPError":HTTPError}
     exec(compile(ast.Module(body=[method],type_ignores=[]),
                  "<standalone-gui-health>","exec"),namespace)
     return namespace["status"](), reads
