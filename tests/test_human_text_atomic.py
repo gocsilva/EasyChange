@@ -224,3 +224,41 @@ def test_human_text_save_rejects_impossible_character_count_before_utf8_copy(tmp
         service.save("x"*10000)
     assert not service.path.exists()
     assert service.save("ótimo")["bytes"]==len("ótimo".encode("utf-8"))
+
+
+@pytest.mark.parametrize(("value","code"), [
+    (True,"HUMAN_TEXT_INVALID_CURSOR"),(False,"HUMAN_TEXT_INVALID_CURSOR"),
+    (1.5,"HUMAN_TEXT_INVALID_CURSOR"),
+    (float("nan"),"HUMAN_TEXT_INVALID_CURSOR"),
+    (float("inf"),"HUMAN_TEXT_INVALID_CURSOR"),
+    (10**300,"HUMAN_TEXT_INVALID_CURSOR"),
+    ("1.0000000000000001","HUMAN_TEXT_INVALID_CURSOR"),
+])
+def test_human_text_invalid_cursors_are_rejected_before_disk_scan(tmp_path,monkeypatch,value,code):
+    service=HumanTextService(tmp_path)
+    service.save("safe")
+    monkeypatch.setattr(service,"info",
+        lambda: (_ for _ in ()).throw(AssertionError("INVALID_CURSOR_TRIGGERED_DISK_IO")))
+    with pytest.raises(ValueError,match=code):
+        service.read(cursor=value)
+
+
+@pytest.mark.parametrize("value", [
+    True, False, float("nan"), float("inf"), -float("inf"),
+    12.5, 10**300, "1.0000000000000001", [], {},
+])
+def test_human_text_invalid_page_size_is_rejected_before_io(tmp_path,monkeypatch,value):
+    service=HumanTextService(tmp_path)
+    monkeypatch.setattr(service,"info",
+        lambda: (_ for _ in ()).throw(AssertionError("INVALID_PAGE_SIZE_TRIGGERED_DISK_IO")))
+    with pytest.raises(ValueError,match="HUMAN_TEXT_INVALID_PAGE_SIZE"):
+        service.read(max_bytes=value)
+
+
+def test_human_text_page_options_preserve_exact_large_cursor_contract(tmp_path):
+    service=HumanTextService(tmp_path)
+    service.save("abc")
+    assert service.read(cursor="1",max_bytes="512")["text"]=="bc"
+    assert service.read(cursor=0,max_bytes=0)["text"]=="abc"
+    with pytest.raises(ValueError,match="HUMAN_TEXT_CURSOR_OUT_OF_RANGE"):
+        service.read(cursor=(1<<53)+1)
