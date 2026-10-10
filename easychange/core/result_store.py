@@ -172,32 +172,30 @@ class DurableResultStore:
 
     @staticmethod
     def _encode(value: dict[str, Any]) -> bytes:
-        # Writer and reader must agree on their byte budgets. Otherwise a
-        # successful atomic replacement could create an unreadable receipt,
-        # losing replay identity after a mutation has already executed.
-        # Level 1 retains the established low-latency compression policy.
-        # Build JSON incrementally; json.dumps() materializes the complete
-        # (possibly oversized) text before the byte budget can be checked.
-        # This also bounds expansion of shared object graphs and reduces
-        # peak memory on the large optical-result recovery path.
-        wire=bytearray()
-        encoder=json.JSONEncoder(
-            ensure_ascii=False,allow_nan=False,separators=(",", ":"))
+        # Encode directly into zlib instead of retaining the entire JSON
+        # alongside its compressed copy; preserve level 1 and the wire schema.
+        compressor = zlib.compressobj(level=1)
+        encoded = bytearray()
+        decoded_size = 0
+        encoder = json.JSONEncoder(
+            ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         for fragment in encoder.iterencode(value):
-            if len(fragment)>MAX_DECODED_RECEIPT_BYTES:
+            if len(fragment) > MAX_DECODED_RECEIPT_BYTES:
                 raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
-            # iterencode can yield one very large Unicode value. Bound the
-            # transient UTF-8 allocation to 4096 code points (up to 16 KiB),
-            # not four times the complete receipt budget.
-            for offset in range(0,len(fragment),4096):
-                encoded=fragment[offset:offset+4096].encode("utf-8")
-                if len(wire)+len(encoded)>MAX_DECODED_RECEIPT_BYTES:
+            for offset in range(0, len(fragment), 4096):
+                piece = fragment[offset:offset+4096].encode("utf-8")
+                decoded_size += len(piece)
+                if decoded_size > MAX_DECODED_RECEIPT_BYTES:
                     raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
-                wire.extend(encoded)
-        compressed = zlib.compress(wire, level=1)
-        if len(compressed) > MAX_COMPRESSED_RECEIPT_BYTES:
+                block = compressor.compress(piece)
+                if len(encoded) + len(block) > MAX_COMPRESSED_RECEIPT_BYTES:
+                    raise ValueError("RESULT_RECEIPT_COMPRESSED_TOO_LARGE")
+                encoded.extend(block)
+        tail = compressor.flush()
+        if len(encoded) + len(tail) > MAX_COMPRESSED_RECEIPT_BYTES:
             raise ValueError("RESULT_RECEIPT_COMPRESSED_TOO_LARGE")
-        return compressed
+        encoded.extend(tail)
+        return bytes(encoded)
 
     @staticmethod
     def _read_compressed(path: Path) -> bytes:
