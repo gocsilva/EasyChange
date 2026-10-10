@@ -79,12 +79,21 @@ def _json_equal_with_types(left: Any, right: Any) -> bool:
     a large structured primary/result is compared without extra serialization.
     """
     pending = [(left, right)]
+    seen_pairs: set[tuple[int,int]] = set()
     while pending:
         lhs, rhs = pending.pop()
         if type(lhs) is not type(rhs):
             return False
+        if isinstance(lhs, (dict,list)):
+            pair=(id(lhs),id(rhs))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
         if isinstance(lhs, dict):
-            if lhs.keys() != rhs.keys():
+            # Non-string keys can serialize to the same name despite having
+            # different Python types (e.g. 1 and "1"). Skip compaction.
+            if (any(type(key) is not str for key in lhs)
+                    or lhs.keys() != rhs.keys()):
                 return False
             pending.extend((value, rhs[key]) for key, value in lhs.items())
         elif isinstance(lhs, list):
@@ -169,7 +178,7 @@ def _transport_components(
     result: Any,
     *,
     chunk_chars: int | None = None,
-) -> tuple[dict[str, Any], bytes, str, int, int, str, str, str]:
+) -> tuple[dict[str, Any], bytes, str, int, int, str, str, str, bool]:
     value = _result_value(result)
     wire_value = _compact_transport_value(value)
     raw, _compressed, token = _encode_raw(wire_value)
