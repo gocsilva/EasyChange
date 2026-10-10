@@ -781,6 +781,21 @@ class DurableResultStore:
         result = record.get("result") if record else None
         return result if isinstance(result, dict) else None
 
+    @staticmethod
+    def _encode_result_json(value: dict[str, Any]) -> bytes:
+        """Encode recovered payload once, under the receipt's byte budget."""
+        wire=bytearray()
+        encoder=json.JSONEncoder(
+            ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        for fragment in encoder.iterencode(value):
+            if len(fragment)>MAX_DECODED_RECEIPT_BYTES:
+                raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+            raw=fragment.encode("utf-8")
+            if len(wire)+len(raw)>MAX_DECODED_RECEIPT_BYTES:
+                raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+            wire.extend(raw)
+        return bytes(wire)
+
     def _result_payload(self, sequence: str) -> tuple[dict[str, Any], bytes, str] | None:
         with self._lock:
             cached = self._payload_cache_get(sequence)
@@ -796,7 +811,7 @@ class DurableResultStore:
             result = self.result(sequence)
             if result is None:
                 return None
-            raw = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            raw = self._encode_result_json(result)
             digest = hashlib.sha256(raw).hexdigest()
             try:
                 after = self._receipt_stamp(path)
