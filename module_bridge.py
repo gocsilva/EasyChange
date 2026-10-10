@@ -80,7 +80,13 @@ def _acquire_consumer_lease():
         fd=os.open(path,flags,0o600)
     except OSError as exc:
         raise RuntimeError("MCP_CONSUMER_LEASE_UNAVAILABLE") from exc
-    lease=os.fdopen(fd,"r+b",buffering=0)
+    try:
+        lease=os.fdopen(fd,"r+b",buffering=0)
+    except BaseException:
+        # os.open() succeeded, but fdopen() did not assume ownership.
+        # Never leak a live OS descriptor or leave the lease ambiguous.
+        os.close(fd)
+        raise
     try:
         if os.name=="nt":
             import msvcrt
