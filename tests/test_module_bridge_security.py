@@ -630,6 +630,30 @@ class TestHubRedirectBoundary(unittest.TestCase):
                 sleep.assert_called_once()
                 self.assertTrue(body.closed)
 
+    def test_shared_json_subtrees_expand_correctly_and_cycles_fail_closed(self):
+        import io
+        import json
+        from unittest.mock import patch
+
+        bridge=module_bridge.MCPBridge(token="test-bridge-token")
+        shared={"parts":[{"v":"á"},1,True]}
+        payload={"tool":"test.tool","arguments":{"copies":[shared]*80}}
+        with patch.object(module_bridge._local_opener,"open",
+                          return_value=io.BytesIO(b'{"ok":true}')) as opener:
+            self.assertEqual(bridge._request("/v1/tools/call",payload),
+                             {"ok":True})
+        outbound=json.loads(opener.call_args.args[0].data)
+        self.assertEqual(outbound["arguments"]["copies"],[shared]*80)
+        self.assertEqual(len(outbound["arguments"]["copies"]),80)
+
+        cycle={"item":"unsafe"}
+        cycle["self"]=cycle
+        with patch.object(module_bridge._local_opener,"open",
+                          side_effect=AssertionError("CYCLE_SENT_OVER_NETWORK")) as opener:
+            with self.assertRaises((ValueError,RecursionError)):
+                bridge._request("/v1/send",{"payload":cycle})
+            opener.assert_not_called()
+
     def test_json_encoder_limits_unicode_fragment_memory(self):
         import io
         import json
