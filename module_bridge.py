@@ -10,7 +10,7 @@ import itertools
 import math
 import os
 import time
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request,build_opener,HTTPRedirectHandler,ProxyHandler
 
 BUS=os.environ.get("MCP_MODULE_BUS_URL","http://127.0.0.1:8786")
@@ -304,8 +304,23 @@ class MCPBridge:
         return self._request("/v1/inbox/peek")
 
     def ack(self, ids):
-        """Confirm successful processing. Repeated ACKs are idempotent."""
-        return self._request("/v1/inbox/ack",{"ids":ids})
+        """Confirm delivery with a bounded retry only for transport failure.
+
+        ACK is idempotent at the hub: a lost reply is recoverable as
+        already_acked. Unlike arbitrary tool RPCs, replaying this exact ACK
+        cannot repeat the handler's operation or acknowledge a different ID.
+        """
+        payload={"ids":ids}
+        for attempt in range(3):
+            try:
+                return self._request("/v1/inbox/ack",payload)
+            except HTTPError:
+                # A real HTTP rejection is not an uncertain transport outcome.
+                raise
+            except (URLError, ConnectionError, TimeoutError):
+                if attempt==2:
+                    raise
+                time.sleep(0.05*(attempt+1))
 
     def process_pending(self, handler, *, limit=20, ack_batch_size=1):
         """Opt-in callback processing. ACK only after explicit True.
