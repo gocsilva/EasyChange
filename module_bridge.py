@@ -192,6 +192,10 @@ class MCPBridge:
                     encoded.extend(fragment)
             except (RecursionError,OverflowError) as exc:
                 raise ValueError("MCP_BUS_REQUEST_TOO_LARGE") from exc
+            except UnicodeError as exc:
+                # A lone surrogate cannot be sent as UTF-8 JSON. Keep this
+                # a deterministic input error, never attempt network I/O.
+                raise ValueError("MCP_BUS_INVALID_UNICODE") from exc
             payload=bytes(encoded)
             headers["Content-Type"]="application/json"
         req=Request(BUS+path,data=payload,method="POST" if payload is not None else "GET",headers=headers)
