@@ -278,6 +278,8 @@ class MCPBridge:
                 return self._request("/v1/tools/call",payload,timeout=120)
             except HTTPError as exc:
                 if exc.code!=429:
+                    # Keep rejected requests from retaining HTTP sockets.
+                    exc.close()
                     raise
                 try:
                     # An admission-rejection proof must be complete: a
@@ -315,6 +317,8 @@ class MCPBridge:
                 return self._request("/v1/send",message,timeout=6)
             except HTTPError as exc:
                 if exc.code!=429:
+                    # Keep rejected requests from retaining HTTP sockets.
+                    exc.close()
                     raise
                 try:
                     # An admission-rejection proof must be complete: a
@@ -353,8 +357,10 @@ class MCPBridge:
         for attempt in range(3):
             try:
                 return self._request("/v1/inbox/ack",payload)
-            except HTTPError:
+            except HTTPError as exc:
                 # A real HTTP rejection is not an uncertain transport outcome.
+                # Close its response rather than holding a rejected ACK socket.
+                exc.close()
                 raise
             except (URLError, ConnectionError, TimeoutError):
                 if attempt==2:
