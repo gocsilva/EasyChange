@@ -541,7 +541,13 @@ def detach_hub(token):
         expected=(_runtime_token or
                   ("" if _runtime_detached else
                    os.environ.get("MCP_MODULE_BUS_TOKEN","")))
-        if not isinstance(token,str) or not expected or not hmac.compare_digest(token,expected):
+        # compare_digest(str, str) rejects non-ASCII characters with
+        # TypeError. Malformed local HTTP bodies must fail closed without an
+        # uncaught exception or mutation of the active bridge credential.
+        if (type(token) is not str or not 1<=len(token)<=256 or
+                not token.isascii() or type(expected) is not str or
+                not 1<=len(expected)<=256 or not expected.isascii() or
+                not hmac.compare_digest(token,expected)):
             raise PermissionError("INVALID_DETACH_CREDENTIAL")
         _runtime_token=""
         _runtime_detached=True
