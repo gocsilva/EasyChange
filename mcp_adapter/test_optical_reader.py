@@ -469,6 +469,29 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertTrue(receiver.ingest(packets[1:])["verified"])
         self.assertEqual(receiver.ingest([])["payload"],original)
 
+    def test_wrong_ec2_version_cannot_poison_first_assembler_slot(self):
+        import json
+        from easychange.core.result import Result
+
+        packets=encode_result_chunks(
+            Result(True,"read",{"text":"good"},sequence="QASMVER2026"))
+        original=json.loads(packets[0])
+        for unsupported in (None, True, False, 1, 3, "2", 2.0):
+            altered=dict(original)
+            if unsupported is None:
+                altered.pop("v")
+            else:
+                altered["v"]=unsupported
+            with self.subTest(version=unsupported):
+                assembly=OpticalAssembler()
+                pending=assembly.ingest([json.dumps(altered)])
+                self.assertFalse(pending["complete"])
+                self.assertIsNone(pending["sequence"])
+                self.assertEqual(assembly.chunks,{})
+                recovered=assembly.ingest(packets)
+                self.assertTrue(recovered["verified"])
+                self.assertEqual(recovered["payload"]["sequence"],"QASMVER2026")
+
     def test_invalid_transfer_hash_metadata_cannot_reserve_qr_slot(self):
         import json
 
