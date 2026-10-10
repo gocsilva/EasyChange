@@ -826,7 +826,10 @@ class DurableResultStore:
         seen: set[int] = set()
         for raw_index in indexes:
             if (type(raw_index) is not int and
-                    not (isinstance(raw_index, str) and raw_index.strip().isdecimal())):
+                    not (isinstance(raw_index, str) and len(raw_index) <= 32
+                         and raw_index.strip().isdecimal())):
+                # Bound text length *before* strip/isdecimal/int: a decimal
+                # string with millions of digits can monopolize parsing CPU.
                 raise ValueError("INVALID_RESULT_STREAM_CHUNK_INDEX")
             index = int(raw_index)
             if index not in seen:
@@ -950,7 +953,10 @@ class DurableResultStore:
         seen: set[int] = set()
         for raw_index in indexes:
             if (type(raw_index) is not int and
-                    not (isinstance(raw_index, str) and raw_index.strip().isdecimal())):
+                    not (isinstance(raw_index, str) and len(raw_index) <= 32
+                         and raw_index.strip().isdecimal())):
+                # Bound text length *before* strip/isdecimal/int: a decimal
+                # string with millions of digits can monopolize parsing CPU.
                 raise ValueError("INVALID_RESULT_CHUNK_INDEX")
             index = int(raw_index)
             if index not in seen:
