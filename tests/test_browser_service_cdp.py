@@ -461,6 +461,34 @@ def test_cdp_upgrade_handles_partial_coalesced_first_frame(monkeypatch):
     assert ws._recv_text()=="OK"
 
 
+def test_failed_cdp_upgrade_closes_socket_before_retry(monkeypatch):
+    class TruncatedHandshakeSocket:
+        def __init__(self):
+            self.requests=[]
+            self.closed=False
+            self._replied=False
+        def settimeout(self,_timeout):
+            pass
+        def sendall(self,payload):
+            self.requests.append(payload)
+        def recv(self,_size):
+            if not self._replied:
+                self._replied=True
+                return b"HTTP/1.1 101 Switching Protocols\r\n"
+            return b""
+        def close(self):
+            self.closed=True
+
+    sock=TruncatedHandshakeSocket()
+    monkeypatch.setattr(browser_module.socket,"create_connection",
+                        lambda *a,**k:sock)
+    with pytest.raises(browser_module.CdpError,
+                       match="CDP_WEBSOCKET_HANDSHAKE_TRUNCATED"):
+        browser_module._WebSocket("ws://127.0.0.1:9222/devtools/page/1")
+    assert sock.closed is True
+    assert len(sock.requests)==1
+
+
 def test_cdp_rejects_truncated_http_upgrade_headers():
     class SyntheticSocket:
         def __init__(self):
