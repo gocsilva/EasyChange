@@ -1057,7 +1057,35 @@ class ProjectRuntimeService:
             return {"ok": False, "url": url, "error": type(exc).__name__,
                     "message": str(exc)[:500], "duration_ms": int((time.monotonic() - started) * 1000)}
 
-    def wait_for_http(self, urls: list[str], timeout: float = 35.0) -> dict:
+    @staticmethod
+    def _swagger_document_valid(probe: dict) -> bool:
+        """A reachable HTTP page is not automatically Swagger/OpenAPI proof."""
+        raw=probe.get("body")
+        if (probe.get("truncated") is True or
+                not isinstance(raw,bytes) or not raw):
+            return False
+        if raw.lstrip().startswith(b"{"):
+            try:
+                document=json.loads(raw)
+            except (UnicodeError,ValueError,TypeError,RecursionError):
+                return False
+            if not isinstance(document,dict):
+                return False
+            version=document.get("openapi")
+            swagger=document.get("swagger")
+            return (
+                isinstance(document.get("paths"),dict) and
+                ((isinstance(version,str) and version.startswith("3.")) or
+                 (isinstance(swagger,str) and swagger.startswith("2.")))
+            )
+        # Swagger UI / Redoc render an HTML app; a generic index.html,
+        # login page or 200 OK response must not be saved as verified proof.
+        sample=raw[:262144].lower()
+        return (b"swagger-ui" in sample or b"swaggeruibundle" in sample or
+                b"redoc" in sample)
+
+    def wait_for_http(self, urls: list[str], timeout: float = 35.0,
+                      *, require_swagger: bool = False) -> dict:
         deadline = time.monotonic() + max(1.0, timeout)
         last = {}
         while True:
@@ -1075,6 +1103,10 @@ class ProjectRuntimeService:
                 # not that the requested Swagger/OpenAPI endpoint is ready.
                 status=result.get("status")
                 if result.get("ok") is True and type(status) is int and 200 <= status < 300:
+                    if require_swagger and not self._swagger_document_valid(result):
+                        last={**result,"ok":False,
+                              "error":"SWAGGER_DOCUMENT_NOT_VERIFIED"}
+                        continue
                     return result
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1113,10 +1145,12 @@ class ProjectRuntimeService:
                 redact_values=self._redaction_values(profile, process_env),
             )
 
-        probe = self.wait_for_http(candidates, timeout=timeout)
+        probe = self.wait_for_http(candidates, timeout=timeout,
+                                   require_swagger=True)
         if (probe.get("ok") is not True or
                 not isinstance(probe.get("status"), int) or
-                not 200 <= probe["status"] < 300):
+                not 200 <= probe["status"] < 300 or
+                not self._swagger_document_valid(probe)):
             if started_process and not keep_running:
                 try:
                     self.processes.stop(process_id)
