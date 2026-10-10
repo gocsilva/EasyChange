@@ -427,6 +427,48 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertEqual(assembly.chunks,{})
         self.assertTrue(assembly.ingest(packets)["complete"])
 
+    def test_invalid_transport_marker_cannot_poison_qr_slot(self):
+        import json
+
+        original={"sequence":"QLITERALHDMI1","ok":True,
+                  "data":{"results":[{"value":"actual"}],
+                          "primary":{"$ec_ref":"results[0]"},
+                          "transport_compacted":True}}
+        packets=encode_result_chunks(original)
+        self.assertEqual(json.loads(packets[0])["t"],0)
+        forged=json.loads(packets[0])
+        forged["t"]=True  # bool must not silently alias numeric zero or one
+        receiver=OpticalAssembler()
+        state=receiver.ingest([json.dumps(forged)])
+        self.assertIsNone(state["sequence"])
+        self.assertEqual(receiver.stored_chars,0)
+        verified=receiver.ingest(packets)
+        self.assertTrue(verified["verified"])
+        self.assertEqual(verified["payload"],original)
+
+    def test_mixed_literal_and_unmarked_qr_packets_are_rejected_early(self):
+        import json
+        import hashlib
+
+        original={
+            "sequence":"QLITERALHDMI2","ok":True,
+            "data":{"results":[{"value":"original"}],
+                    "primary":{"$ec_ref":"results[0]"},
+                    "transport_compacted":True,
+                    "text":"".join(hashlib.sha256(str(i).encode()).hexdigest()
+                                   for i in range(90))}}
+        packets=encode_result_chunks(original,chunk_chars=120)
+        self.assertGreaterEqual(len(packets),2)
+        receiver=OpticalAssembler()
+        receiver.ingest(packets[:1])
+        self.assertEqual(receiver.stored_chars,len(packets[0]))
+        foreign=json.loads(packets[1])
+        del foreign["t"]
+        partial=receiver.ingest([json.dumps(foreign)])
+        self.assertEqual(partial["received"],1)
+        self.assertTrue(receiver.ingest(packets[1:])["verified"])
+        self.assertEqual(receiver.ingest([])["payload"],original)
+
     def test_untrusted_header_requires_real_boolean_completion(self):
         import json
         from easychange.core.result import Result
