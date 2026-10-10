@@ -1228,7 +1228,10 @@ def test_legacy_receipt_with_corrupt_duration_preserves_replay_identity(tmp_path
     for field,value in (("started_at","not-a-time"),
                         ("finished_at",[]),
                         ("started_at","inf"),
-                        ("finished_at",-1.0)):
+                        ("finished_at",-1.0),
+                        # Each timestamp is finite, but ms conversion
+                        # overflows to infinity without an additional guard.
+                        ("finished_at",1e308)):
         with pytest.raises(RuntimeError,match="RESULT_RECEIPT_UNREADABLE"):
             current=store.get(sequence)
             current["started_at"]=finished["started_at"]
