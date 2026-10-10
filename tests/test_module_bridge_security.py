@@ -102,6 +102,36 @@ class TestHubRedirectBoundary(unittest.TestCase):
                                  {"connected":True,"id":canonical})
             self.assertEqual(module_bridge.MCPBridge().token,fresh)
 
+    def test_cached_implicit_bridge_is_revoked_after_detach_and_rekey(self):
+        from unittest.mock import patch
+
+        bootstrap="B"*48
+        canonical=module_bridge.CANONICAL_MODULE_ID
+        with patch.dict(module_bridge.os.environ,
+                        {"MCP_MODULE_BUS_TOKEN":bootstrap}), \
+             patch.object(module_bridge,"_runtime_token",""), \
+             patch.object(module_bridge,"_runtime_detached",False):
+            cached=module_bridge.MCPBridge()
+            self.assertTrue(cached.connected)
+            self.assertEqual(cached.token,bootstrap)
+            self.assertEqual(module_bridge.detach_hub(bootstrap),
+                             {"connected":False})
+            self.assertFalse(cached.connected)
+            with patch.object(module_bridge._local_opener,"open") as network:
+                with self.assertRaisesRegex(
+                        RuntimeError,"MCP_NOT_CONNECTED_STANDALONE"):
+                    cached.peers()
+                network.assert_not_called()
+
+            fresh_token="N"*48
+            with patch.object(module_bridge.MCPBridge,"peers",
+                              return_value={"ok":True,"self":canonical}):
+                module_bridge.attach_hub(fresh_token,canonical)
+            self.assertFalse(cached.connected)
+            replacement=module_bridge.MCPBridge()
+            self.assertTrue(replacement.connected)
+            self.assertEqual(replacement.token,fresh_token)
+
     def test_no_external_proxy_config(self):
         from urllib.request import ProxyHandler
         handlers=[h for h in module_bridge._local_opener.handlers
