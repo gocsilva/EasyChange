@@ -4603,11 +4603,11 @@ class CommandService:
                                 item = json.loads(line)
                                 changes.append(Change(**item))
                             except (json.JSONDecodeError, TypeError) as exc:
-                                # Only a genuinely torn FINAL append may be
-                                # omitted. A malformed earlier record must not
-                                # silently erase subsequent rollback history.
-                                if not line.endswith("\n") and not stream.read(1):
-                                    break
+                                # An incomplete final append may represent an
+                                # already-applied edit whose rollback evidence
+                                # was only partly written. Skipping it permits
+                                # unsafe commit/replay and appending onto the
+                                # corrupt suffix. Preserve bytes and fail closed.
                                 raise ValueError("ACTIVE_TRANSACTION_LOG_CORRUPT") from exc
                 self.transaction = changes
                 self._transaction_persisted_count = len(changes)
