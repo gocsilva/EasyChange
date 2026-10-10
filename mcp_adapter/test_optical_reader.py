@@ -42,6 +42,49 @@ class OpticalReaderTests(unittest.TestCase):
                         reader.decode_hdmi_qr(SimpleNamespace(shape=dims)),[])
         qr.assert_not_called()
 
+    def test_multi_qr_detector_output_has_fixed_per_frame_iteration_budget(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import Mock,patch
+        from mcp_adapter import optical_reader as reader
+
+        visited=[]
+        def endless_blanks():
+            number=0
+            while True:
+                visited.append(number)
+                number+=1
+                yield ""
+
+        detector=Mock()
+        detector.detectAndDecodeMulti.return_value=(
+            True,endless_blanks(),None,None)
+        detector.detectAndDecode.return_value=("EC2_SINGLE_RECOVERED",None,None)
+        cv2_stub=SimpleNamespace(error=RuntimeError,QRCodeDetector=lambda:detector)
+        frame=SimpleNamespace(shape=(360,640,3))
+        with patch.dict(sys.modules,{"cv2":cv2_stub}), \
+             patch.object(reader._qr_detectors,"detector",None,create=True):
+            self.assertEqual(reader.decode_hdmi_qr(frame),
+                             ["EC2_SINGLE_RECOVERED"])
+        self.assertEqual(len(visited),32)
+        detector.detectAndDecode.assert_called_once_with(frame)
+
+    def test_string_multi_qr_result_is_not_treated_as_individual_characters(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import Mock,patch
+        from mcp_adapter import optical_reader as reader
+
+        detector=Mock()
+        detector.detectAndDecodeMulti.return_value=(True,"EC2_INVALID",None,None)
+        detector.detectAndDecode.return_value=("EC2_SINGLE_VALID",None,None)
+        cv2_stub=SimpleNamespace(error=RuntimeError,QRCodeDetector=lambda:detector)
+        with patch.dict(sys.modules,{"cv2":cv2_stub}), \
+             patch.object(reader._qr_detectors,"detector",None,create=True):
+            result=reader.decode_hdmi_qr(SimpleNamespace(shape=(400,600,3)))
+        self.assertEqual(result,["EC2_SINGLE_VALID"])
+
+
     def test_single_only_opencv_detector_still_reads_ec2_qr(self):
         import sys
         from types import SimpleNamespace
