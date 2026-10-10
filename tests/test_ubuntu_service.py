@@ -108,6 +108,42 @@ def test_wsl_argv_is_structured_and_env_is_argument_not_shell(monkeypatch):
     assert "-lc" not in argv
 
 
+@pytest.mark.parametrize("permission",("false","true",1,0,None,[],{}))
+def test_non_boolean_mutation_permission_rejected_before_any_remote_session(permission):
+    processes=_FakeProcesses()
+    service=UbuntuService(processes)
+    # Session is intentionally absent: admission must fail before any
+    # remote connection, job launch or WSL executable lookup.
+    with pytest.raises(ValueError, match="ALLOW_MUTATION_BOOLEAN_REQUIRED"):
+        service.exec("hml", ["touch","not-executed"],job_id="JNOEXEC",
+                     allow_mutation=permission)
+    with pytest.raises(ValueError, match="ALLOW_MUTATION_BOOLEAN_REQUIRED"):
+        service.shell("hml","touch not-executed",job_id="JNOSHELL",
+                      allow_mutation=permission)
+    with pytest.raises(ValueError, match="ALLOW_MUTATION_BOOLEAN_REQUIRED"):
+        service.kubectl("hml",["delete","pod","test"],job_id="JNOK8S",
+                        allow_mutation=permission,confirm_context="aks-hml")
+    assert processes.started==[]
+
+
+def test_ubuntu_batch_invalid_later_permission_rejects_entire_batch_preflight():
+    processes=_FakeProcesses()
+    service=UbuntuService(processes)
+    _session(service)
+    seen=[]
+    service._run_sync=lambda *args,**kwargs: (
+        seen.append(args) or {"return_code":0,"stdout":"ok","stderr":""}
+    )
+    commands=[
+        {"argv":["echo","read-only"],"allow_mutation":False},
+        {"command":"touch should-not-run","allow_mutation":"false"},
+    ]
+    with pytest.raises(ValueError, match="ALLOW_MUTATION_BOOLEAN_REQUIRED"):
+        service.batch("hml",commands,continue_on_error=True)
+    assert seen==[]
+    assert processes.started==[]
+
+
 def test_exec_uses_durable_process_job_and_pages_output(monkeypatch):
     processes = _FakeProcesses()
     service = UbuntuService(processes)
