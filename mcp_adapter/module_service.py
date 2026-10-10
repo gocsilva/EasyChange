@@ -53,8 +53,45 @@ def _unique_service_fields(pairs):
 
 MAX_SERVICE_RESPONSE_BYTES = 2 * 1024 * 1024
 
+def _validate_service_json_tree(value):
+    """Bound input traversal; ambiguous Python mapping keys are not valid JSON."""
+    stack=[(iter((value,)),None)]
+    ancestors=set()
+    visits=0
+    while stack:
+        iterator, owner=stack[-1]
+        try:
+            item=next(iterator)
+        except StopIteration:
+            stack.pop()
+            if owner is not None:
+                ancestors.remove(owner)
+            continue
+        visits+=1
+        if visits>MAX_SERVICE_RESPONSE_BYTES:
+            raise ValueError("MODULE_SERVICE_RESPONSE_TOO_LARGE")
+        if isinstance(item,str) and len(item)>MAX_SERVICE_RESPONSE_BYTES:
+            raise ValueError("MODULE_SERVICE_RESPONSE_TOO_LARGE")
+        if isinstance(item,(dict,list,tuple)):
+            if len(item)>MAX_SERVICE_RESPONSE_BYTES:
+                raise ValueError("MODULE_SERVICE_RESPONSE_TOO_LARGE")
+            identity=id(item)
+            if identity in ancestors:
+                raise ValueError("INVALID_SERVICE_RESPONSE")
+            if isinstance(item,dict):
+                # Python's encoder turns 1 and "1" into duplicate JSON names.
+                if any(type(key) is not str for key in item):
+                    raise ValueError("INVALID_SERVICE_RESPONSE")
+                children=iter(item.values())
+            else:
+                children=iter(item)
+            ancestors.add(identity)
+            stack.append((children,identity))
+
+
 def _bounded_service_json(value):
     """Stream-encode standalone HTTP responses with a strict UTF-8 byte cap."""
+    _validate_service_json_tree(value)
     chunks=bytearray()
     for piece in json.JSONEncoder(ensure_ascii=False,allow_nan=False).iterencode(value):
         if len(piece)>MAX_SERVICE_RESPONSE_BYTES:
