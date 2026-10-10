@@ -516,8 +516,11 @@ class TestHubRedirectBoundary(unittest.TestCase):
         with patch("module_bridge.time.sleep") as sleep:
             self.assertEqual(client.call("mcp_core_status",ping=1),completed)
         self.assertEqual(client._request.call_count,2)
-        self.assertEqual(client._request.call_args_list[0],
-                         client._request.call_args_list[1])
+        first,second=client._request.call_args_list
+        self.assertEqual(first.args,second.args)
+        self.assertGreater(first.kwargs["timeout"],0)
+        self.assertGreater(second.kwargs["timeout"],0)
+        self.assertLessEqual(second.kwargs["timeout"],first.kwargs["timeout"])
         sleep.assert_called_once_with(0.025)
 
         # 429 from the tool itself may happen after executing side effects.
@@ -560,6 +563,47 @@ class TestHubRedirectBoundary(unittest.TestCase):
                 client.call("possibly_mutating_tool")
         self.assertEqual(client._request.call_count,1)
         sleep.assert_not_called()
+
+    def test_rpc_busy_retries_share_one_wall_clock_budget(self):
+        import io
+        import json
+        from unittest.mock import patch
+        from urllib.error import HTTPError
+
+        client=module_bridge.MCPBridge(token="local-test-token")
+        busy_data=json.dumps({
+            "error":"MODULE_TOOL_RPC_BUSY_RETRY_LATER",
+            "accepted":False,"retryable":True}).encode("utf-8")
+        clock={"now":0.0}
+        calls=[]
+        sleeps=[]
+
+        def rejected(path,payload,*,timeout):
+            calls.append((path,payload,timeout))
+            clock["now"]+=75.0
+            raise HTTPError("http://127.0.0.1:8786/v1/tools/call",
+                            429,"busy",{},io.BytesIO(busy_data))
+
+        def sleep(delay):
+            sleeps.append(delay)
+            clock["now"]+=delay
+
+        with patch.object(module_bridge.time,"monotonic",
+                          side_effect=lambda:clock["now"]), \
+             patch.object(module_bridge.time,"sleep",side_effect=sleep), \
+             patch.object(client,"_request",side_effect=rejected):
+            with self.assertRaises(HTTPError):
+                client.call("possibly_mutating_operation",nonce="fixed")
+
+        # A slow 429 cannot grant a fresh 120-second deadline.
+        self.assertEqual(len(calls),2)
+        self.assertEqual(calls[0][0],"/v1/tools/call")
+        self.assertEqual(calls[0][1],calls[1][1])
+        self.assertGreater(calls[0][2],119.0)
+        self.assertLess(calls[1][2],45.1)
+        self.assertGreater(calls[1][2],0)
+        self.assertEqual(len(sleeps),1)
+        self.assertLessEqual(sleeps[0],0.025)
 
     def test_hub_response_is_bounded_before_json_decode(self):
         import io
