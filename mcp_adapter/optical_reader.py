@@ -99,7 +99,13 @@ class OpticalAssembler:
                 if self.sequence and seq!=self.sequence:continue
                 if self.sequence and count!=self.total:
                     continue
-                identity=(seq,count,item.get("h"),item.get("c"),item.get("e"))
+                # Literal-metadata marker must agree across the same EC2
+                # carousel. Reject malformed markers before claiming a slot,
+                # otherwise a later valid retransmission could be blocked.
+                marker=item.get("t")
+                if "t" in item and (type(marker) is not int or marker!=0):
+                    continue
+                identity=(seq,count,item.get("h"),item.get("c"),item.get("e"),marker)
                 if self.packet_identity is not None and identity!=self.packet_identity:
                     continue
                 piece=item.get("d")
