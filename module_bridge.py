@@ -38,6 +38,8 @@ _runtime_detached=False
 # Serialize credential transitions so a delayed attach cannot undo a detach.
 _runtime_state_lock=threading.RLock()
 _runtime_state_epoch=0
+# Slow hub probes must not exhaust the standalone HTTP service's workers.
+_attach_probe_slots=threading.BoundedSemaphore(4)
 CANONICAL_MODULE_ID="easychange"
 def _finite_hub_json_number(token):
     number=float(token)
@@ -617,7 +619,12 @@ def attach_hub(token,expected_module):
     # network I/O. A generation fence rejects a late, superseded attach.
     with _runtime_state_lock:
         expected_epoch=_runtime_state_epoch
-    members=MCPBridge(token).peers()
+    if not _attach_probe_slots.acquire(blocking=False):
+        raise RuntimeError("HUB_ATTACH_BUSY")
+    try:
+        members=MCPBridge(token).peers()
+    finally:
+        _attach_probe_slots.release()
     if members.get("self")!=expected_module or members.get("ok") is not True:
         raise PermissionError("HUB_MODULE_IDENTITY_MISMATCH")
     with _runtime_state_lock:
