@@ -469,6 +469,38 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertTrue(receiver.ingest(packets[1:])["verified"])
         self.assertEqual(receiver.ingest([])["payload"],original)
 
+    def test_invalid_transfer_hash_metadata_cannot_reserve_qr_slot(self):
+        import json
+
+        original={"sequence":"QIDENTITY01","ok":True,
+                  "data":{"text":"authenticated receipt"}}
+        packets=encode_result_chunks(original)
+        valid=json.loads(packets[0])
+        cases=(
+            ("h", None),
+            ("h", "g"*16),
+            ("h", "f"*15),
+            ("c", None),
+            ("c", "g"*8),
+            ("c", "a"*7),
+            ("s", ""),
+            ("s", "Q"*257),
+        )
+        for field,invalid in cases:
+            with self.subTest(field=field,invalid=invalid):
+                altered=dict(valid)
+                altered[field]=invalid
+                receiver=OpticalAssembler()
+                pending=receiver.ingest([json.dumps(altered)])
+                self.assertFalse(pending["complete"])
+                self.assertIsNone(pending["sequence"])
+                self.assertEqual(pending["received"],0)
+                self.assertEqual(receiver.stored_chars,0)
+                verified=receiver.ingest(packets)
+                self.assertTrue(verified["complete"])
+                self.assertTrue(verified["verified"])
+                self.assertEqual(verified["payload"]["sequence"],"QIDENTITY01")
+
     def test_untrusted_header_requires_real_boolean_completion(self):
         import json
         from easychange.core.result import Result
