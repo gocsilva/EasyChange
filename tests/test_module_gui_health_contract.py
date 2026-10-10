@@ -704,3 +704,54 @@ def test_new_process_start_recovers_health_slot_from_old_stalled_probe(tmp_path)
     gui.root.after.call_args.args[1]()
     assert gui._refresh_inflight is False
     assert gui.message.set.call_args.args[0]=="Serviço ativo"
+
+
+def test_gui_stop_keeps_ownership_when_process_poll_is_unreliable():
+    import subprocess
+    from unittest.mock import Mock
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    klass=next(n for n in ast.parse(source).body
+               if isinstance(n,ast.ClassDef) and n.name=="ModuleGUI")
+    ns={"subprocess":subprocess,
+        "tk":type("Tk",(),{"TclError":RuntimeError})}
+    exec(compile(ast.Module(body=[klass],type_ignores=[]),
+                 "<module-handle-failure>","exec"),ns)
+    gui=object.__new__(ns["ModuleGUI"])
+    gui.root=Mock()
+    gui.message=Mock()
+    gui._refresh_generation=0
+    gui._refresh_inflight=False
+    gui._readiness_job=None
+    gui._closing=False
+    process=Mock()
+    process.poll.side_effect=OSError("PROCESS_HANDLE_INVALID")
+    gui.process=process
+    assert gui.stop() is False
+    assert gui.process is process
+    process.terminate.assert_not_called()
+    assert "Falha ao consultar serviço: OSError" in gui.message.set.call_args.args[0]
+    gui.close()
+    assert gui.process is process
+    assert gui._closing is False
+    gui.root.destroy.assert_not_called()
+
+    # Even the secondary poll after terminate() fails may be unreliable:
+    # its failure must not cause ownership to be discarded.
+    process=Mock()
+    process.poll.side_effect=[None,OSError("HANDLE_LOST")]
+    process.terminate.side_effect=OSError("TERMINATION_FAILED")
+    gui.process=process
+    assert gui.stop() is False
+    assert gui.process is process
+    assert "Falha ao encerrar serviço: OSError" in gui.message.set.call_args.args[0]
+
+    # Conversely, a process that exited just before terminate() is safe
+    # to forget when the follow-up poll confirms an actual exit.
+    process=Mock()
+    process.poll.side_effect=[None,0]
+    process.terminate.side_effect=OSError("ALREADY_EXITED")
+    gui.process=process
+    assert gui.stop() is True
+    assert gui.process is None
