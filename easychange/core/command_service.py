@@ -2803,7 +2803,7 @@ class CommandService:
                 elif kind == "db_query":
                     connection = str(item.get("connection") or "")
                     sql = str(item.get("sql") or "")
-                    allow_write = bool(item.get("allow_write", False))
+                    allow_write = item.get("allow_write", False)
                     if len(operations) > 1 and allow_write:
                         result = Result(False, kind, error="WRITE_DB_QUERY_CANNOT_BE_MIXED_IN_BATCH",
                                         code="NON_ATOMIC_EXTERNAL_WRITE")
