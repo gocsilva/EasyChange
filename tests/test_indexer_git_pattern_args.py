@@ -75,3 +75,27 @@ def test_git_prefix_rejects_workspace_traversal_before_subprocess(tmp_path,prefi
             index._git_search("TOKEN",regex=False,extension=None,
                               path_prefix=prefix,case_sensitive=False)
     runner.assert_not_called()
+
+
+@pytest.mark.skipif(__import__("shutil").which("git") is None,
+                    reason="Git executable is required for pathspec contract")
+def test_real_git_grep_with_literal_directory_glob_characters(tmp_path):
+    """Exercise Git's :(literal) pathspec instead of only mocking argv."""
+    import subprocess
+    project=tmp_path/"checkout"
+    project.mkdir()
+    (project/"src_[x]").mkdir()
+    (project/"src_any").mkdir()
+    (project/"src_[x]"/"target.py").write_text(
+        "TOKEN=-n real\n",encoding="utf-8")
+    (project/"src_[x]"/"other.cs").write_text(
+        "TOKEN=-n excluded-extension\n",encoding="utf-8")
+    (project/"src_any"/"unexpected.py").write_text(
+        "TOKEN=-n wrong-directory\n",encoding="utf-8")
+    subprocess.run(["git","init","-q"],cwd=project,check=True)
+    subprocess.run(["git","add","--all"],cwd=project,check=True)
+    index=Indexer(project)
+    rows=index._git_search(
+        "TOKEN=-n",regex=False,extension=".py",
+        path_prefix="src_[x]",case_sensitive=True)
+    assert rows==[("src_[x]/target.py","1:TOKEN=-n real")]
