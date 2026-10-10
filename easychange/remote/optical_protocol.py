@@ -382,7 +382,9 @@ def decode_result_chunks(payloads: Collection[str]) -> dict[str, Any]:
         raise ValueError("optical sha256 mismatch")
     if f"{binascii.crc32(raw) & 0xffffffff:08x}" != first["c"]:
         raise ValueError("optical crc32 mismatch")
-    value = json.loads(raw.decode("utf-8"))
+    # SHA/CRC verify byte integrity, not JSON semantics. A perfectly hashed
+    # payload can still contain conflicting "ok" or "mutation_state" keys.
+    value = decode_ec2_packet_json(raw)
     if not isinstance(value, dict):
         raise ValueError("optical result object required")
     return _expand_transport_value(value)
