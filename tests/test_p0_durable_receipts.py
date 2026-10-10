@@ -281,6 +281,39 @@ def test_individual_recovery_chunks_do_not_coerce_bool_or_fractional_index(tmp_p
         service.close()
 
 
+def test_invalid_single_chunk_index_does_not_decompress_receipt_first(tmp_path, monkeypatch):
+    import pytest
+
+    store=DurableResultStore(tmp_path / "receipts")
+    index="9"*100000
+
+    def fail_expensive_read(*_args,**_kwargs):
+        raise AssertionError("INVALID_INDEX_TRIGGERED_EXPENSIVE_DECOMPRESSION")
+
+    monkeypatch.setattr(store,"_result_payload",fail_expensive_read)
+    monkeypatch.setattr(store,"_result_stream_payload",fail_expensive_read)
+
+    for invalid in (index,True,False,0.5,None,{},[]):
+        with pytest.raises(ValueError,match="INVALID_RESULT_CHUNK_INDEX"):
+            store.chunk("QSAFEINDEX1",invalid)
+        with pytest.raises(ValueError,match="INVALID_RESULT_STREAM_CHUNK_INDEX"):
+            store.stream_chunk("QSAFEINDEX1",invalid)
+    with pytest.raises(ValueError,match="INVALID_RESULT_STREAM_CHUNK_INDEX"):
+        store.stream_chunks("QSAFEINDEX1",[index])
+
+
+def test_single_chunk_helpers_preserve_valid_numeric_string_index(tmp_path):
+    store=DurableResultStore(tmp_path / "receipts")
+    seq="QVALIDINDEX01"
+    store.mark_running(seq,"a"*64,":state",mutation=False)
+    store.complete(seq,"a"*64,":state,{
+        "ok":True,"command":"state",
+        "data":{"payload":"A"*40000},"sequence":seq,
+    })
+    assert store.chunk(seq,"0")["chunk_index"]==0
+    assert store.stream_chunk(seq,"0")["chunk_index"]==0
+
+
 def test_chunk_batches_reject_fractional_indexes_but_allow_decimal_strings(tmp_path):
     import pytest
 
