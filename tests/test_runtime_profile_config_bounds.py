@@ -138,6 +138,12 @@ def test_writer_keeps_malformed_existing_runtime_profiles_untouched(tmp_path):
         b'{"profiles": [',
         json.dumps({"profiles":[_valid_row(), {"id":"broken","urls":"bad"}]}).encode(),
         json.dumps({"profiles":[_valid_row(),_valid_row()]}).encode(),
+        # Duplicate root/nested keys and URL entries silently dropped during
+        # discovery are never permission to overwrite the source file.
+        b'{"profiles":[],"profiles":[{"id":"hidden"}]}',
+        b'{"profiles":[{"id":"sample","env":{"PLAIN":"a","PLAIN":"b"}}]}',
+        json.dumps({"profiles":[{**_valid_row(),"urls":["http://localhost:5000",7]}]}).encode(),
+        json.dumps({"profiles":[{**_valid_row(),"urls":["http://localhost:5000"]*17}]}).encode(),
         json.dumps({"profiles":{"not":"a list"}}).encode(),
         b'{"profiles":[]}' + b" " * 1_048_577,
     )
