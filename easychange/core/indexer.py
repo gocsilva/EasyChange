@@ -299,25 +299,37 @@ class Indexer:
         # for every source file in a large repository.
         trusted_root = self.root.resolve()
 
-        for path in self.root.rglob("*"):
-            try:
-                if not path.is_file() or path.is_symlink():
+        # rglob("*") descends into .git, node_modules and virtualenvs
+        # before the per-file SKIP_DIRS check can reject their contents.
+        # Prune those subtrees before enumeration to avoid enormous wasted
+        # directory I/O on real projects. Never follow directory symlinks.
+        for folder, directories, filenames in os.walk(
+                self.root, topdown=True, followlinks=False):
+            directories[:] = [
+                name for name in directories
+                if name not in SKIP_DIRS
+                and not (Path(folder) / name).is_symlink()
+            ]
+            for filename in filenames:
+                path = Path(folder) / filename
+                try:
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    if not path.resolve().is_relative_to(trusted_root):
+                        continue
+                    relative_path = path.relative_to(self.root)
+                    if any(part in SKIP_DIRS for part in relative_path.parts):
+                        continue
+                    relative = relative_path.as_posix()
+                    if relative in self._protected_paths:
+                        continue
+                    stat = path.stat()
+                except (OSError, RuntimeError):
+                    # Cyclic links may raise RuntimeError during resolution.
                     continue
-                if not path.resolve().is_relative_to(trusted_root):
-                    continue
-                relative_path = path.relative_to(self.root)
-                if any(part in SKIP_DIRS for part in relative_path.parts):
-                    continue
-                relative = relative_path.as_posix()
-                if relative in self._protected_paths:
-                    continue
-                stat = path.stat()
-            except (OSError, RuntimeError):
-                # Cyclic links may raise RuntimeError during resolution.
-                continue
-            seen.add(relative)
-            if existing.get(relative) != (stat.st_size, stat.st_mtime_ns):
-                changed.append((path, relative, stat.st_size, stat.st_mtime_ns))
+                seen.add(relative)
+                if existing.get(relative) != (stat.st_size, stat.st_mtime_ns):
+                    changed.append((path, relative, stat.st_size, stat.st_mtime_ns))
 
         loaded_count = 0
         if changed:
