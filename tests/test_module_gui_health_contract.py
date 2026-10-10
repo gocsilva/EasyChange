@@ -579,3 +579,52 @@ def test_stale_queued_health_callback_cannot_release_new_probe():
     assert workers==[]
     new_callback()
     assert gui._refresh_inflight is False
+
+
+def test_standalone_child_cannot_inherit_mcp_host_capabilities(tmp_path):
+    """Starting from an MCP parent must not transfer bearer or shutdown keys."""
+    import os
+    import subprocess
+    import sys
+    from unittest.mock import Mock, patch
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    tree=ast.parse(source)
+    assignments={target.id:node.value.value for node in tree.body
+                 if isinstance(node,ast.Assign) and isinstance(node.value,ast.Constant)
+                 for target in node.targets if isinstance(target,ast.Name)}
+    cls=next(node for node in tree.body
+             if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+    env={"ROOT":tmp_path,"SERVICE":assignments["SERVICE"],
+         "MODULE_ID":assignments["MODULE_ID"],
+         "status":lambda:{"running":False},
+         "os":os,"sys":sys,"subprocess":subprocess}
+    exec(compile(ast.Module(body=[cls],type_ignores=[]),
+                 "<module-standalone-child-env>","exec"),env)
+    gui=object.__new__(env["ModuleGUI"])
+    gui.process=None
+    gui.root=Mock()
+    gui.message=Mock()
+    gui._closing=False
+    gui._refresh_generation=0
+    gui._refresh_inflight=False
+    gui._readiness_job=None
+    privileged={
+        "MCP_MODULE_BUS_TOKEN":"sensitive-bus-token",
+        "MCP_MODULE_BUS_URL":"http://127.0.0.1:8786",
+        "MCP_MODULE_ID":"mcp-admin",
+        "MCP_MODULE_GUI_SHUTDOWN_TOKEN":"sensitive-shutdown-token",
+        "MODULE_STANDALONE_TEST_CONFIG":"allowed",
+    }
+    with patch.dict(os.environ,privileged), \
+         patch("socket.create_connection",side_effect=ConnectionRefusedError), \
+         patch("subprocess.Popen",return_value=Mock()) as launched:
+        gui.start()
+        child=launched.call_args.kwargs["env"]
+        for secret in privileged:
+            if secret.startswith("MCP_MODULE_"):
+                assert secret not in child
+                assert os.environ[secret]==privileged[secret]
+        assert child["MODULE_STANDALONE_TEST_CONFIG"]=="allowed"
+    assert gui.process is not None
