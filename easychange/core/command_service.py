@@ -604,7 +604,11 @@ class CommandService:
                     code="SEQUENCE_STATE_UNAVAILABLE", sequence=sequence)
             journal = dict(legacy_root)
             previous = journal.get(sequence)
-            if previous is not None and not isinstance(previous, dict):
+            if previous is not None and (
+                    not isinstance(previous, dict) or not previous):
+                # An existing empty journal entry is still evidence of an
+                # unknown prior sequence. A truthiness check would otherwise
+                # incorrectly create a new durable claim and execute again.
                 return Result(
                     False, "ec", error="Legacy sequence entry is unreadable",
                     code="SEQUENCE_STATE_UNAVAILABLE", sequence=sequence)
