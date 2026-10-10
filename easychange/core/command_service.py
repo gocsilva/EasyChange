@@ -1833,6 +1833,27 @@ class CommandService:
                     except (TypeError, ValueError, IndexError) as exc:
                         return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_STREAM_CHUNK")
                 else:
+                    # Optical recovery must reject bogus frame indexes before
+                    # loading a multi-megabyte durable result or encoding EC2.
+                    if query_kind in {"optical_chunk", "optical_chunks"}:
+                        raw_indexes = (query_item.get("chunk_indexes")
+                                       if query_kind == "optical_chunks"
+                                       else [query_item.get("chunk_index")])
+                        upper = 16 if query_kind == "optical_chunks" else 1
+                        if not isinstance(raw_indexes,list) or not 1<=len(raw_indexes)<=upper:
+                            return Result(False,query_kind,
+                                          error="INVALID_CHUNK_INDEX",
+                                          code="INVALID_RESULT_CHUNK")
+                        if any(
+                            type(item) is not int and not (
+                                isinstance(item,str) and len(item)<=32
+                                and item.strip().isdecimal()
+                            )
+                            for item in raw_indexes
+                        ):
+                            return Result(False,query_kind,
+                                          error="INVALID_CHUNK_INDEX",
+                                          code="INVALID_RESULT_CHUNK")
                     original_result = self.result_store.result(target_sequence)
                     if original_result is None:
                         data = None
