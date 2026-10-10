@@ -342,6 +342,60 @@ def test_cdp_websocket_rejects_non_loopback_before_network_access():
 
 
 
+def test_cdp_ws_huge_declared_frame_is_rejected_before_payload_read():
+    import struct
+
+    announced=browser_module.MAX_CDP_WS_MESSAGE_BYTES+1
+    payload=b"\x81\x7f"+struct.pack("!Q",announced)
+    class FakeSocket:
+        def __init__(self, data):
+            self.buffer=io.BytesIO(data)
+            self.read_sizes=[]
+        def recv(self, size):
+            self.read_sizes.append(size)
+            return self.buffer.read(size)
+    ws=browser_module._WebSocket.__new__(browser_module._WebSocket)
+    ws.sock=FakeSocket(payload)
+    with pytest.raises(browser_module.CdpError,
+                       match="CDP_WEBSOCKET_MESSAGE_TOO_LARGE"):
+        ws._recv_text()
+    assert ws.sock.read_sizes==[2,8]
+    assert ws.sock.buffer.tell()==len(payload)
+
+
+def test_cdp_ws_cumulative_fragment_budget_rejects_before_second_payload(monkeypatch):
+    monkeypatch.setattr(browser_module,"MAX_CDP_WS_MESSAGE_BYTES",6)
+    class FakeSocket:
+        def __init__(self,data):
+            self.buffer=io.BytesIO(data)
+        def recv(self,size):
+            return self.buffer.read(size)
+    ws=browser_module._WebSocket.__new__(browser_module._WebSocket)
+    ws.sock=FakeSocket(b"\x01\x04abcd\x80\x04efgh")
+    with pytest.raises(browser_module.CdpError,
+                       match="CDP_WEBSOCKET_MESSAGE_TOO_LARGE"):
+        ws._recv_text()
+    # First 4-byte fragment plus next 2-byte header only.
+    assert ws.sock.buffer.tell()==8
+    ws.sock=FakeSocket(b"\x01\x04abcd\x80\x02ef")
+    assert ws._recv_text()=="abcdef"
+
+
+def test_cdp_ws_oversized_ping_rejected_before_body_read():
+    import struct
+    class FakeSocket:
+        def __init__(self,data):
+            self.buffer=io.BytesIO(data)
+        def recv(self,size):
+            return self.buffer.read(size)
+    ws=browser_module._WebSocket.__new__(browser_module._WebSocket)
+    ws.sock=FakeSocket(b"\x89\x7e"+struct.pack("!H",126))
+    with pytest.raises(browser_module.CdpError,
+                       match="CDP_WEBSOCKET_INVALID_CONTROL_FRAME"):
+        ws._recv_text()
+    assert ws.sock.buffer.tell()==4
+
+
 def _bare_async_websocket():
     ws = browser_module._WebSocket.__new__(browser_module._WebSocket)
     ws._next_id = 0
