@@ -212,3 +212,60 @@ def test_writer_refuses_more_profiles_than_reader_would_admit(tmp_path):
             runtime.configure_profile("new",build_argv=["dotnet","build"])
     assert runtime.config_path.read_bytes()==old
     assert not list(root.glob(".runtime_profiles.json.*.tmp"))
+
+
+def test_parallel_profile_writers_preserve_distinct_updates(tmp_path):
+    """Two runtime instances must serialize read+merge+replace, not only writes."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    folder=tmp_path/".easychange"
+    folder.mkdir()
+    gate=Barrier(8)
+
+    def create(index):
+        service=object.__new__(ProjectRuntimeService)
+        service.workspace=SimpleNamespace(root_path=tmp_path)
+        service.config_path=folder/"runtime_profiles.json"
+        service.resolve_environment=lambda *_a,**_k: (
+            {},{"resolved_env_keys":[],"unresolved_env_refs":[]})
+        gate.wait(timeout=10)
+        return service.configure_profile(
+            f"parallel-{index}",test_argv=["python","-m","pytest"],
+            inherit_env=False)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results=list(pool.map(create,range(8)))
+    assert len(results)==8
+    inspection=object.__new__(ProjectRuntimeService)
+    inspection.workspace=SimpleNamespace(root_path=tmp_path)
+    inspection.config_path=folder/"runtime_profiles.json"
+    inspection.resolve_environment=lambda *_a,**_k: (
+        {},{"resolved_env_keys":[],"unresolved_env_refs":[]})
+    profiles=inspection._configured_profiles()
+    assert {item["id"] for item in profiles}=={
+        f"parallel-{index}" for index in range(8)}
+    assert len(profiles)==8
+
+
+def test_profile_lock_refuses_symlink_without_writing_config(tmp_path):
+    import pytest
+
+    folder=tmp_path/".easychange"
+    folder.mkdir()
+    service=object.__new__(ProjectRuntimeService)
+    service.workspace=SimpleNamespace(root_path=tmp_path)
+    service.config_path=folder/"runtime_profiles.json"
+    service.resolve_environment=lambda *_a,**_k: (
+        {},{"resolved_env_keys":[],"unresolved_env_refs":[]})
+    outside=tmp_path/"outside.txt"
+    outside.write_text("UNTOUCHED",encoding="utf-8")
+    lock=folder/"runtime_profiles.json.lock"
+    try:
+        lock.symlink_to(outside)
+    except (OSError,NotImplementedError):
+        pytest.skip("symlink creation not permitted on this OS")
+    with pytest.raises(RuntimeError,match="RUNTIME_PROFILE_LOCK_UNSAFE"):
+        service.configure_profile("unsafe",test_argv=["python","-m","pytest"])
+    assert outside.read_text(encoding="utf-8")=="UNTOUCHED"
+    assert not service.config_path.exists()
