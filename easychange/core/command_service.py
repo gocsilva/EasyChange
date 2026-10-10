@@ -1162,71 +1162,82 @@ class CommandService:
                 }
 
         workers = min(12, len(normalized))
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="easychange-regions") as pool:
-            loaded = list(pool.map(safe_read, normalized))
+        # Keep only one worker-sized batch of region bodies in flight, rather
+        # than materializing all 64 full-text reads before budgeting output.
+        def bounded_reads():
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="easychange-regions") as pool:
+                for offset in range(0, len(normalized), workers):
+                    yield from pool.map(safe_read, normalized[offset:offset + workers])
 
+        loaded = bounded_reads()
         max_bytes = max(32768, min(8388608, int(max_bytes)))
         output: list[dict] = []
         skipped: list[dict] = []
         errors: list[dict] = []
         total_bytes = 0
-        for position, (spec, info, error) in enumerate(loaded):
-            if error is not None:
-                errors.append(error)
-                continue
-            assert info is not None
-            value = {
-                "path": info.get("path") or spec["path"],
-                "start": info.get("start", spec["start"]),
-                "requested_count": spec["count"],
-                "returned_count": len(info.get("lines") or []),
-                "total_lines": info.get("total_lines"),
-                "hash": info.get("hash"),
-                "lines": list(info.get("lines") or []),
-                "has_more": bool(info.get("has_more")),
-                "next_start": info.get("next_start"),
-            }
-            encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            if total_bytes + len(encoded) > max_bytes:
-                if not output:
-                    lines = list(value["lines"])
-                    while len(encoded) > max_bytes and len(lines) > 1:
-                        lines = lines[:max(1, len(lines) // 2)]
-                        value["lines"] = lines
-                        value["returned_count"] = len(lines)
-                        value["budget_truncated"] = True
-                        value["has_more"] = True
-                        value["next_start"] = int(value["start"]) + len(lines)
-                        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                    if len(encoded) > max_bytes:
-                        # A single pathological/minified line can be megabytes.
-                        # Never violate the optical response budget just because
-                        # line-based paging cannot split it safely.
-                        errors.append({
-                            "path": spec["path"],
-                            "start": spec["start"],
-                            "count": spec["count"],
-                            "error": "Single source line exceeds read_regions byte budget",
-                            "code": "LINE_EXCEEDS_BYTE_BUDGET",
-                            "byte_budget": max_bytes,
-                        })
-                    else:
-                        output.append(value)
-                        total_bytes += len(encoded)
-                        consumed = len(lines)
-                        remaining_count = max(0, int(spec["count"]) - consumed)
-                        if bool(value.get("budget_truncated")) and remaining_count > 0:
-                            skipped.append({
+        try:
+            for position, (spec, info, error) in enumerate(loaded):
+                if error is not None:
+                    errors.append(error)
+                    continue
+                assert info is not None
+                value = {
+                    "path": info.get("path") or spec["path"],
+                    "start": info.get("start", spec["start"]),
+                    "requested_count": spec["count"],
+                    "returned_count": len(info.get("lines") or []),
+                    "total_lines": info.get("total_lines"),
+                    "hash": info.get("hash"),
+                    "lines": list(info.get("lines") or []),
+                    "has_more": bool(info.get("has_more")),
+                    "next_start": info.get("next_start"),
+                }
+                encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                if total_bytes + len(encoded) > max_bytes:
+                    if not output:
+                        lines = list(value["lines"])
+                        while len(encoded) > max_bytes and len(lines) > 1:
+                            lines = lines[:max(1, len(lines) // 2)]
+                            value["lines"] = lines
+                            value["returned_count"] = len(lines)
+                            value["budget_truncated"] = True
+                            value["has_more"] = True
+                            value["next_start"] = int(value["start"]) + len(lines)
+                            encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                        if len(encoded) > max_bytes:
+                            # A single pathological/minified line can be megabytes.
+                            # Never violate the optical response budget just because
+                            # line-based paging cannot split it safely.
+                            errors.append({
                                 "path": spec["path"],
-                                "start": int(spec["start"]) + consumed,
-                                "count": remaining_count,
+                                "start": spec["start"],
+                                "count": spec["count"],
+                                "error": "Single source line exceeds read_regions byte budget",
+                                "code": "LINE_EXCEEDS_BYTE_BUDGET",
+                                "byte_budget": max_bytes,
                             })
-                    skipped.extend(item[0] for item in loaded[position + 1:] if item[2] is None)
-                else:
-                    skipped.extend(item[0] for item in loaded[position:] if item[2] is None)
-                break
-            output.append(value)
-            total_bytes += len(encoded)
+                        else:
+                            output.append(value)
+                            total_bytes += len(encoded)
+                            consumed = len(lines)
+                            remaining_count = max(0, int(spec["count"]) - consumed)
+                            if bool(value.get("budget_truncated")) and remaining_count > 0:
+                                skipped.append({
+                                    "path": spec["path"],
+                                    "start": int(spec["start"]) + consumed,
+                                    "count": remaining_count,
+                                })
+                        skipped.extend(normalized[position + 1:])
+                    else:
+                        skipped.extend(normalized[position:])
+                    break
+                output.append(value)
+                total_bytes += len(encoded)
+
+        finally:
+            # Closing the generator releases the worker pool after the
+            # current bounded batch, without submitting unread later batches.
+            loaded.close()
 
         budget_truncated = bool(skipped) or any(bool(item.get("budget_truncated")) for item in output)
         return {
