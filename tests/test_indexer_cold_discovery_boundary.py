@@ -125,3 +125,45 @@ def test_cold_git_bounds_number_of_retained_match_rows(tmp_path, monkeypatch):
     assert report["truncated"] is True
     assert len(report["by_term"]["CANARY"]["references"]) == 2
     assert report["by_term"]["CANARY"]["occurrences"] == 2
+
+
+def test_single_term_cold_grep_avoids_unbounded_capture(tmp_path, monkeypatch):
+    import easychange.core.indexer as source
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "source.py").write_text(
+        "def CANARY(): pass\n", encoding="utf-8")
+    index = Indexer(tmp_path)
+    monkeypatch.setattr(source, "MAX_COLD_GIT_BYTES", 64)
+
+    def oversized_result(argv, **kwargs):
+        assert kwargs.get("capture_output") is None
+        kwargs["stdout"].write(
+            b"source.py:1:def CANARY(): pass\n" + b"x" * 150)
+        return subprocess.CompletedProcess(argv, 0, None, None)
+
+    with patch("easychange.core.indexer.subprocess.run",
+               side_effect=oversized_result):
+        assert index._git_search(
+            "CANARY", regex=False, extension=".py", path_prefix=None,
+            case_sensitive=True) == []
+
+
+def test_single_term_cold_grep_caps_row_count(tmp_path, monkeypatch):
+    import easychange.core.indexer as source
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "source.py").write_text(
+        "def CANARY(): pass\n" * 4, encoding="utf-8")
+    index = Indexer(tmp_path)
+    monkeypatch.setattr(source, "MAX_COLD_GIT_ROWS", 2)
+    with patch("easychange.core.indexer.subprocess.run",
+               return_value=subprocess.CompletedProcess(
+                   ["git", "grep"], 0,
+                   "".join(f"source.py:{i}:def CANARY(): pass\n"
+                           for i in range(1, 5)), "")):
+        found = index._git_search(
+            "CANARY", regex=False, extension=".py", path_prefix=None,
+            case_sensitive=True)
+    assert len(found) == 2
+    assert found[0][0] == "source.py"
