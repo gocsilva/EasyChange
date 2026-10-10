@@ -31,6 +31,9 @@ class OpticalAssembler:
     total: int = 0
     stored_chars: int = 0
     stored_token_chars: int = 0
+    # Exact, previously validated QR repeated in successive HDMI frames.
+    # Keep only one string reference rather than a second packet cache.
+    last_admitted_frame: str | None = None
     packet_identity: tuple | None = None
     verified_payload: dict | None = None
     header: dict = field(default_factory=dict)
@@ -43,6 +46,7 @@ class OpticalAssembler:
         self.total=0
         self.stored_chars=0
         self.stored_token_chars=0
+        self.last_admitted_frame=None
         self.packet_identity=None
         self.verified_payload=None
         self.header={}
@@ -70,6 +74,13 @@ class OpticalAssembler:
             try:
                 if (not isinstance(raw,str) or
                         len(raw)>MAX_EC2_PACKET_TEXT_CHARS):
+                    continue
+                # HDMI frequently repeats the identical decoded symbol for
+                # multiple video frames. It has already passed the complete
+                # identity/base64/CRC gate and still occupies our exact
+                # current transfer; skip JSON parsing on subsequent frames.
+                if self.sequence and raw==self.last_admitted_frame:
+                    self.updated_at=time.monotonic()
                     continue
                 item=decode_ec2_packet_json(raw)
                 if not isinstance(item,dict):continue
@@ -136,6 +147,7 @@ class OpticalAssembler:
                 if (self.packet_identity is not None
                         and identity==self.packet_identity
                         and self.chunks.get(index)==raw):
+                    self.last_admitted_frame=raw
                     self.updated_at=time.monotonic()
                     continue
                 # Reject corrupted HDMI QR fragments before reserving their
@@ -178,6 +190,7 @@ class OpticalAssembler:
                         self.header=self.pending_provisional_header
                     self.pending_provisional_header={}
                 self.chunks[index]=raw
+                self.last_admitted_frame=raw
                 self.stored_chars=candidate
                 self.stored_token_chars=token_candidate
                 self.updated_at=time.monotonic()
