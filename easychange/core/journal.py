@@ -18,6 +18,23 @@ _MAX_BLOB_DECOMPRESSED_BYTES = 128 * 1024 * 1024
 _MAX_JOURNAL_RECORD_CHARS = 16 * 1024 * 1024
 
 
+def _sync_directory_best_effort(folder: Path) -> None:
+    """Persist a newly published journal/blob name where POSIX permits."""
+    if os.name != "posix":
+        return
+    descriptor = None
+    try:
+        descriptor = os.open(folder, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        os.fsync(descriptor)
+    except OSError:
+        # Some filesystems do not support fsync() on directories. The file
+        # itself was already synced and its rename remains atomic.
+        pass
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def _bounded_journal_jsonl(value: dict) -> str:
     """Never append a JSONL line that recovery will reject as oversized."""
     encoded = []
@@ -149,6 +166,7 @@ class Journal:
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(temporary, target)
+                _sync_directory_best_effort(self.blob_root)
             finally:
                 temporary.unlink(missing_ok=True)
         return _BLOB_PREFIX + digest
@@ -258,10 +276,13 @@ class Journal:
             )
             serialized = self._serialize_entry(entry)
             line = _bounded_journal_jsonl(serialized)
+            was_missing = not self.path.exists()
             with self.path.open("a", encoding="utf-8", newline="\n") as stream:
                 stream.write(line)
                 stream.flush()
                 os.fsync(stream.fileno())
+            if was_missing:
+                _sync_directory_best_effort(self.path.parent)
             self._counter = next_counter
             self._entries.append(self._compact_from_serialized(serialized))
             self._redo.clear()
@@ -330,6 +351,7 @@ class Journal:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
+            _sync_directory_best_effort(self.path.parent)
         finally:
             temporary.unlink(missing_ok=True)
 
