@@ -785,6 +785,9 @@ class Indexer:
     def search(self, query: str, *, regex: bool = False, extension: str | None = None,
                path_prefix: str | None = None, case_sensitive: bool = False,
                offset: int = 0, limit: int = 100) -> list[dict]:
+        if (type(query) is not str or not query or len(query) > 512
+                or "\x00" in query):
+            raise ValueError("INVALID_INDEX_QUERY")
         # Reject invalid regexes before spawning git-grep or materializing
         # potentially large SQLite candidate rows. Reuse one compiled object.
         pattern = re.compile(query, 0 if case_sensitive else re.IGNORECASE) if regex else None
@@ -886,6 +889,8 @@ class Indexer:
         seen_terms: set[str] = set()
         for value in terms or []:
             term = str(value or "").strip()
+            if len(term) > 512 or "\x00" in term:
+                raise ValueError("INVALID_INDEX_TERM")
             key = term.casefold()
             if not term or key in seen_terms:
                 continue
