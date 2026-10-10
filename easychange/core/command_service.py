@@ -4661,7 +4661,12 @@ class CommandService:
                 dir=self.transaction_path.parent,
             )
             try:
-                with os.fdopen(journal_fd, "w", encoding="utf-8", newline="\n") as stream:
+                try:
+                    journal_stream = os.fdopen(journal_fd, "w", encoding="utf-8", newline="\n")
+                except BaseException:
+                    os.close(journal_fd)
+                    raise
+                with journal_stream as stream:
                     for change in self.transaction:
                         stream.write(json.dumps({
                             "path": change.path, "before": change.before,
@@ -4689,7 +4694,12 @@ class CommandService:
                 dir=self.transaction_path.parent,
             )
             try:
-                with os.fdopen(header_fd, "w", encoding="utf-8") as stream:
+                try:
+                    header_stream = os.fdopen(header_fd, "w", encoding="utf-8")
+                except BaseException:
+                    os.close(header_fd)
+                    raise
+                with header_stream as stream:
                     stream.write(json.dumps(
                         {"format": "append-v2", "transaction_id": self.transaction_id},
                         ensure_ascii=False, separators=(",", ":"),
