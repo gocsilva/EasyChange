@@ -6,6 +6,52 @@ from urllib.error import HTTPError
 import module_bridge
 
 class TestHubRedirectBoundary(unittest.TestCase):
+    def test_bounded_inbox_query_has_enough_read_budget_for_valid_page(self):
+        import io
+        import json
+        from unittest.mock import patch
+
+        client=module_bridge.MCPBridge(token="A"*48)
+        requested=[]
+        class Monitored(io.BytesIO):
+            def read(self, size=-1):
+                requested.append(size)
+                return super().read(size)
+
+        response=Monitored(json.dumps({
+            "ok":True,"requires_ack":True,
+            "recipient":module_bridge.CANONICAL_MODULE_ID,
+            "messages":[],"pad":"X"*90000,
+        }).encode("utf-8"))
+        with patch.object(module_bridge._local_opener,"open",
+                          return_value=response) as opened:
+            page=client.receive(limit=19)
+        self.assertEqual(page["recipient"],module_bridge.CANONICAL_MODULE_ID)
+        self.assertEqual(len(page["pad"]),90000)
+        self.assertEqual(requested,[2_097_153])
+        self.assertEqual(opened.call_args.args[0].full_url,
+                         "http://127.0.0.1:8786/v1/inbox/peek?limit=19")
+
+    def test_paged_inbox_query_does_not_allow_arbitrary_hub_paths(self):
+        from unittest.mock import patch
+
+        client=module_bridge.MCPBridge(token="B"*48)
+        invalid=(
+            "/v1/inbox/peek?limit=0",
+            "/v1/inbox/peek?limit=21",
+            "/v1/inbox/peek?limit=01",
+            "/v1/inbox/peek?limit=1&target=esp",
+            "/v1/inbox/peek?limit=1%0d%0a",
+            "/v1/inbox?limit=1",
+            "/v1/peers?limit=1",
+        )
+        with patch.object(module_bridge._local_opener,"open") as opened:
+            for target in invalid:
+                with self.subTest(target=target):
+                    with self.assertRaisesRegex(ValueError,"MCP_BUS_PATH_NOT_ALLOWED"):
+                        client._request(target)
+        opened.assert_not_called()
+
     def test_deep_hub_json_fails_as_invalid_envelope_without_retry(self):
         import io
         from unittest.mock import patch
