@@ -28,6 +28,32 @@ def test_dependency_fingerprint_changes_when_manifest_changes(tmp_path):
     assert first != second
 
 
+def test_large_lock_fingerprint_streams_without_loading_whole_file(tmp_path, monkeypatch):
+    import hashlib
+
+    _write_project(tmp_path)
+    lock=tmp_path/"uv.lock"
+    payload=b"package = 'abc'\n" * 30000
+    lock.write_bytes(payload)
+
+    expected=hashlib.sha256()
+    expected.update(b"easychange-venv-state-v1\0")
+    expected.update(ensure_venv.DEFAULT_INSTALL_SPEC.encode("utf-8"))
+    expected.update(b"\0")
+    for manifest in ensure_venv.dependency_manifests(tmp_path):
+        expected.update(manifest.relative_to(tmp_path).as_posix().encode("utf-8"))
+        expected.update(b"\0")
+        expected.update(payload if manifest==lock else
+                        manifest.read_text(encoding="utf-8").encode("utf-8"))
+        expected.update(b"\0")
+
+    def unbounded_read(_path):
+        raise AssertionError("UNBOUNDED_MANIFEST_READ")
+
+    monkeypatch.setattr(Path,"read_bytes",unbounded_read)
+    assert ensure_venv.dependency_fingerprint(tmp_path)==expected.hexdigest()
+
+
 def test_missing_venv_is_detected_without_side_effects_in_dry_run(tmp_path):
     _write_project(tmp_path)
     result = ensure_venv.ensure(tmp_path, dry_run=True)
