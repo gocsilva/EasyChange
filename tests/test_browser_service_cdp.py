@@ -415,6 +415,33 @@ def test_cdp_websocket_rejects_non_loopback_before_network_access():
 
 
 
+def test_cdp_outbound_frame_cap_prevents_masking_extra_large_message(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(browser_module,"MAX_CDP_WS_MESSAGE_BYTES",8)
+    ws=browser_module._WebSocket.__new__(browser_module._WebSocket)
+    ws.sock=Mock()
+    with pytest.raises(browser_module.CdpError,
+                       match="CDP_WEBSOCKET_MESSAGE_TOO_LARGE"):
+        ws._send_frame(b"x"*9)
+    ws.sock.sendall.assert_not_called()
+
+
+def test_cdp_tls_upgrade_failure_closes_original_socket(monkeypatch):
+    from unittest.mock import Mock
+
+    sock=Mock()
+    tls=Mock()
+    tls.wrap_socket.side_effect=OSError("TLS_NEGOTIATION_FAILED")
+    monkeypatch.setattr(browser_module.socket,"create_connection",
+                        lambda *_a,**_k:sock)
+    monkeypatch.setattr(browser_module.ssl,"create_default_context",
+                        lambda:tls)
+    with pytest.raises(OSError,match="TLS_NEGOTIATION_FAILED"):
+        browser_module._WebSocket("wss://127.0.0.1:9222/devtools/page/1")
+    sock.close.assert_called_once_with()
+
+
 def test_cdp_ws_huge_declared_frame_is_rejected_before_payload_read():
     import struct
 
