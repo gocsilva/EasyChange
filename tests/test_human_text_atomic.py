@@ -533,3 +533,52 @@ def test_paginated_read_rejects_in_place_rewrite_during_page_io(tmp_path,monkeyp
     assert service.info()["sha256"]==hashlib.sha256(b"BBBB").hexdigest()
 
 
+
+
+@pytest.mark.parametrize("read_operation",("read","scan"))
+def test_buffer_symlink_swap_during_read_fails_even_if_target_has_same_inode(
+        tmp_path,monkeypatch,read_operation):
+    from contextlib import contextmanager
+
+    service=HumanTextService(tmp_path/"workspace")
+    service.save("canonical buffer")
+    moved=tmp_path/"moved-original.txt"
+    # Skip on hosts that cannot create symlinks without elevated privileges.
+    probe=tmp_path/"symlink-probe"
+    try:
+        probe.symlink_to(service.path)
+        probe.unlink()
+    except (OSError,NotImplementedError):
+        pytest.skip("symlinks unavailable")
+
+    original_open=service._open_regular_buffer
+    swapped=[False]
+
+    @contextmanager
+    def with_replacement_during_read(path):
+        with original_open(path) as handle:
+            class InterleavedRead:
+                def fileno(self):
+                    return handle.fileno()
+                def tell(self):
+                    return handle.tell()
+                def seek(self,*args):
+                    return handle.seek(*args)
+                def read(self,*args):
+                    value=handle.read(*args)
+                    if not swapped[0]:
+                        swapped[0]=True
+                        service.path.replace(moved)
+                        service.path.symlink_to(moved)
+                    return value
+            yield InterleavedRead()
+
+    monkeypatch.setattr(service,"_open_regular_buffer",with_replacement_during_read)
+    with pytest.raises(ValueError,match="HUMAN_TEXT_FILE_CHANGED_RETRY"):
+        if read_operation=="scan":
+            service._scan_info()
+        else:
+            service.read(cursor=0,max_bytes=512)
+    assert swapped[0]
+    assert service.path.is_symlink()
+    assert moved.read_text(encoding="utf-8")=="canonical buffer"
