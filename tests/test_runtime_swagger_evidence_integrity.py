@@ -79,17 +79,67 @@ def test_empty_image_is_not_visual_evidence(tmp_path):
     assert result["error"]=="SWAGGER_SCREENSHOT_NOT_CAPTURED"
 
 
-def test_existing_png_signature_is_accepted_as_visual_evidence(tmp_path):
+def _real_one_pixel_png() -> bytes:
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I",len(data)) + kind + data
+                + struct.pack(">I",zlib.crc32(kind+data)&0xffffffff))
+
+    header=struct.pack(">IIBBBBB",1,1,8,6,0,0,0)
+    scanline=b"\x00\xff\x00\x00\xff"
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR",header)
+            + chunk(b"IDAT",zlib.compress(scanline))
+            + chunk(b"IEND",b""))
+
+
+def test_png_signature_only_is_not_visual_evidence(tmp_path):
+    service=_service(tmp_path/"forged-image")
+    def fake_capture(_url,target):
+        target.write_bytes(b"\x89PNG\r\n\x1a\n" + b"synthetic-test-bytes")
+        return target
+    service._browser_screenshot=fake_capture
+    result=service.swagger_evidence(
+        process_id="test-no-process",screenshot=True,start_if_needed=False)
+    assert result["ok"] is False
+    assert result["error"]=="SWAGGER_SCREENSHOT_NOT_CAPTURED"
+    assert result["http_verified"] is True
+    assert result["screenshot_file"] is None
+
+
+def test_complete_crc_verified_png_is_accepted_as_structural_evidence(tmp_path):
     service=_service(tmp_path/"saved-image")
     def png_capture(_url,target):
-        target.write_bytes(b"\x89PNG\r\n\x1a\n" + b"synthetic-test-bytes")
+        target.write_bytes(_real_one_pixel_png())
         return target
     service._browser_screenshot=png_capture
     result=service.swagger_evidence(
         process_id="test-no-process",screenshot=True,start_if_needed=False)
     assert result["ok"] is True
     assert result["http_verified"] is True
-    assert result["screenshot_requested"] is True
     assert result["screenshot_captured"] is True
     assert result["screenshot_file"]
     assert (service.workspace.root_path/result["screenshot_file"]).is_file()
+
+
+def test_truncated_and_corrupt_png_chunks_do_not_count_as_visual_evidence(tmp_path):
+    good=_real_one_pixel_png()
+    broken=[
+        good[:-12],
+        good[:42],
+        good[:-1]+b"\xff",
+        good[:33]+b"X"+good[34:],
+        good+b"TRAILING",
+    ]
+    for index,payload in enumerate(broken):
+        service=_service(tmp_path/f"broken-image-{index}")
+        def capture(_url,target,payload=payload):
+            target.write_bytes(payload)
+            return target
+        service._browser_screenshot=capture
+        result=service.swagger_evidence(
+            process_id="test-no-process",screenshot=True,start_if_needed=False)
+        assert result["ok"] is False
+        assert result["screenshot_captured"] is False
+        assert result["screenshot_file"] is None
