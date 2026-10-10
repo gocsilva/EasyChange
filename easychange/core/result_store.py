@@ -155,13 +155,21 @@ class DurableResultStore:
         # successful atomic replacement could create an unreadable receipt,
         # losing replay identity after a mutation has already executed.
         # Level 1 retains the established low-latency compression policy.
-        raw = json.dumps(
-            value, ensure_ascii=False, allow_nan=False,
-            separators=(",", ":")
-        ).encode("utf-8")
-        if len(raw) > MAX_DECODED_RECEIPT_BYTES:
-            raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
-        compressed = zlib.compress(raw, level=1)
+        # Build JSON incrementally; json.dumps() materializes the complete
+        # (possibly oversized) text before the byte budget can be checked.
+        # This also bounds expansion of shared object graphs and reduces
+        # peak memory on the large optical-result recovery path.
+        wire=bytearray()
+        encoder=json.JSONEncoder(
+            ensure_ascii=False,allow_nan=False,separators=(",", ":"))
+        for fragment in encoder.iterencode(value):
+            if len(fragment)>MAX_DECODED_RECEIPT_BYTES:
+                raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+            encoded=fragment.encode("utf-8")
+            if len(wire)+len(encoded)>MAX_DECODED_RECEIPT_BYTES:
+                raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+            wire.extend(encoded)
+        compressed = zlib.compress(wire, level=1)
         if len(compressed) > MAX_COMPRESSED_RECEIPT_BYTES:
             raise ValueError("RESULT_RECEIPT_COMPRESSED_TOO_LARGE")
         return compressed
