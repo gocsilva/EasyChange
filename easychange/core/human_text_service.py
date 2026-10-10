@@ -214,6 +214,31 @@ class HumanTextService:
             raise ValueError("HUMAN_TEXT_CURSOR_OUT_OF_RANGE")
         limit = max(512, min(256 * 1024, int(max_bytes or 16384)))
 
+        # A concurrent writer can atomically replace the file after info().
+        # Read from one opened generation and compare it with the metadata
+        # before returning bytes, including an empty terminal page.
+        raw=b""
+        if meta.get("exists"):
+            try:
+                with self.path.open("rb") as handle:
+                    opened=os.fstat(handle.fileno())
+                    if (opened.st_size != total or
+                            opened.st_ino != meta.get("file_inode") or
+                            opened.st_mtime_ns != meta.get("file_mtime_ns")):
+                        raise ValueError("HUMAN_TEXT_FILE_CHANGED_RETRY")
+                    if 0 < start < total:
+                        handle.seek(start)
+                        following=handle.read(1)
+                        if following and (following[0] & 0xC0) == 0x80:
+                            raise ValueError("HUMAN_TEXT_CURSOR_NOT_UTF8_BOUNDARY")
+                    if start < total:
+                        handle.seek(start)
+                        raw=handle.read(min(limit,total-start))
+            except FileNotFoundError as exc:
+                raise ValueError("HUMAN_TEXT_FILE_CHANGED_RETRY") from exc
+        elif total:
+            raise ValueError("HUMAN_TEXT_FILE_CHANGED_RETRY")
+
         if total == 0 or start == total:
             return {
                 **meta,
@@ -224,11 +249,6 @@ class HumanTextService:
                 "text": "",
                 "complete": True,
             }
-
-        self._validate_cursor_boundary(self.path, start, total)
-        with self.path.open("rb") as handle:
-            handle.seek(start)
-            raw = handle.read(min(limit, total - start))
 
         payload = raw
         while payload:
