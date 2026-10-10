@@ -200,3 +200,26 @@ def test_cold_multi_term_rejects_directory_symlink_to_protected_workspace(tmp_pa
                for item in result["by_term"]["CANARY"]["definitions"])
     assert all(item["file"]=="safe.py"
                for item in result["by_term"]["CANARY"]["references"])
+
+
+@pytest.mark.parametrize("invalid", (
+    "", "\x00", "CANARY\x00after", "x" * 513, None, 123,
+))
+def test_single_search_rejects_unbounded_invalid_query_before_git(
+        tmp_path, invalid):
+    (tmp_path / ".git").mkdir()
+    index = Indexer(tmp_path)
+    with patch("easychange.core.indexer.subprocess.run") as git:
+        with pytest.raises(ValueError,match="INVALID_INDEX_QUERY"):
+            index.search(invalid)
+    git.assert_not_called()
+
+
+@pytest.mark.parametrize("invalid", ("x" * 513, "SAFE\x00SECRET"))
+def test_multi_term_discovery_fails_before_git_on_bad_term(tmp_path, invalid):
+    (tmp_path / ".git").mkdir()
+    index = Indexer(tmp_path)
+    with patch("easychange.core.indexer.subprocess.run") as git:
+        with pytest.raises(ValueError,match="INVALID_INDEX_TERM"):
+            index.discover_many(["CANARY",invalid])
+    git.assert_not_called()
