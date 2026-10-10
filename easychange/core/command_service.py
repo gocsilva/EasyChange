@@ -135,7 +135,10 @@ class CommandService:
         self.ids = IdFactory(self.state_store.data.get("id_counts"))
         self.output = self.state_store.data.get("output_mode", "text")
         self.machine = self.state_store.data.get("mode", "human") == "machine"
-        self.history: list[str] = list(self.state_store.data.get("history", []))[-50:]
+        # Session validation guarantees a list; slice the persisted list
+        # before copying it. A large legacy history must not allocate an
+        # unnecessary second full list just to retain the last 50 commands.
+        self.history: list[str] = self.state_store.data.get("history", [])[-50:]
         self.aliases = dict(self.state_store.data.get("aliases", {}))
         self.parser = CommandParser(self.aliases)
         self.indexer = Indexer(workspace.root_path)
