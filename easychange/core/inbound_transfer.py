@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 import sys
 import threading
@@ -51,7 +52,25 @@ class InboundCommandStore:
         # Serialize the entire check-and-replace operation across EasyChange
         # processes using the same inbound staging directory.
         with self._lock:
-            with self._process_lock_path.open("a+b") as handle:
+            # The lock file is a local shared authority for cross-process
+            # staging. Never follow an attacker-created symlink, or open a
+            # FIFO/device as a writable lock.
+            if self._process_lock_path.is_symlink():
+                raise InboundTransferError("INBOUND_UNSAFE_LOCK_PATH")
+            flags=(os.O_CREAT|os.O_RDWR|getattr(os,"O_BINARY",0)|
+                   getattr(os,"O_NOFOLLOW",0))
+            try:
+                fd=os.open(self._process_lock_path,flags,0o600)
+            except OSError as exc:
+                raise InboundTransferError("INBOUND_LOCK_UNAVAILABLE") from exc
+            try:
+                handle=os.fdopen(fd,"r+b")
+            except BaseException:
+                os.close(fd)
+                raise
+            with handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise InboundTransferError("INBOUND_UNSAFE_LOCK_TYPE")
                 handle.seek(0)
                 if sys.platform == "win32":
                     import msvcrt
