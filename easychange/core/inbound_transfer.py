@@ -112,7 +112,14 @@ class InboundCommandStore:
             prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         temporary = Path(name)
         try:
-            with os.fdopen(fd, "wb") as handle:
+            try:
+                handle = os.fdopen(fd, "wb")
+            except BaseException:
+                # mkstemp succeeded but the stream never assumed ownership.
+                # Closing this raw descriptor avoids leaks on repeated retries.
+                os.close(fd)
+                raise
+            with handle:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
