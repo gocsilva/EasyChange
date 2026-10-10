@@ -572,9 +572,6 @@ class DurableResultStore:
         *,
         mutation_receipt: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        serialized_hash = hashlib.sha256(serialized).hexdigest()
-        execution_summary = _find_execution_summary(result)
         with self._claim_lock():
             current = self.get(sequence)
             if current is None:
@@ -588,6 +585,14 @@ class DurableResultStore:
                 # Duplicate delivery must never rewrite the terminal receipt,
                 # even when a retry arrives with a different result payload.
                 return current
+            # A duplicate terminal receipt is already committed. Serialize
+            # the possibly multi-megabyte result only for a newly completed
+            # sequence, after the exclusive claim and hash checks.
+            serialized = json.dumps(
+                result, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+            serialized_hash = hashlib.sha256(serialized).hexdigest()
+            execution_summary = _find_execution_summary(result)
             success = bool(result.get("ok"))
             lifecycle = None
             if isinstance(mutation_receipt, dict):
