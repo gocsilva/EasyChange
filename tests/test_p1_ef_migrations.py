@@ -162,6 +162,14 @@ def test_ef_script_is_external_and_cursor_paginated(tmp_path, monkeypatch):
         raise AssertionError(argv)
 
     monkeypatch.setattr(processes, "run", fake_run)
+    # A huge generated SQL file may only be read a page at a time. The
+    # previous path.read_bytes() implementation allocated the entire file.
+    original_read_bytes=Path.read_bytes
+    def forbid_sql_read_bytes(path):
+        if path.suffix==".sql":
+            raise AssertionError("UNBOUNDED_EF_SCRIPT_READ")
+        return original_read_bytes(path)
+    monkeypatch.setattr(Path,"read_bytes",forbid_sql_read_bytes)
     page1 = service.script(
         migration_project="Migrations.csproj",
         startup_project="Startup.csproj",
