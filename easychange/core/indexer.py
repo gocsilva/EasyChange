@@ -232,8 +232,14 @@ class Indexer:
         """Update exactly one known path after an EasyChange mutation."""
         relative = self._normalize_relative_path(relative_path)
         target = self.root / Path(relative)
-        if not target.resolve().is_relative_to(self.root.resolve()):
-            raise ValueError("INVALID_PROTECTED_INDEX_PATH")
+        try:
+            # A symlink within the workspace is also handled by the regular
+            # scan, which deliberately excludes links to avoid duplicate or
+            # externally remapped source records.
+            if target.is_symlink() or not target.resolve().is_relative_to(self.root.resolve()):
+                raise ValueError("INVALID_PROTECTED_INDEX_PATH")
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("INVALID_PROTECTED_INDEX_PATH") from exc
         with self._lock, self._connect() as db:
             if relative in self._protected_paths:
                 db.execute("DELETE FROM files WHERE path=?", (relative,))
@@ -242,6 +248,13 @@ class Indexer:
                     db.execute("DELETE FROM files_fts WHERE path=?", (relative,))
                 return {"path": relative, "ignored": True, "protected": True}
             if any(part in SKIP_DIRS for part in Path(relative).parts):
+                # This path could exist in a legacy index from before it was
+                # excluded. Remove it now, rather than reporting ignored while
+                # continuing to return stale indexed content.
+                db.execute("DELETE FROM files WHERE path=?", (relative,))
+                db.execute("DELETE FROM symbols WHERE path=?", (relative,))
+                if self._fts_enabled:
+                    db.execute("DELETE FROM files_fts WHERE path=?", (relative,))
                 return {"path": relative, "ignored": True}
             if not target.exists() or not target.is_file():
                 db.execute("DELETE FROM files WHERE path=?", (relative,))
@@ -283,7 +296,8 @@ class Indexer:
                 if relative in self._protected_paths:
                     continue
                 stat = path.stat()
-            except OSError:
+            except (OSError, RuntimeError):
+                # Cyclic links may raise RuntimeError during resolution.
                 continue
             seen.add(relative)
             if existing.get(relative) != (stat.st_size, stat.st_mtime_ns):
