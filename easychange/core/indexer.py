@@ -496,8 +496,26 @@ class Indexer:
         rows: list[tuple[str, str]] = []
         for line in (completed.stdout or "").splitlines():
             parts = line.split(":", 2)
-            if len(parts) == 3:
-                rows.append((parts[0].replace("\\", "/"), parts[1] + ":" + parts[2]))
+            if len(parts) != 3:
+                continue
+            try:
+                relative = self._normalize_relative_path(parts[0])
+            except ValueError:
+                continue
+            if any(part in SKIP_DIRS for part in Path(relative).parts):
+                continue
+            # Cold Git discovery must honor the same sensitive-file rules as
+            # the SQLite/FTS index: protected files must never be returned.
+            with self._lock:
+                if relative in self._protected_paths:
+                    continue
+            target = self.root / relative
+            try:
+                if target.is_symlink() or not target.resolve().is_relative_to(self.root.resolve()):
+                    continue
+            except (OSError, RuntimeError):
+                continue
+            rows.append((relative, parts[1] + ":" + parts[2]))
         return rows
 
     def _candidate_rows(self, query: str, *, regex: bool, extension: str | None,
