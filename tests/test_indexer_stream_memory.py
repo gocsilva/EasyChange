@@ -42,3 +42,49 @@ def test_missing_candidate_still_returns_skip_receipt(tmp_path):
     path=tmp_path/"deleted.cs"
     assert Indexer._read_candidate((path,"deleted.cs",10,123)) == (
         "deleted.cs",10,123,"",None,[])
+
+
+def test_refresh_reads_changed_files_in_bounded_batches(tmp_path, monkeypatch):
+    import easychange.core.indexer as index_module
+
+    count=index_module._INDEX_WORKERS*9+1
+    for i in range(count):
+        (tmp_path/f"script_{i:03}.py").write_text(
+            f"def script_{i}():\n    return {i}\n",encoding="utf-8")
+
+    batch_sizes=[]
+    original_pool=index_module.ThreadPoolExecutor
+
+    class MeasuredPool:
+        def __init__(self,*args,**kwargs):
+            self._real=original_pool(*args,**kwargs)
+        def __enter__(self):
+            self._real.__enter__()
+            return self
+        def __exit__(self,*args):
+            return self._real.__exit__(*args)
+        def map(self,fn,rows):
+            batch_sizes.append(len(rows))
+            return self._real.map(fn,rows)
+
+    monkeypatch.setattr(index_module,"ThreadPoolExecutor",MeasuredPool)
+    index=Indexer(tmp_path)
+    result=index.refresh(force=True)
+    assert result["indexed"]==count
+    assert sum(batch_sizes)==count
+    assert len(batch_sizes)>=3
+    assert max(batch_sizes)<=index_module._INDEX_WORKERS*4
+    with index._connect() as db:
+        assert db.execute("SELECT count(*) FROM files").fetchone()[0]==count
+
+    (tmp_path/"script_000.py").unlink()
+    (tmp_path/"script_001.py").write_text("def changed():\n    pass\n",encoding="utf-8")
+    index.invalidate()
+    incremental=index.refresh()
+    assert incremental["indexed"]==1
+    assert incremental["removed"]==1
+    with index._connect() as db:
+        assert db.execute("SELECT count(*) FROM files").fetchone()[0]==count-1
+        assert db.execute(
+            "SELECT content FROM files WHERE path=?",("script_001.py",)
+        ).fetchone()[0].startswith("def changed():")
