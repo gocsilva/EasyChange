@@ -178,10 +178,17 @@ def _encode_raw(value: dict[str, Any]) -> tuple[bytes, bytes, str]:
     encoder=json.JSONEncoder(ensure_ascii=False, allow_nan=False,
                              separators=(",", ":"))
     for part in encoder.iterencode(value):
-        encoded=part.encode("utf-8")
-        if len(output)+len(encoded)>MAX_EC2_RESULT_BYTES:
+        # An encoder may emit one enormous JSON string token. Its character
+        # count is a lower bound for UTF-8 bytes: reject before allocating
+        # another unbounded full-token byte copy.
+        remaining=MAX_EC2_RESULT_BYTES-len(output)
+        if len(part)>remaining:
             raise ValueError("OPTICAL_RESULT_TOO_LARGE")
-        output.extend(encoded)
+        for offset in range(0,len(part),8192):
+            fragment=part[offset:offset+8192].encode("utf-8")
+            if len(fragment)>MAX_EC2_RESULT_BYTES-len(output):
+                raise ValueError("OPTICAL_RESULT_TOO_LARGE")
+            output.extend(fragment)
     raw=bytes(output)
     # Only the first optical page is broadcast for large results; the rest
     # is recovered from the durable ResultStore. Level 3 cuts bundle preparation
