@@ -85,6 +85,24 @@ class OpticalReaderTests(unittest.TestCase):
             self.assertEqual(reader.decode_hdmi_qr(frame),["EC2_VALID"])
         self.assertEqual(detector.detectAndDecodeMulti.call_count,2)
 
+    def test_failed_detector_construction_does_not_poison_next_frame(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import Mock,patch
+        from mcp_adapter import optical_reader as reader
+
+        qr=Mock()
+        qr.detectAndDecodeMulti.return_value=(False,[],None,None)
+        qr.detectAndDecode.return_value=("EC2_READY",None,None)
+        maker=Mock(side_effect=[RuntimeError("OPENCV_DEVICE_RESET"),qr])
+        cv2_stub=SimpleNamespace(error=RuntimeError,QRCodeDetector=maker)
+        frame=SimpleNamespace(shape=(1080,1920,3))
+        with patch.dict(sys.modules,{"cv2":cv2_stub}), \
+             patch.object(reader._qr_detectors,"detector",None,create=True):
+            self.assertEqual(reader.decode_hdmi_qr(frame),[])
+            self.assertEqual(reader.decode_hdmi_qr(frame),["EC2_READY"])
+        self.assertEqual(maker.call_count,2)
+
     def test_ec2_round_trip_with_integrity_check(self):
         expected={"sequence":"example-1","ok":True,"code":"OK","data":{"text":"x"*500}}
         chunks=encode_result_chunks(expected)
