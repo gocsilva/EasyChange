@@ -671,6 +671,18 @@ class DurableResultStore:
                 raise RuntimeError("RESULT_RECEIPT_UNREADABLE") from exc
             if not isinstance(value, dict):
                 raise RuntimeError("RESULT_RECEIPT_UNREADABLE")
+            # The compressed bytes alone are not an execution identity.
+            # A valid receipt copied under another sequence filename must
+            # never be replayed, claimed or completed as the wrong command.
+            # Compare canonical paths to preserve legacy case-insensitive
+            # sequence aliases already supported by _path().
+            try:
+                receipt_sequence=value.get("sequence")
+                if (type(receipt_sequence) is not str or
+                        self._path(receipt_sequence)!=target):
+                    raise ValueError("RESULT_RECEIPT_SEQUENCE_MISMATCH")
+            except ValueError as exc:
+                raise RuntimeError("RESULT_RECEIPT_UNREADABLE") from exc
             active = self._active_record(value)
             try:
                 timestamp = float(
