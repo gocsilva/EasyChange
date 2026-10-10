@@ -499,21 +499,31 @@ class CommandService:
                           "result_hash":durable.get("expired_result_hash")},
                 )
             if durable.get("state") == "DONE" and isinstance(durable.get("result"), dict):
-                replay = Result(**durable["result"])
-                replay.sequence = sequence
-                replay.data = {
-                    **(replay.data or {}),
-                    "duplicate": True,
-                    "replay": {
-                        "state": "DONE",
-                        "result_hash": durable.get("result_hash"),
-                        "finished_at": durable.get("finished_at"),
-                    },
-                }
-                receipt = durable.get("mutation_receipt")
-                if isinstance(receipt, dict):
-                    replay.data["mutation_receipt"] = receipt
-                return replay
+                # Imported or corrupt terminal records must never crash the
+                # replay path or silently turn into permission to re-execute.
+                try:
+                    replay = Result(**durable["result"])
+                    if (type(replay.ok) is not bool
+                            or not isinstance(replay.command, str)
+                            or not isinstance(replay.data, dict)):
+                        raise TypeError("MALFORMED_DURABLE_RESULT")
+                except (TypeError, ValueError):
+                    replay = None
+                if replay is not None:
+                    replay.sequence = sequence
+                    replay.data = {
+                        **replay.data,
+                        "duplicate": True,
+                        "replay": {
+                            "state": "DONE",
+                            "result_hash": durable.get("result_hash"),
+                            "finished_at": durable.get("finished_at"),
+                        },
+                    }
+                    receipt = durable.get("mutation_receipt")
+                    if isinstance(receipt, dict):
+                        replay.data["mutation_receipt"] = receipt
+                    return replay
             if durable.get("state") == "DONE":
                 # An incomplete or legacy terminal receipt is not a running
                 # command and must never authorize another filesystem mutation.
