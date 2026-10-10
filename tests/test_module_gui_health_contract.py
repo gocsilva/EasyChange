@@ -850,3 +850,76 @@ def test_rejected_standalone_health_http_response_is_closed():
         assert answer == {
             "running": False, "service": name, "standalone": True}
         assert response.closed, f"HTTP {code} response socket not released"
+
+
+def test_exited_standalone_child_is_reaped_before_new_start_or_stop():
+    import subprocess
+    from unittest.mock import Mock, patch
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    klass=next(node for node in ast.parse(source).body
+               if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+    ns={"subprocess":subprocess}
+    exec(compile(ast.Module(body=[klass],type_ignores=[]),
+                 "<exited-child-reap>","exec"),ns)
+    gui=object.__new__(ns["ModuleGUI"])
+    gui.root=Mock()
+    gui.message=Mock()
+    gui._closing=False
+    gui._refresh_generation=0
+    gui._refresh_inflight=False
+    gui._readiness_job=None
+    old=Mock(pid=5410)
+    old.poll.return_value=5
+    gui.process=old
+    # Do not start a new module in a unit test. Reaping happens before the
+    # fixed-port preflight, so a synthetic socket failure ends the callback.
+    with patch("socket.create_connection",side_effect=TimeoutError("PORT_BUSY")):
+        gui.start()
+    old.wait.assert_called_once_with(timeout=0.5)
+    assert gui.process is None
+
+    ended=Mock(pid=5411)
+    ended.poll.return_value=3
+    gui.process=ended
+    assert gui.stop() is True
+    ended.wait.assert_called_once_with(timeout=0.5)
+    ended.terminate.assert_not_called()
+    assert gui.process is None
+
+
+def test_failed_reap_keeps_old_pid_and_prevents_standalone_restart():
+    import subprocess
+    from unittest.mock import Mock, patch
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    klass=next(node for node in ast.parse(source).body
+               if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+    ns={"subprocess":subprocess}
+    exec(compile(ast.Module(body=[klass],type_ignores=[]),
+                 "<exited-child-reap-failure>","exec"),ns)
+    gui=object.__new__(ns["ModuleGUI"])
+    gui.root=Mock()
+    gui.message=Mock()
+    gui._closing=False
+    gui._refresh_generation=0
+    gui._refresh_inflight=False
+    gui._readiness_job=None
+    old=Mock(pid=5412)
+    old.poll.return_value=1
+    old.wait.side_effect=OSError("CHILD_WAIT_FAILED")
+    gui.process=old
+    with patch("socket.create_connection") as socket:
+        gui.start()
+    socket.assert_not_called()
+    assert gui.process is old
+    assert "Falha ao recolher serviço anterior" in gui.message.set.call_args.args[0]
+
+    assert gui.stop() is False
+    assert gui.process is old
+    assert "Falha ao recolher serviço:" in gui.message.set.call_args.args[0]
+    old.wait.side_effect=None
+    assert gui.stop() is True
+    assert gui.process is None
