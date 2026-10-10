@@ -1158,6 +1158,37 @@ def test_receipt_path_symlink_swap_fails_closed_at_open(tmp_path, monkeypatch):
     assert store.get(sequence)["state"]=="RUNNING"
 
 
+def test_failed_receipt_staging_wrapper_releases_raw_fd_and_preserves_claim(tmp_path, monkeypatch):
+    import os
+    import pytest
+    import easychange.core.result_store as result_module
+
+    store=DurableResultStore(tmp_path / "results")
+    sequence="QWRAPPERFAIL01"
+    store.mark_running(sequence, "a"*64, ":job", mutation=True)
+    path=store._path(sequence)
+    before=path.read_bytes()
+    value=store.get(sequence)
+    real_close=os.close
+    closed=[]
+
+    def record_close(fd):
+        closed.append(fd)
+        return real_close(fd)
+
+    with monkeypatch.context() as ctx:
+        ctx.setattr(result_module.os,"fdopen",
+                    lambda *args,**kwargs: (_ for _ in ()).throw(
+                        OSError("STAGING_WRAPPER_UNAVAILABLE")))
+        ctx.setattr(result_module.os,"close",record_close)
+        with pytest.raises(OSError,match="STAGING_WRAPPER_UNAVAILABLE"):
+            store._write(sequence,value,run_cleanup=False)
+    assert len(closed)==1
+    assert path.read_bytes()==before
+    assert not list(store.root.glob(path.name+".*.tmp"))
+    assert store.get(sequence)["state"]=="RUNNING"
+
+
 def test_failed_receipt_fd_wrapper_releases_raw_descriptor(tmp_path, monkeypatch):
     import os
     import pytest
