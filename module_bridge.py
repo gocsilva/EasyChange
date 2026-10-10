@@ -90,8 +90,15 @@ def _acquire_consumer_lease():
     except OSError as exc:
         raise RuntimeError("MCP_CONSUMER_LEASE_UNAVAILABLE") from exc
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        metadata=os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
             raise RuntimeError("MCP_CONSUMER_LEASE_UNSAFE_TYPE")
+        if os.name=="posix":
+            # The shared temp filename is predictable. A pre-existing file
+            # owned by another user or writable by peers must not become the
+            # lock inode authorizing delivery of potentially mutating work.
+            if metadata.st_uid!=os.getuid() or (metadata.st_mode & 0o022):
+                raise RuntimeError("MCP_CONSUMER_LEASE_UNSAFE_OWNER")
         lease=os.fdopen(fd,"r+b",buffering=0)
     except BaseException:
         # The opened descriptor still belongs to this scope if fdopen fails
