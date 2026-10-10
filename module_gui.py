@@ -91,7 +91,8 @@ class ModuleGUI:
             except Exception:
                 report={"running":False}
             if self._closing or generation!=self._refresh_generation:
-                self._refresh_inflight=False
+                # start()/stop() has invalidated this probe and may already
+                # own a newer one. Never clear that newer probe's slot.
                 return
             def update():
                 try:
@@ -113,16 +114,19 @@ class ModuleGUI:
                 finally:
                     # The worker is not done until Tk has consumed its result:
                     # releasing here (not after I/O) prevents callback storms.
-                    self._refresh_inflight=False
+                    if generation==self._refresh_generation:
+                        self._refresh_inflight=False
             try:
                 self.root.after(0,update)
             except (RuntimeError,tk.TclError):
                 # A closing Tk interpreter cannot receive the callback.
-                self._refresh_inflight=False
+                if generation==self._refresh_generation:
+                    self._refresh_inflight=False
         try:
             threading.Thread(target=probe,daemon=True).start()
         except RuntimeError:
-            self._refresh_inflight=False
+            if generation==self._refresh_generation:
+                self._refresh_inflight=False
             self.message.set("Não foi possível iniciar verificação de saúde.")
 
     def start(self):
@@ -151,6 +155,9 @@ class ModuleGUI:
             return
         # Invalidate an older asynchronous /health result before spawning.
         self._refresh_generation+=1
+        # An older /health request must not block readiness for this new PID.
+        self._refresh_inflight=False
+        self._cancel_readiness()
         folder=ROOT/"logs"
         python=ROOT/".venv"/"Scripts"/"python.exe"
         if not python.is_file():
@@ -183,6 +190,7 @@ class ModuleGUI:
     def stop(self):
         # A late worker/callback cannot resurrect the state of a stopped PID.
         self._refresh_generation+=1
+        self._refresh_inflight=False
         self._cancel_readiness()
         process=self.process
         if process and process.poll() is None:
