@@ -71,6 +71,30 @@ class MachineSession:
                             any(type(k) is not str or type(v) is not str
                                 for k, v in hashes.items())):
                         safe.pop("file_hashes", None)
+                    # Other structures are converted with dict() during
+                    # CommandService construction. A JSON list/string may
+                    # otherwise raise before the UI can report startup health.
+                    field_rules = {
+                        "results": lambda v: all(
+                            type(k) is str and type(item) is dict
+                            for k, item in v.items()),
+                        "file_refs": lambda v: all(
+                            type(k) is str and type(item) is str
+                            for k, item in v.items()),
+                        "macros": lambda v: all(
+                            type(k) is str and type(item) is list and
+                            all(type(line) is str for line in item)
+                            for k, item in v.items()),
+                        "snapshots": lambda v: all(
+                            type(k) is str and type(item) is int and item >= 0
+                            for k, item in v.items()),
+                    }
+                    for field, valid_items in field_rules.items():
+                        value = safe.get(field)
+                        if value is not None and (
+                                type(value) is not dict or
+                                not valid_items(value)):
+                            safe.pop(field, None)
                     self.data.update(safe)
             except (ValueError, OSError, UnicodeError, RecursionError):
                 # Preserve the original file for diagnosis and start with a
