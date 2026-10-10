@@ -624,7 +624,7 @@ class OpticalReaderTests(unittest.TestCase):
 
         import json
         changed=json.loads(packets[0])
-        changed["d"]="!"+changed["d"][1:]
+        changed["d"]=("A" if changed["d"][0]!="A" else "B")+changed["d"][1:]
         with patch.object(reader.binascii,"crc32", wraps=reader.binascii.crc32) as crc:
             session.ingest([json.dumps(changed)])
         crc.assert_called_once()
