@@ -514,6 +514,17 @@ class CommandService:
                 if isinstance(receipt, dict):
                     replay.data["mutation_receipt"] = receipt
                 return replay
+            if durable.get("state") == "DONE":
+                # An incomplete or legacy terminal receipt is not a running
+                # command and must never authorize another filesystem mutation.
+                # Explicitly surface missing replay data rather than asking
+                # callers to poll RUNNING forever.
+                return Result(
+                    False, "ec",
+                    error="Completed sequence has no replayable result",
+                    code="SEQUENCE_RESULT_MISSING", sequence=sequence,
+                    data={"state": "DONE", "duplicate": True},
+                )
             return Result(
                 False,
                 "ec",
