@@ -9,6 +9,8 @@ from unittest.mock import Mock
 import pytest
 
 from mcp_adapter.module_service import Handler
+import mcp_adapter.module_service as module_service
+from unittest.mock import patch
 
 
 def render(status, payload):
@@ -44,3 +46,30 @@ def test_normal_standalone_health_keeps_http_shape_and_unicode():
     assert status==200
     assert body=={"ok":True,"id":"easychange","label":"ação"}
     assert "ação".encode("utf-8") in raw
+
+
+def test_bounded_service_reply_rejects_oversize_before_adding_encoded_payload():
+    with patch.object(module_service,"MAX_SERVICE_RESPONSE_BYTES",64):
+        status,body,raw=render(200,{"payload":"X"*512})
+    assert status==502
+    assert body=={"error":"MODULE_SERVICE_RESPONSE_TOO_LARGE"}
+    assert raw==b'{"error":"MODULE_SERVICE_RESPONSE_TOO_LARGE"}'
+
+
+def test_utf8_budget_uses_bytes_not_code_point_count():
+    with patch.object(module_service,"MAX_SERVICE_RESPONSE_BYTES",60):
+        status,body,raw=render(200,{"label":"ação"*30})
+        assert status==502
+        assert body=={"error":"MODULE_SERVICE_RESPONSE_TOO_LARGE"}
+        status,body,raw=render(200,{"label":"ok"})
+        assert status==200
+        assert body=={"label":"ok"}
+
+
+def test_socket_deadline_is_set_before_base_http_setup():
+    instance=object.__new__(Handler)
+    instance.request=Mock()
+    with patch("mcp_adapter.module_service.BaseHTTPRequestHandler.setup") as base_setup:
+        instance.setup()
+    instance.request.settimeout.assert_called_once_with(12.0)
+    base_setup.assert_called_once_with()
