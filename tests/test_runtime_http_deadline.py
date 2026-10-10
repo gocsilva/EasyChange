@@ -52,7 +52,8 @@ def test_swagger_readiness_ignores_404_and_unauthorized_candidates():
     replies=iter((
         {"ok":False,"status":404,"url":"http://127.0.0.1:5000/swagger"},
         {"ok":False,"status":401,"url":"http://127.0.0.1:5000/openapi.json"},
-        {"ok":True,"status":200,"url":"http://127.0.0.1:5000/swagger/index.html"},
+        {"ok":True,"status":200,"url":"http://127.0.0.1:5000/swagger/index.html",
+         "body":b"<html><div id='swagger-ui'></div></html>"},
     ))
     def check(url, *, timeout):
         visited.append(url)
@@ -63,7 +64,7 @@ def test_swagger_readiness_ignores_404_and_unauthorized_candidates():
             ["http://127.0.0.1:5000/swagger",
              "http://127.0.0.1:5000/openapi.json",
              "http://127.0.0.1:5000/swagger/index.html"],
-            timeout=3.0)
+            timeout=3.0,require_swagger=True)
     assert result["ok"] is True and result["status"]==200
     assert len(visited)==3
     sleep.assert_not_called()
@@ -74,7 +75,7 @@ def test_swagger_404_never_creates_success_evidence_or_screenshot(tmp_path):
     service=object.__new__(ProjectRuntimeService)
     service.profile=lambda _id: {
         "swagger_candidates":["http://127.0.0.1:5000/swagger"]}
-    service.wait_for_http=lambda urls,timeout: {
+    service.wait_for_http=lambda urls,timeout,require_swagger: {
         "ok":False,"status":404,"url":urls[0],"body":b"Not Found"}
     service.processes=Mock()
     service._browser_screenshot=Mock()
@@ -106,3 +107,64 @@ def test_swagger_http_error_closes_socket_and_bounds_error_body():
     assert result["status"]==404 and result["ok"] is False
     assert result["truncated"] is True and result["body"]==b"not-f"
     assert response_stream.closed
+
+
+def test_swagger_content_validator_distinguishes_real_docs_from_http_200_pages():
+    service=ProjectRuntimeService
+    good=(
+        b'{"openapi":"3.0.3","paths":{}}',
+        b'{"swagger":"2.0","paths":{}}',
+        b"<html><head><title>Swagger UI</title></head><div id='swagger-ui'></div></html>",
+        b"<html><redoc spec-url='/openapi.json'></redoc></html>",
+    )
+    bad=(
+        b"OK",
+        b"<html><title>Sign in</title></html>",
+        b'{"status":"healthy","ok":true}',
+        b'{"openapi":"3.0.3"}',
+        b'{"openapi":"not-a-version","paths":{}}',
+        b"[]",
+        b"",
+    )
+    for body in good:
+        assert service._swagger_document_valid({"body":body}), body[:60]
+    for body in bad:
+        assert not service._swagger_document_valid({"body":body}), body[:60]
+    assert not service._swagger_document_valid({
+        "body":good[0],"truncated":True})
+
+
+def test_http200_login_page_is_skipped_before_valid_openapi_document():
+    service=object.__new__(ProjectRuntimeService)
+    seen=[]
+    def get(url,*,timeout):
+        seen.append(url)
+        return {"ok":True,"status":200,"url":url,"body": (
+            b"<html><title>Login required</title></html>"
+            if url.endswith("/swagger/index.html")
+            else b'{"openapi":"3.0.3","paths":{"/acam225":{}}}')}
+    service._http_get=get
+    result=service.wait_for_http(
+        ["http://127.0.0.1:5000/swagger/index.html",
+         "http://127.0.0.1:5000/swagger/v1/swagger.json"],
+        timeout=2.0,require_swagger=True)
+    assert result["url"].endswith("swagger.json")
+    assert len(seen)==2
+
+
+def test_swagger_evidence_refuses_generic_200_before_writing_files(tmp_path):
+    from unittest.mock import Mock
+    service=object.__new__(ProjectRuntimeService)
+    service.profile=lambda _: {
+        "swagger_candidates":["http://127.0.0.1:5000/swagger/index.html"]}
+    service.wait_for_http=lambda urls,timeout,require_swagger: {
+        "ok":True,"status":200,"url":urls[0],
+        "body":b"<html><title>Default application</title></html>"}
+    service.evidence_root=tmp_path/"evidence"
+    service.processes=Mock()
+    service._browser_screenshot=Mock()
+    outcome=service.swagger_evidence(
+        process_id="audit",start_if_needed=False,screenshot=True)
+    assert outcome["ok"] is False
+    assert not service.evidence_root.exists()
+    service._browser_screenshot.assert_not_called()
