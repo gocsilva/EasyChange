@@ -284,6 +284,29 @@ def test_complete_limits_shared_dag_json_before_full_dumps_or_receipt_write(tmp_
     assert store.get(sequence)["state"]=="RUNNING"
 
 
+def test_durable_completion_requires_literal_true_for_success(tmp_path):
+    store = DurableResultStore(tmp_path / "success-receipts")
+    for position, marker in enumerate(("false", "true", 1, -1, [], {}, None, False, 0, True)):
+        sequence = "QSTRICTOK" + str(position)
+        with_hash = "a" * 64
+        store.mark_running(sequence, with_hash, ":state", mutation=False)
+        completed = store.complete(
+            sequence, with_hash, ":state",
+            {"ok": marker, "command": "state", "sequence": sequence},
+        )
+        expected = marker is True
+        assert completed["success"] is expected
+        assert store.status(sequence)["success"] is expected
+        assert store.header(sequence)["success"] is expected
+        assert store.result(sequence)["ok"] == marker
+
+    # A duplicate delivery cannot turn an already terminal false outcome
+    # into a success without acquiring a new sequence claim.
+    unchanged = store.complete(
+        "QSTRICTOK0", "a" * 64, ":state", {"ok": True, "command": "state"})
+    assert unchanged["success"] is False
+
+
 def test_complete_incremental_json_preserves_exact_result_hash_and_bytes(tmp_path):
     import hashlib
 
