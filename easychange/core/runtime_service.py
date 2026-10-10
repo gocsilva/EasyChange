@@ -1337,8 +1337,19 @@ class ProjectRuntimeService:
         # Swagger UI / Redoc render an HTML app; a generic index.html,
         # login page or 200 OK response must not be saved as verified proof.
         sample=raw[:262144].lower()
-        return (b"swagger-ui" in sample or b"swaggeruibundle" in sample or
-                b"redoc" in sample)
+        # Mentioning "Swagger UI" on a login or generic landing page is not
+        # documentation. Accept recognisable UI mount points or actual loader
+        # scripts, not a plain word anywhere in the HTML response.
+        mount=re.search(
+            rb"<(?:div|main|section)\b[^>]{0,512}\bid\s*=\s*[\"']swagger-ui[\"']",
+            sample)
+        script=re.search(
+            rb"<script\b[^>]{0,512}\bsrc\s*=\s*[\"'][^\\"']*swagger-ui-bundle(?:\.min)?\.js(?:\?[^\\"']*)?[\"']",
+            sample)
+        javascript=(b"<script" in sample and
+                    re.search(rb"\bswaggeruibundle\s*\(",sample))
+        redoc=re.search(rb"<(?:redoc|redocly-api-reference)\b",sample)
+        return bool(mount or script or javascript or redoc)
 
     def wait_for_http(self, urls: list[str], timeout: float = 35.0,
                       *, require_swagger: bool = False) -> dict:
