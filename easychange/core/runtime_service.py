@@ -10,6 +10,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
@@ -991,10 +992,15 @@ class ProjectRuntimeService:
         }
 
     def _http_get(self, url: str, timeout: float = 4.0, max_bytes: int = 2_000_000) -> dict:
-        request = urllib.request.Request(url, headers={"User-Agent": "EasyChange/0.1"})
-        context = ssl._create_unverified_context() if url.startswith("https://localhost") or url.startswith("https://127.0.0.1") else None
         started = time.monotonic()
         try:
+            parsed = urlsplit(url)
+            request = urllib.request.Request(url, headers={"User-Agent": "EasyChange/0.1"})
+            # Prefix matching is unsafe: https://localhost.attacker.test
+            # is not loopback and must retain certificate verification.
+            loopback_tls = (parsed.scheme == "https" and
+                            parsed.hostname in {"localhost", "127.0.0.1", "::1"})
+            context = ssl._create_unverified_context() if loopback_tls else None
             with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
                 body = response.read(max_bytes + 1)
                 return {"ok": True, "url": url, "status": int(response.status),
@@ -1006,7 +1012,7 @@ class ProjectRuntimeService:
             return {"ok": False, "url": url, "status": int(exc.code), "body": body,
                     "content_type": exc.headers.get("Content-Type", ""),
                     "duration_ms": int((time.monotonic() - started) * 1000)}
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             return {"ok": False, "url": url, "error": type(exc).__name__,
                     "message": str(exc)[:500], "duration_ms": int((time.monotonic() - started) * 1000)}
 
