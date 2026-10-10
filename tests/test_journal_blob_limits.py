@@ -25,6 +25,45 @@ def test_journal_blob_roundtrip_and_decompression_limit(tmp_path, monkeypatch):
         journal._load_text(reference)
 
 
+def test_journal_snapshot_refuses_symlink_and_hardlink_alias(tmp_path):
+    import os
+
+    if os.name!="posix":
+        pytest.skip("POSIX link validation only")
+    journal=Journal(tmp_path/".easychange"/"journal.jsonl","S1")
+    reference=journal._store_text("snapshot contents\\n"*900)
+    target=journal.blob_root/(reference.removeprefix("@zblob:")+".zlib")
+    backup=tmp_path/"original-compressed.zlib"
+    original=target.read_bytes()
+    target.unlink()
+    backup.write_bytes(original)
+    target.symlink_to(backup)
+    with pytest.raises(ValueError,match="JOURNAL_BLOB_UNSAFE_FILE"):
+        journal._load_text(reference)
+    target.unlink()
+    os.link(backup,target)
+    with pytest.raises(ValueError,match="JOURNAL_BLOB_UNSAFE_FILE"):
+        journal._load_text(reference)
+    target.unlink()
+    # The regular, single-linked content-addressed snapshot stays supported.
+    target.write_bytes(original)
+    assert journal._load_text(reference)=="snapshot contents\\n"*900
+
+
+def test_fifo_in_journal_blob_folder_fails_without_blocking_open(tmp_path):
+    import os
+
+    if not hasattr(os,"mkfifo"):
+        pytest.skip("FIFO unavailable")
+    journal=Journal(tmp_path/".easychange"/"journal.jsonl","S1")
+    reference=journal._store_text("large snapshot\\n"*900)
+    target=journal.blob_root/(reference.removeprefix("@zblob:")+".zlib")
+    target.unlink()
+    os.mkfifo(target)
+    with pytest.raises(ValueError,match="JOURNAL_BLOB_UNSAFE_FILE"):
+        journal._load_text(reference)
+
+
 def test_journal_blob_compressed_limit_rejects_before_zlib_decode(tmp_path, monkeypatch):
     journal = Journal(tmp_path / ".easychange" / "journal.jsonl", "S1")
     content = "some original text" * 400
