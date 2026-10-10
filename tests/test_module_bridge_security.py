@@ -6,6 +6,34 @@ from urllib.error import HTTPError
 import module_bridge
 
 class TestHubRedirectBoundary(unittest.TestCase):
+    def test_localhost_alias_resolves_to_fixed_ipv4_hub_without_name_lookup(self):
+        import io
+        from unittest.mock import patch
+
+        allowed="http://127.0.0.1:8786"
+        self.assertEqual(module_bridge._canonical_bus_url(allowed),allowed)
+        self.assertEqual(module_bridge._canonical_bus_url(
+            "http://localhost:8786"),allowed)
+        self.assertEqual(module_bridge.BUS,allowed)
+        for candidate in (
+            "http://[::1]:8786",
+            "http://localhost:8786/path",
+            "https://localhost:8786",
+            "http://127.0.0.1:8787",
+            "http://example.com:8786",
+            None,
+        ):
+            with self.subTest(candidate=candidate):
+                with self.assertRaisesRegex(ValueError,"MCP_BUS_MUST_USE_LOOPBACK"):
+                    module_bridge._canonical_bus_url(candidate)
+
+        client=module_bridge.MCPBridge(token="L"*48)
+        with patch.object(module_bridge._local_opener,"open",
+                          return_value=io.BytesIO(b'{"ok":true}')) as request:
+            self.assertEqual(client.peers(),{"ok":True})
+        self.assertEqual(
+            request.call_args.args[0].full_url,allowed+"/v1/peers")
+
     def test_hub_rejections_close_http_error_response(self):
         import io
         from urllib.error import HTTPError
