@@ -7,6 +7,24 @@ import tempfile
 from pathlib import Path
 
 
+MAX_MACHINE_SESSION_BYTES = 16 * 1024 * 1024
+
+
+def _bounded_session_json(value: dict) -> bytes:
+    """Do not create a session file that the bounded loader cannot reopen."""
+    output = bytearray()
+    encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+    for fragment in encoder.iterencode(value):
+        if len(fragment) > MAX_MACHINE_SESSION_BYTES - len(output):
+            raise ValueError("MACHINE_SESSION_TOO_LARGE")
+        for offset in range(0, len(fragment), 4096):
+            piece = fragment[offset:offset + 4096].encode("utf-8")
+            if len(output) + len(piece) > MAX_MACHINE_SESSION_BYTES:
+                raise ValueError("MACHINE_SESSION_TOO_LARGE")
+            output.extend(piece)
+    return bytes(output)
+
+
 class MachineSession:
     """Small persisted view/session record; persisted atomically under .easychange."""
     def __init__(self, path: Path, workspace: str) -> None:
@@ -16,17 +34,23 @@ class MachineSession:
                      "history": [], "aliases": {"o": "open", "r": "read", "s": "search", "b": "build", "t": "test", "d": "diff"}}
         if path.exists():
             try:
-                loaded = json.loads(path.read_text(encoding="utf-8"))
+                # A corrupt/imported JSON file must not allocate unlimited
+                # memory before workspace startup and user-facing diagnostics.
+                with path.open("rb") as stream:
+                    raw = stream.read(MAX_MACHINE_SESSION_BYTES + 1)
+                if len(raw) > MAX_MACHINE_SESSION_BYTES:
+                    raise ValueError("MACHINE_SESSION_TOO_LARGE")
+                loaded = json.loads(raw.decode("utf-8"))
                 if isinstance(loaded, dict) and loaded.get("workspace") == workspace:
                     self.data.update(loaded)
-            except (json.JSONDecodeError, OSError):
+            except (ValueError, OSError, UnicodeError, RecursionError):
+                # Preserve the original file for diagnosis and start with a
+                # fresh in-memory session instead of crashing workspace load.
                 pass
         path.parent.mkdir(parents=True, exist_ok=True)
 
     def save(self) -> None:
-        payload = json.dumps(
-            self.data, ensure_ascii=False, separators=(",", ":")
-        )
+        payload = _bounded_session_json(self.data)
         last_error: OSError | None = None
         for _attempt in range(2):
             temporary: Path | None = None
@@ -39,7 +63,7 @@ class MachineSession:
                     prefix=f".{self.path.name}.", suffix=".tmp",
                     dir=self.path.parent)
                 temporary = Path(name)
-                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                with os.fdopen(descriptor, "wb") as handle:
                     descriptor = None
                     handle.write(payload)
                     handle.flush()
