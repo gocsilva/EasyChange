@@ -213,8 +213,12 @@ class DurableResultStore:
         # Check the actual opened file, not only a pathname inspected
         # earlier by get(). On POSIX, O_NOFOLLOW prevents a symlink swap
         # between the initial identity check and this disk read.
+        # A malicious or corrupt FIFO named like a receipt must not block
+        # os.open() forever before the fstat() regular-file guard runs.
+        # O_NONBLOCK is used for open only; regular files are unaffected.
         flags=(os.O_RDONLY|getattr(os,"O_BINARY",0)|
-               getattr(os,"O_NOFOLLOW",0))
+               getattr(os,"O_NOFOLLOW",0)|
+               (getattr(os,"O_NONBLOCK",0) if os.name=="posix" else 0))
         fd=os.open(path,flags)
         try:
             stream=os.fdopen(fd,"rb")
@@ -224,7 +228,10 @@ class DurableResultStore:
             os.close(fd)
             raise
         with stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            metadata=os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink!=1:
+                # A hard-linked receipt can alias a file outside the result
+                # store despite a safe-looking on-disk pathname.
                 raise ValueError("RESULT_RECEIPT_UNSAFE_TYPE")
             raw=stream.read(MAX_COMPRESSED_RECEIPT_BYTES+1)
         if len(raw)>MAX_COMPRESSED_RECEIPT_BYTES:
