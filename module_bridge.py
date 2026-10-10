@@ -521,7 +521,12 @@ def attach_hub(token,expected_module):
         # A caller must never install another module's valid hub bearer on
         # this standalone process (cross-module identity confusion).
         raise PermissionError("HUB_MODULE_IDENTITY_MISMATCH")
-    if not isinstance(token,str) or len(token)<32 or len(token)>200:
+    # Hub bearers are token_urlsafe() ASCII base64url. Reject Unicode,
+    # whitespace and header-control characters before any network request;
+    # urllib would otherwise fail later with a transport/encoding exception.
+    if (type(token) is not str or not 32<=len(token)<=200 or
+            not token.isascii() or
+            any(not (char.isalnum() or char in "-_") for char in token)):
         raise ValueError("INVALID_HUB_CREDENTIAL")
     with _runtime_state_lock:
         members=MCPBridge(token).peers()
