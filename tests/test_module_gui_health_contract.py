@@ -56,6 +56,25 @@ def test_health_uses_bounded_read_and_requires_own_module_identity():
     assert reads==[2049]
 
 
+def test_gui_health_rejects_duplicate_identity_and_nonfinite_json():
+    _source, method, name, port=_source_and_status()
+    rejected=(
+        b'{"ok":false,"ok":true,"id":"' + name.encode() + b'"}',
+        b'{"ok":true,"id":"other","id":"' + name.encode() + b'"}',
+        b'{"ok":true,"id":"' + name.encode() + b'","extra":NaN}',
+        b'{"ok":true,"id":"' + name.encode() + b'","extra":1e999}',
+    )
+    for wire in rejected:
+        health,reads=_probe(method,name,port,wire)
+        assert health["running"] is False
+        assert reads==[2049]
+    valid,reads=_probe(
+        method,name,port,
+        b'{"ok":true,"id":"' + name.encode() + b'","extra":1.2}')
+    assert valid["running"] is True
+    assert reads==[2049]
+
+
 def test_gui_local_opener_disables_proxy_and_redirects():
     source,method,name,port=_source_and_status()
     assert "build_opener(ProxyHandler({}), _NoStandaloneRedirect()).open" in source
