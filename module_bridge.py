@@ -6,6 +6,7 @@ import tempfile
 import hmac
 import threading
 import json
+import math
 import os
 import time
 from urllib.error import HTTPError
@@ -26,6 +27,12 @@ _local_opener=build_opener(ProxyHandler({}),_NoRedirect)
 _runtime_token=""
 _runtime_detached=False
 CANONICAL_MODULE_ID="easychange"
+def _finite_hub_json_number(token):
+    number=float(token)
+    if not math.isfinite(number):
+        raise ValueError("MCP_HUB_NONFINITE_JSON")
+    return number
+
 # Single consumer in this module process, including multiple MCPBridge objects.
 _processing_lock=threading.Lock()
 
@@ -157,7 +164,8 @@ class MCPBridge:
             raw=response.read(max_response+1)
         if len(raw)>max_response:
             raise ValueError("MCP_HUB_RESPONSE_TOO_LARGE")
-        data=json.loads(raw)
+        data=json.loads(raw,parse_constant=_finite_hub_json_number,
+                        parse_float=_finite_hub_json_number)
         if not isinstance(data,dict):raise ValueError("INVALID_MCP_HUB_RESPONSE")
         return data
 
