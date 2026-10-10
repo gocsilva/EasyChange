@@ -481,6 +481,39 @@ def test_cdp_ws_cumulative_fragment_budget_rejects_before_second_payload(monkeyp
     assert ws._recv_text()=="abcdef"
 
 
+@pytest.mark.parametrize("frames,error",(
+    (b"\x80\x01x","CDP_WEBSOCKET_INVALID_FRAGMENT_SEQUENCE"),
+    (b"\x01\x01a\x81\x01b","CDP_WEBSOCKET_INVALID_FRAGMENT_SEQUENCE"),
+    (b"\x82\x01x","CDP_WEBSOCKET_UNSUPPORTED_OPCODE"),
+    (b"\x83\x00","CDP_WEBSOCKET_UNSUPPORTED_OPCODE"),
+))
+def test_cdp_ws_invalid_fragment_order_or_opcode_fails_closed(frames,error):
+    class Input:
+        def __init__(self,raw):
+            self.data=io.BytesIO(raw)
+        def recv(self,n):
+            return self.data.read(n)
+    ws=browser_module._WebSocket.__new__(browser_module._WebSocket)
+    ws.sock=Input(frames)
+    with pytest.raises(browser_module.CdpError,match=error):
+        ws._recv_text()
+
+
+def test_cdp_ws_interleaved_ping_preserves_valid_fragmented_text(monkeypatch):
+    class Input:
+        def __init__(self,raw):
+            self.data=io.BytesIO(raw)
+        def recv(self,n):
+            return self.data.read(n)
+    ws=browser_module._WebSocket.__new__(browser_module._WebSocket)
+    ws.sock=Input(b"\x01\x02he\x89\x00\x80\x03llo")
+    observed=[]
+    monkeypatch.setattr(ws,"_send_frame",
+                        lambda data,opcode=1:observed.append((data,opcode)))
+    assert ws._recv_text()=="hello"
+    assert observed==[(b"",10)]
+
+
 def test_cdp_ws_rejects_invalid_utf8_in_text_frames():
     class Socket:
         def __init__(self, data):
