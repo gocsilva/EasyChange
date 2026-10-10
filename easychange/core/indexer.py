@@ -362,6 +362,17 @@ class Indexer:
         except (OSError, RuntimeError) as exc:
             raise ValueError("INVALID_PROTECTED_INDEX_PATH") from exc
         with self._lock, self._connect() as db:
+            # protect_path() may commit in another process after our initial
+            # _sync_protected_paths(). Hold SQLite's writer reservation and
+            # reread exclusions before indexing any bytes from this path.
+            db.execute("BEGIN IMMEDIATE")
+            protected_row = db.execute(
+                "SELECT value FROM index_meta WHERE key='protected_paths_v1'"
+            ).fetchone()
+            latest = self._decode_protected_paths(
+                protected_row[0] if protected_row else None)
+            self._protected_paths.update(latest)
+            self._protected_keys.update(item.casefold() for item in latest)
             if self._is_protected_path(relative):
                 db.execute("DELETE FROM files WHERE path=?", (relative,))
                 db.execute("DELETE FROM symbols WHERE path=?", (relative,))
