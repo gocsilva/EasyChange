@@ -221,6 +221,10 @@ def _transport_components(
     chunk_chars: int | None = None,
 ) -> tuple[dict[str, Any], bytes, str, int, int, str, str, str, bool]:
     value = _result_value(result)
+    # Strings such as "false" are truthy in Python. A QR success flag
+    # controls remote outcome interpretation and must be a real JSON boolean.
+    if "ok" in value and type(value["ok"]) is not bool:
+        raise ValueError("OPTICAL_RESULT_OK_BOOLEAN_REQUIRED")
     # Decoder identity limits are part of the on-wire contract. Reject an
     # invalid producer sequence before the expensive JSON/zlib QR stages.
     sequence = str(value.get("sequence") or "-")
@@ -276,7 +280,7 @@ def _header_json(
     header = {
         "p": HEADER_PROTOCOL, "v": 1,
         "s": str(value.get("sequence") or "-"), "f": True,
-        "ok": bool(value.get("ok")), "rc": value.get("code"),
+        "ok": value.get("ok") is True, "rc": value.get("code"),
         "l": len(raw), "n": int(total), "h": digest,
         "m": receipt.get("lifecycle_state") or receipt.get("state"),
         "cid": value.get("command_id"),
@@ -303,6 +307,8 @@ def encode_durable_result_header(header: dict[str, Any]) -> str:
         raise ValueError("durable result sequence required")
     if header.get("finished") is not True:
         raise ValueError("durable result is not terminal")
+    if type(header.get("success")) is not bool:
+        raise ValueError("OPTICAL_RESULT_OK_BOOLEAN_REQUIRED")
     try:
         payload_length = max(0, int(header.get("payload_length") or 0))
     except (TypeError, ValueError) as exc:
@@ -312,7 +318,7 @@ def encode_durable_result_header(header: dict[str, Any]) -> str:
     )
     rendered = json.dumps({
         "p": HEADER_PROTOCOL, "v": 1, "s": sequence, "f": True,
-        "ok": bool(header.get("success")), "rc": header.get("return_code"),
+        "ok": header["success"], "rc": header.get("return_code"),
         "l": payload_length, "n": 0, "h": str(header.get("sha256") or ""),
         "m": mutation_state, "cid": header.get("command_id"),
         "w": 0, "d": 1,
