@@ -132,6 +132,45 @@ def test_ec2_final_and_durable_headers_also_fit_qr_render_capacity():
         assert json.loads(header)["p"]=="EC2H"
 
 
+def test_durable_ec2_header_rejects_oversize_without_json_allocation():
+    import pytest
+    from unittest.mock import patch
+    import easychange.remote.optical_protocol as optical
+
+    basic={"sequence":"QBOUNDEDHDR1","finished":True,
+           "success":True,"payload_length":12,"mutation":True,
+           "sha256":"a"*64}
+    for field in ("command_id","mutation_state","return_code","sha256"):
+        for value in ("z"*100_000, ["z"]*100_000):
+            with pytest.raises(ValueError), patch.object(
+                    optical.json,"dumps",
+                    side_effect=AssertionError("UNBOUNDED_QR_JSON")) as encode:
+                optical.encode_durable_result_header({**basic,field:value})
+            encode.assert_not_called()
+    valid=json.loads(optical.encode_durable_result_header({
+        **basic,"mutation_state":"APPLIED","command_id":"C1"}))
+    assert valid["m"]=="APPLIED"
+    assert valid["cid"]=="C1"
+
+
+def test_final_ec2_header_rejects_oversize_metadata_before_dumps():
+    import pytest
+    from unittest.mock import patch
+    import easychange.remote.optical_protocol as optical
+
+    for field in ("command_id","code"):
+        value={"sequence":"QBOUNDEDHDR2","ok":True,
+               "data":{"message":"done"},field:"x"*120_000}
+        with pytest.raises(ValueError,match="OPTICAL_QR_CAPACITY_EXCEEDED"):
+            with patch.object(optical.json,"dumps",
+                              side_effect=AssertionError("UNBOUNDED_HEADER_JSON")):
+                optical.encode_result_header(value)
+    valid=json.loads(optical.encode_result_header({
+        "sequence":"QBOUNDEDHDR2","ok":True,"command_id":"C2",
+        "data":{"message":"done"}}))
+    assert valid["cid"]=="C2"
+
+
 def test_ec2_generated_qr_fits_real_m_level_byte_capacity():
     import pytest
     import easychange.remote.optical_protocol as optical
