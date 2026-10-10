@@ -166,10 +166,21 @@ class DurableResultStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     @contextmanager
+    def _bounded_local_claim_lock(self):
+        # The OS file lock has its own deadline, but an earlier stalled
+        # in-process writer could otherwise block this RLock indefinitely.
+        if not self._lock.acquire(timeout=2.0):
+            raise RuntimeError("RESULT_CLAIM_LOCK_BUSY")
+        try:
+            yield
+        finally:
+            self._lock.release()
+
+    @contextmanager
     def _claim_lock(self):
         # File locks are advisory: all claim writers must use this context.
         # A single byte is locked for the full read-then-write transaction.
-        with self._lock:
+        with self._bounded_local_claim_lock():
             # The claim inode is the authority for cross-process mutation
             # ownership. Never follow a symlink to an unrelated file/lock.
             if self._claim_lock_path.is_symlink():
