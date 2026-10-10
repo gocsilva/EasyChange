@@ -169,3 +169,51 @@ def test_git_search_filters_external_symlink_and_internal_generated_dirs(tmp_pat
     assert index._git_search(
         "TOKEN",regex=False,extension=None,path_prefix=None,
         case_sensitive=False)==[("normal.py","1:TOKEN=valid")]
+
+
+def test_update_path_rejects_workspace_internal_symlink_consistently(tmp_path):
+    project=tmp_path/"project"
+    project.mkdir()
+    real=project/"real.py"
+    real.write_text("def safe_function(): pass\n",encoding="utf-8")
+    alias=project/"alias.py"
+    try:
+        alias.symlink_to(real)
+    except (OSError,NotImplementedError):
+        pytest.skip("symlink unavailable")
+    index=Indexer(project)
+    with pytest.raises(ValueError,match="INVALID_PROTECTED_INDEX_PATH"):
+        index.update_path("alias.py")
+    index.refresh(force=True)
+    with index._connect() as db:
+        files=[row[0] for row in db.execute("SELECT path FROM files").fetchall()]
+    assert files==["real.py"]
+
+
+def test_update_path_purges_legacy_index_row_in_ignored_directory(tmp_path):
+    project=tmp_path/"project"
+    hidden=project/"node_modules"
+    hidden.mkdir(parents=True)
+    file=hidden/"cached.py"
+    file.write_text("TOKEN_THAT_MUST_NOT_BE_INDEXED=1\n",encoding="utf-8")
+    index=Indexer(project)
+    with index._connect() as db:
+        db.execute(
+            "INSERT INTO files(path,extension,size,mtime_ns,sha256,language,content) "
+            "VALUES(?,?,?,?,?,?,?)",
+            ("node_modules/cached.py",".py",file.stat().st_size,1,"old",
+             "python","TOKEN_THAT_MUST_NOT_BE_INDEXED=1"))
+        db.execute(
+            "INSERT INTO symbols(path,name,kind,line,column_no,signature,file_hash) "
+            "VALUES(?,?,?,?,?,?,?)",
+            ("node_modules/cached.py","TOKEN_THAT_MUST_NOT_BE_INDEXED",
+             "function",1,1,"old","old"))
+    status=index.update_path("node_modules/cached.py")
+    assert status["ignored"] is True
+    with index._connect() as db:
+        assert db.execute(
+            "SELECT count(*) FROM files WHERE path='node_modules/cached.py'"
+        ).fetchone()[0]==0
+        assert db.execute(
+            "SELECT count(*) FROM symbols WHERE path='node_modules/cached.py'"
+        ).fetchone()[0]==0
