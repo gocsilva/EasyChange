@@ -1028,6 +1028,26 @@ class TestHubRedirectBoundary(unittest.TestCase):
              patch.object(module_bridge,"_runtime_detached",True):
             self.assertTrue(module_bridge.self_test()["standalone"])
 
+    def test_bigint_request_budget_is_enforced_before_json_encoding(self):
+        from unittest.mock import patch
+
+        client=module_bridge.MCPBridge(token="T"*48)
+        oversized=1 << (17408*4)
+        with patch.object(module_bridge.json,"JSONEncoder",
+                          side_effect=AssertionError("ENCODER_UNEXPECTED")) as codec, \
+             patch.object(module_bridge._local_opener,"open",
+                          side_effect=AssertionError("NETWORK_UNEXPECTED")) as wire:
+            for payload in ({"value":oversized},
+                            {"nested":[{"value":-oversized}]}):
+                with self.subTest(kind=len(payload)):
+                    with self.assertRaisesRegex(
+                            ValueError,"MCP_BUS_REQUEST_TOO_LARGE"):
+                        client._request("/v1/send",
+                                        {"target":"mcp","topic":"bigint.test",
+                                         "payload":payload})
+        codec.assert_not_called()
+        wire.assert_not_called()
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
