@@ -7,6 +7,7 @@ import base64
 import binascii
 from contextlib import contextmanager
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -56,8 +57,11 @@ def _preflight_result_json(value: Any, byte_budget: int) -> None:
             if identity in ancestors:
                 raise ValueError("Circular reference detected")
             ancestors.add(identity)
-            children=(iter(item.items()) if isinstance(item,dict)
-                      else iter(item))
+            # .items() yields opaque (key, value) tuples and bypasses the
+            # preflight for nested strings, dict keys and cycles. Stream keys
+            # and values separately without copying the dictionary.
+            children=(itertools.chain(item.keys(),item.values())
+                      if isinstance(item,dict) else iter(item))
             frames.append((children,identity))
 
 
