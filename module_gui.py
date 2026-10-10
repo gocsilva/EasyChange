@@ -117,8 +117,17 @@ class ModuleGUI:
                     if self._closing or generation!=self._refresh_generation:
                         return
                     owned=self.process
-                    if (not report["running"] and owned is not None
-                            and owned.poll() is None):
+                    try:
+                        owned_running=owned is not None and owned.poll() is None
+                    except (OSError,ValueError) as exc:
+                        # Unknown child state must remain owned; do not mark
+                        # it stopped or schedule another startup based on a
+                        # failed poll() of the process handle.
+                        self._cancel_readiness()
+                        self.message.set("Estado do serviço desconhecido: "+
+                                         type(exc).__name__)
+                        return
+                    if not report["running"] and owned_running:
                         self.message.set("Serviço iniciando; aguardando /health...")
                         # Repeated manual refreshes must not multiply the
                         # long-poll timers during a slow module startup.
