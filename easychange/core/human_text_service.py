@@ -47,7 +47,6 @@ class HumanTextService:
         if not self.path.exists():
             return self._empty_info()
 
-        size = self.path.stat().st_size
         digest = hashlib.sha256()
         decoder = codecs.getincrementaldecoder("utf-8")("strict")
         chars = 0
@@ -56,8 +55,11 @@ class HumanTextService:
         last_byte = b""
         try:
             with self.path.open("rb") as handle:
+                opened=os.fstat(handle.fileno())
+                if opened.st_size>self.max_bytes:
+                    raise ValueError("HUMAN_TEXT_EXCEEDS_CONFIGURED_LIMIT")
                 while True:
-                    block = handle.read(1024 * 1024)
+                    block = handle.read(min(1024*1024,self.max_bytes+1))
                     if not block:
                         break
                     saw_data = True
@@ -65,12 +67,21 @@ class HumanTextService:
                     digest.update(block)
                     newlines += block.count(b"\n")
                     chars += len(decoder.decode(block, final=False))
+                    if handle.tell()>self.max_bytes:
+                        raise ValueError("HUMAN_TEXT_EXCEEDS_CONFIGURED_LIMIT")
                 chars += len(decoder.decode(b"", final=True))
+                stat=os.fstat(handle.fileno())
+            # Hash and metadata must refer to one file generation; do not
+            # publish old bytes with a replacement file's inode/timestamps.
+            current=self.path.stat()
+            signature=lambda s:(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns)
+            if signature(opened)!=signature(stat) or signature(stat)!=signature(current):
+                raise ValueError("HUMAN_TEXT_FILE_CHANGED_RETRY")
         except UnicodeDecodeError as exc:
             raise ValueError("HUMAN_TEXT_INVALID_UTF8") from exc
 
+        size = stat.st_size
         lines = 0 if not saw_data else newlines + (0 if last_byte == b"\n" else 1)
-        stat = self.path.stat()
         return {
             "exists": True,
             "bytes": size,
