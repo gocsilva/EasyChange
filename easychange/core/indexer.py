@@ -505,13 +505,34 @@ class Indexer:
 
     def files(self, offset: int = 0, limit: int = 100) -> list[dict]:
         _validate_index_page(offset, limit)
+        self._sync_protected_paths()
         if not self._fully_indexed:
             self.refresh()
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT path,extension,size,mtime_ns,sha256,language FROM files ORDER BY path LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
+            if not self._protected_keys:
+                rows = db.execute(
+                    "SELECT path,extension,size,mtime_ns,sha256,language FROM files ORDER BY path LIMIT ? OFFSET ?",
+                    (limit, offset),
+                ).fetchall()
+            else:
+                # A stale index row must not leak a protected filename. Page
+                # only after filtering; applying SQL OFFSET first would hide
+                # valid entries when a protected row sorts before them.
+                rows = []
+                skipped = 0
+                cursor = db.execute(
+                    "SELECT path,extension,size,mtime_ns,sha256,language FROM files ORDER BY path"
+                )
+                for row in cursor:
+                    if (self._is_protected_path(row[0]) or
+                            any(part in SKIP_DIRS for part in Path(row[0]).parts)):
+                        continue
+                    if skipped < offset:
+                        skipped += 1
+                        continue
+                    rows.append(row)
+                    if len(rows) >= limit:
+                        break
         return [dict(zip(("path", "extension", "size", "mtime_ns", "hash", "language"), row)) for row in rows]
 
     def count(self) -> int:
