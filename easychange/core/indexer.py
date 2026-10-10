@@ -266,12 +266,15 @@ class Indexer:
         with self._lock, self._connect() as db:
             persisted = {row[0]: row[1:3] for row in db.execute("SELECT path,size,mtime_ns FROM files")}
         existing = {} if self._force_rebuild else persisted
+        # Resolve the trusted workspace boundary once per scan, not once
+        # for every source file in a large repository.
+        trusted_root = self.root.resolve()
 
         for path in self.root.rglob("*"):
             try:
                 if not path.is_file() or path.is_symlink():
                     continue
-                if not path.resolve().is_relative_to(self.root.resolve()):
+                if not path.resolve().is_relative_to(trusted_root):
                     continue
                 relative_path = path.relative_to(self.root)
                 if any(part in SKIP_DIRS for part in relative_path.parts):
