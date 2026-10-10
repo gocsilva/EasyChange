@@ -1729,6 +1729,27 @@ class CommandService:
                 target_sequence = str(query_item.get("sequence") or query_item.get("target_sequence") or "").upper()
                 if not re.fullmatch(r"Q[A-Z0-9_-]{4,40}", target_sequence):
                     return Result(False, query_kind, error="VALID_TARGET_SEQUENCE_REQUIRED", code="INVALID_SEQUENCE")
+                # Validate chunk sizing on the small control-plane request
+                # before touching stored multi-megabyte result payloads.
+                sized_kinds={"result_header","result_meta","result_chunk",
+                             "result_chunks","result_stream_meta",
+                             "result_stream_chunk","result_stream_chunks"}
+                parsed_chunk_bytes=None
+                if query_kind in sized_kinds:
+                    raw_size=query_item.get("chunk_bytes")
+                    if raw_size not in (None,"",0):
+                        if type(raw_size) is int:
+                            parsed_chunk_bytes=raw_size
+                        elif (isinstance(raw_size,str) and len(raw_size)<=32
+                              and raw_size.strip().lstrip("+-").isdecimal()):
+                            parsed_chunk_bytes=int(raw_size)
+                        else:
+                            return Result(
+                                False,query_kind,error="INVALID_RESULT_CHUNK_BYTES",
+                                code=("INVALID_RESULT_STREAM_CHUNK"
+                                      if "stream" in query_kind
+                                      else "INVALID_RESULT_CHUNK"))
+                        parsed_chunk_bytes=max(256,min(4096,parsed_chunk_bytes))
                 if query_kind in {"result_chunk", "result_stream_chunk"}:
                     raw_index = query_item.get("chunk_index")
                     try:
@@ -1772,18 +1793,18 @@ class CommandService:
                 elif query_kind == "result_header":
                     data = self.result_store.header(
                         target_sequence,
-                        chunk_bytes=int(query_item.get("chunk_bytes") or 640),
+                        chunk_bytes=(parsed_chunk_bytes if parsed_chunk_bytes is not None else 640),
                     )
                 elif query_kind == "result_get":
                     data = self.result_store.result(target_sequence)
                 elif query_kind == "result_meta":
-                    data = self.result_store.chunk_meta(target_sequence, chunk_bytes=int(query_item.get("chunk_bytes") or 320))
+                    data = self.result_store.chunk_meta(target_sequence, chunk_bytes=(parsed_chunk_bytes if parsed_chunk_bytes is not None else 320))
                 elif query_kind == "result_chunk":
                     try:
                         data = self.result_store.chunk(
                             target_sequence,
                             parsed_index,
-                            chunk_bytes=int(query_item.get("chunk_bytes") or 320),
+                            chunk_bytes=(parsed_chunk_bytes if parsed_chunk_bytes is not None else 320),
                             compress_payload=bool(query_item.get("compressed")),
                         )
                     except (TypeError, ValueError, IndexError) as exc:
@@ -1796,7 +1817,7 @@ class CommandService:
                         data = self.result_store.chunks(
                             target_sequence,
                             raw_indexes,
-                            chunk_bytes=int(query_item.get("chunk_bytes") or 1536),
+                            chunk_bytes=(parsed_chunk_bytes if parsed_chunk_bytes is not None else 1536),
                             max_chunks=8,
                             compress_payload=bool(query_item.get("compressed")),
                         )
@@ -1805,7 +1826,7 @@ class CommandService:
                 elif query_kind == "result_stream_meta":
                     data = self.result_store.stream_meta(
                         target_sequence,
-                        chunk_bytes=int(query_item.get("chunk_bytes") or 2048),
+                        chunk_bytes=(parsed_chunk_bytes if parsed_chunk_bytes is not None else 2048),
                         max_ratio=parsed_ratio,
                     )
                 elif query_kind == "result_stream_chunk":
@@ -1813,7 +1834,7 @@ class CommandService:
                         data = self.result_store.stream_chunk(
                             target_sequence,
                             parsed_index,
-                            chunk_bytes=int(query_item.get("chunk_bytes") or 2048),
+                            chunk_bytes=(parsed_chunk_bytes if parsed_chunk_bytes is not None else 2048),
                             max_ratio=parsed_ratio,
                         )
                     except (TypeError, ValueError, IndexError) as exc:
@@ -1826,7 +1847,7 @@ class CommandService:
                         data = self.result_store.stream_chunks(
                             target_sequence,
                             raw_indexes,
-                            chunk_bytes=int(query_item.get("chunk_bytes") or 2048),
+                            chunk_bytes=(parsed_chunk_bytes if parsed_chunk_bytes is not None else 2048),
                             max_chunks=8,
                             max_ratio=parsed_ratio,
                         )
