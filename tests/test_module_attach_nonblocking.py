@@ -97,5 +97,48 @@ class AttachConcurrencyTests(unittest.TestCase):
             self.assertEqual(bridge._runtime_state_epoch,1)
 
 
+    def test_newer_verified_token_preempts_slower_different_token(self):
+        entered=threading.Event()
+        release=threading.Event()
+        outcomes=[]
+        canonical=bridge.CANONICAL_MODULE_ID
+        slower="B"*48
+        newer="C"*48
+
+        def peers(*_args, **_kwargs):
+            if threading.current_thread().name=="older-attach":
+                entered.set()
+                if not release.wait(3):
+                    raise AssertionError("simulated peer request exceeded deadline")
+            return {"ok":True,"self":canonical}
+
+        def delayed():
+            try:
+                outcomes.append(bridge.attach_hub(slower,canonical))
+            except Exception as exc:
+                outcomes.append(exc)
+
+        locks=self._isolated()
+        with locks[0],locks[1],locks[2], \
+             patch.object(bridge.MCPBridge,"peers",side_effect=peers):
+            thread=threading.Thread(target=delayed,name="older-attach",daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertEqual(bridge.attach_hub(newer,canonical),
+                                 {"connected":True,"id":canonical})
+            finally:
+                release.set()
+                thread.join(3)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(len(outcomes),1)
+            self.assertIsInstance(outcomes[0],RuntimeError)
+            self.assertEqual(str(outcomes[0]),"HUB_ATTACH_SUPERSEDED")
+            self.assertEqual(bridge._runtime_token,newer)
+            self.assertFalse(bridge._runtime_detached)
+            self.assertEqual(bridge._runtime_state_epoch,1)
+
+
+
 if __name__=="__main__":
     unittest.main()
