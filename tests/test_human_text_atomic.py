@@ -227,6 +227,31 @@ def test_malformed_metadata_digest_is_not_trusted_as_buffer_identity(tmp_path):
     assert verified["sha256"]!="WRONG"
 
 
+def test_save_rejects_unicode_byte_expansion_before_atomic_replace(tmp_path):
+    service=HumanTextService(tmp_path)
+    original=service.save("keep existing")
+    service.max_bytes=14
+    # Four code points fit in the character limit, but their UTF-8 encoding
+    # requires 16 bytes. The rejection must not touch an existing buffer.
+    with pytest.raises(ValueError, match="HUMAN_TEXT_TOO_LARGE"):
+        service.save("🚀"*4)
+    assert service.path.read_text(encoding="utf-8")=="keep existing"
+    assert service.meta_path.exists()
+    assert service.info()["sha256"]==original["sha256"]
+
+    valid="🚀"*3
+    saved=service.save(valid)
+    assert saved["bytes"]==12
+    assert service.load()==valid
+
+
+def test_save_invalid_utf8_surrogate_is_deterministic_input_error(tmp_path):
+    service=HumanTextService(tmp_path)
+    with pytest.raises(ValueError, match="HUMAN_TEXT_INVALID_UTF8"):
+        service.save("invalid surrogate: \ud800")
+    assert not service.path.exists()
+
+
 def test_human_text_save_rejects_impossible_character_count_before_utf8_copy(tmp_path):
     service=HumanTextService(tmp_path)
     service.max_bytes=16
