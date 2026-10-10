@@ -33,6 +33,23 @@ def _finite_hub_json_number(token):
         raise ValueError("MCP_HUB_NONFINITE_JSON")
     return number
 
+
+def _hub_unique_fields(pairs):
+    result={}
+    for key,value in pairs:
+        if key in result:
+            raise ValueError("MCP_HUB_DUPLICATE_JSON_KEY")
+        result[key]=value
+    return result
+
+
+def _decode_hub_response(raw):
+    # Ambiguous accepted/retryable fields must never authorize replay of a
+    # potentially mutating call, even when received from a local TCP port.
+    return json.loads(raw,parse_constant=_finite_hub_json_number,
+                      parse_float=_finite_hub_json_number,
+                      object_pairs_hook=_hub_unique_fields)
+
 # Single consumer in this module process, including multiple MCPBridge objects.
 _processing_lock=threading.Lock()
 
@@ -172,8 +189,7 @@ class MCPBridge:
             raw=response.read(max_response+1)
         if len(raw)>max_response:
             raise ValueError("MCP_HUB_RESPONSE_TOO_LARGE")
-        data=json.loads(raw,parse_constant=_finite_hub_json_number,
-                        parse_float=_finite_hub_json_number)
+        data=_decode_hub_response(raw)
         if not isinstance(data,dict):raise ValueError("INVALID_MCP_HUB_RESPONSE")
         return data
 
@@ -192,7 +208,7 @@ class MCPBridge:
                 if exc.code!=429:
                     raise
                 try:
-                    details=json.loads(exc.read(2048))
+                    details=_decode_hub_response(exc.read(2048))
                 except (ValueError,UnicodeError):
                     raise exc
                 if (not isinstance(details,dict) or
@@ -218,7 +234,7 @@ class MCPBridge:
                 if exc.code!=429:
                     raise
                 try:
-                    details=json.loads(exc.read(2048))
+                    details=_decode_hub_response(exc.read(2048))
                 except (ValueError,UnicodeError):
                     raise exc
                 if (not isinstance(details,dict) or
