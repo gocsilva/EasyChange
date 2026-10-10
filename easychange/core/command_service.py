@@ -593,8 +593,21 @@ class CommandService:
         # Preserve compatibility with the compact legacy session journal while
         # migrating successful replays to the durable store.
         with self._guard:
-            journal = dict(self.state_store.data.get("ec_results", {}))
+            # A torn/legacy session journal must not turn an unknown prior
+            # execution into permission to repeat a filesystem mutation.
+            # Durable receipts are checked first, so refuse only when this
+            # fallback journal itself cannot be interpreted safely.
+            legacy_root = self.state_store.data.get("ec_results", {})
+            if not isinstance(legacy_root, dict):
+                return Result(
+                    False, "ec", error="Legacy execution journal is unreadable",
+                    code="SEQUENCE_STATE_UNAVAILABLE", sequence=sequence)
+            journal = dict(legacy_root)
             previous = journal.get(sequence)
+            if previous is not None and not isinstance(previous, dict):
+                return Result(
+                    False, "ec", error="Legacy sequence entry is unreadable",
+                    code="SEQUENCE_STATE_UNAVAILABLE", sequence=sequence)
             if previous:
                 if previous.get("sha256") != digest:
                     return Result(False, "ec", error="Sequence reused with different command",
