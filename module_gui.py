@@ -49,6 +49,7 @@ class ModuleGUI:
         self.process=None
         self._closing=False
         self._refresh_inflight=False
+        self._readiness_job=None
         parent=ttk.Frame(self.root,padding=18)
         parent.pack(fill="both",expand=True)
         ttk.Label(parent,text=NAME,font=("Segoe UI",17,"bold")).pack(anchor="w")
@@ -63,6 +64,20 @@ class ModuleGUI:
         ttk.Label(parent,textvariable=self.message,wraplength=460).pack(anchor="w",pady=12)
         self.root.protocol("WM_DELETE_WINDOW",self.close)
         self.refresh()
+
+    def _cancel_readiness(self):
+        pending=getattr(self,"_readiness_job",None)
+        self._readiness_job=None
+        if pending is not None:
+            try:
+                self.root.after_cancel(pending)
+            except (RuntimeError,tk.TclError):
+                pass
+
+    def _readiness_tick(self):
+        self._readiness_job=None
+        if not self._closing:
+            self.refresh()
 
     def refresh(self):
         if self._closing or self._refresh_inflight:
@@ -84,8 +99,13 @@ class ModuleGUI:
                     if (not report["running"] and owned is not None
                             and owned.poll() is None):
                         self.message.set("Serviço iniciando; aguardando /health...")
-                        self.root.after(1600,self.refresh)
+                        # Repeated manual refreshes must not multiply the
+                        # long-poll timers during a slow module startup.
+                        if getattr(self,"_readiness_job",None) is None:
+                            self._readiness_job=self.root.after(
+                                1600,self._readiness_tick)
                     else:
+                        self._cancel_readiness()
                         self.message.set(
                             "Serviço ativo" if report["running"] else "Serviço parado")
                 finally:
@@ -156,6 +176,7 @@ class ModuleGUI:
         self.root.after(700,self.refresh)
 
     def stop(self):
+        self._cancel_readiness()
         process=self.process
         if process and process.poll() is None:
             try:
@@ -178,6 +199,7 @@ class ModuleGUI:
 
     def close(self):
         self._closing=True
+        self._cancel_readiness()
         if self.stop():
             self.root.destroy()
         else:
