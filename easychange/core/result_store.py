@@ -955,6 +955,20 @@ class DurableResultStore:
         raise RuntimeError("RESULT_RECEIPT_CHANGED_DURING_READ")
 
     @staticmethod
+    def _validated_batch_limit(value: int, error_code: str) -> int:
+        # A caller-controlled text value must not trigger unbounded decimal
+        # parsing before the chunk's own bounded result read.
+        if (isinstance(value, bool) or
+                not isinstance(value, (int, float, str)) or
+                (isinstance(value, str) and len(value) > 32)):
+            raise ValueError(error_code)
+        try:
+            number = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(error_code) from exc
+        return max(1, min(16, number))
+
+    @staticmethod
     def _validated_stream_options(
         chunk_bytes: int, max_ratio: float,
     ) -> tuple[int, float]:
@@ -1044,7 +1058,8 @@ class DurableResultStore:
             raise ValueError("RESULT_STREAM_CHUNK_INDEXES_REQUIRED")
         chunk_bytes, max_ratio = self._validated_stream_options(
             chunk_bytes, max_ratio)
-        limit = max(1, min(16, int(max_chunks)))
+        limit = self._validated_batch_limit(
+            max_chunks, "INVALID_RESULT_STREAM_MAX_CHUNKS")
         # The returned batch is capped at 16, but duplicate raw indexes could
         # otherwise make parsing cost grow without a bound. Check the raw
         # request before iterating, and deduplicate in O(1) per index.
@@ -1184,7 +1199,8 @@ class DurableResultStore:
         """
         if not isinstance(indexes, list) or not indexes:
             raise ValueError("RESULT_CHUNK_INDEXES_REQUIRED")
-        limit = max(1, min(16, int(max_chunks)))
+        limit = self._validated_batch_limit(
+            max_chunks, "INVALID_RESULT_MAX_CHUNKS")
         # An unbounded duplicate request must not do quadratic list searches
         # before noticing that only 16 distinct chunks can be returned.
         if len(indexes) > 256:
