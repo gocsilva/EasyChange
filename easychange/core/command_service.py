@@ -585,6 +585,15 @@ class CommandService:
                         False, "ec", error="Sequence reused with different command",
                         code="SEQUENCE_CONFLICT", sequence=sequence)
                 raise
+            except RuntimeError as exc:
+                if str(exc) in ("RESULT_CLAIM_LOCK_BUSY",
+                                "RESULT_CLAIM_LOCK_UNAVAILABLE"):
+                    # No claim was granted; callers may retry the same
+                    # sequence later. Never execute before ownership exists.
+                    return None, Result(
+                        False, "ec", error="Sequence reservation unavailable",
+                        code="SEQUENCE_BUSY", sequence=sequence)
+                raise
             if not acquired:
                 return None, _reuse_durable_receipt(record)
             return record, None
