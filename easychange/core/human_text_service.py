@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any
 
 
+MAX_HUMAN_TEXT_METADATA_BYTES = 65_536
+
+
 class HumanTextService:
     """Workspace-scoped human text buffer stored outside the Git workspace."""
 
@@ -135,7 +138,14 @@ class HumanTextService:
     def info(self) -> dict[str, Any]:
         if self.path.exists() and self.meta_path.exists():
             try:
-                value = json.loads(self.meta_path.read_text(encoding="utf-8"))
+                # The metadata file is tiny in normal operation. A corrupted
+                # or externally replaced file must not allocate unbounded RAM
+                # before the primary text buffer's size guard runs.
+                with self.meta_path.open("rb") as stream:
+                    raw = stream.read(MAX_HUMAN_TEXT_METADATA_BYTES + 1)
+                if len(raw) > MAX_HUMAN_TEXT_METADATA_BYTES:
+                    raise ValueError("HUMAN_TEXT_METADATA_TOO_LARGE")
+                value = json.loads(raw.decode("utf-8"))
                 file_stat = self.path.stat()
                 if (
                     isinstance(value, dict)
@@ -143,7 +153,9 @@ class HumanTextService:
                     and int(value["bytes"]) == file_stat.st_size
                     and value.get("file_mtime_ns") == file_stat.st_mtime_ns
                     and value.get("file_inode") == file_stat.st_ino
-                    and value.get("sha256")
+                    and isinstance(value.get("sha256"), str)
+                    and len(value["sha256"]) == 64
+                    and all(c in "0123456789abcdef" for c in value["sha256"])
                 ):
                     return {
                         **value,
@@ -151,7 +163,7 @@ class HumanTextService:
                         "max_bytes": self.max_bytes,
                         "complete": True,
                     }
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            except (OSError, ValueError, TypeError, UnicodeError):
                 pass
 
         meta = self._scan_info()
@@ -179,6 +191,10 @@ class HumanTextService:
     def save(self, text: str) -> dict[str, Any]:
         if not isinstance(text, str):
             raise TypeError("HUMAN_TEXT_STRING_REQUIRED")
+        # Even ASCII cannot fit once the code-point count exceeds the byte
+        # budget. Reject before creating another very large UTF-8 allocation.
+        if len(text) > self.max_bytes:
+            raise ValueError("HUMAN_TEXT_TOO_LARGE")
         raw = text.encode("utf-8")
         if len(raw) > self.max_bytes:
             raise ValueError(
