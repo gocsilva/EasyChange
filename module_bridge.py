@@ -257,6 +257,9 @@ class MCPBridge:
                 if (not isinstance(message,dict) or
                         type(message.get("id")) is not int or message["id"]<1):
                     raise ValueError("INVALID_MCP_INBOX_MESSAGE")
+                if ("recipient" in page and
+                        message.get("target") != CANONICAL_MODULE_ID):
+                    raise ValueError("MCP_INBOX_TARGET_MISMATCH")
                 if message["id"] in unique:
                     raise ValueError("DUPLICATE_MCP_INBOX_ID")
                 unique.add(message["id"])
