@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -68,6 +69,8 @@ class MainWindow(QMainWindow):
     # matters more than theoretical QR count.
     _OPTICAL_NORMAL_SLOTS = 4
     _OPTICAL_BURST_SLOTS = 16
+    _OPTICAL_PIXMAP_CACHE_ENTRIES = 48
+    _OPTICAL_PIXMAP_CACHE_BYTES = 32 * 1024 * 1024
     _OPTICAL_BURST_COLUMNS = 4
     _OPTICAL_COMPACT_QR_SIZE = 220
     _OPTICAL_BURST_QR_SIZE = 160
@@ -232,7 +235,7 @@ class MainWindow(QMainWindow):
 
         self._optical_payloads: list[str] = []
         self._optical_header_payload: str | None = None
-        self._optical_pixmaps: dict[str, QPixmap] = {}
+        self._optical_pixmaps: OrderedDict[str, QPixmap] = OrderedDict()
         self._optical_page = 0
         self._optical_burst = False
         self._optical_render_generation = 0
@@ -762,6 +765,22 @@ class MainWindow(QMainWindow):
                 int(self.service.optical_transport_config()["current_ms"])
             )
 
+    def _cache_optical_pixmap(self, payload: str, pixmap: QPixmap) -> None:
+        cache = self._optical_pixmaps
+        cache[payload] = pixmap
+        cache.move_to_end(payload)
+        # QPixmap normally uses 32-bit backing storage. An LRU also bounds
+        # the number of images kept for long, rotating EC2 carousels. Never
+        # evict the 16 symbols of one page while it is being assembled.
+        def retained_bytes() -> int:
+            return sum(max(1, picture.width()) * max(1, picture.height()) * 4
+                       for picture in cache.values())
+        while (len(cache) > self._OPTICAL_PIXMAP_CACHE_ENTRIES
+               or retained_bytes() > self._OPTICAL_PIXMAP_CACHE_BYTES):
+            if len(cache) <= self._OPTICAL_BURST_SLOTS:
+                break
+            cache.popitem(last=False)
+
     def _show_terminal_optical_header_fast(self, result) -> bool:
         """Paint a durable terminal receipt before EC2 payload encoding finishes."""
         sequence = str(getattr(result, "sequence", "") or "")
@@ -777,7 +796,7 @@ class MainWindow(QMainWindow):
             return False
 
         self._optical_header_payload = payload
-        self._optical_pixmaps[payload] = pixmap
+        self._cache_optical_pixmap(payload, pixmap)
         label = self.machine_qrs[0]
         label.setPixmap(pixmap)
         label.setVisible(True)
@@ -944,12 +963,13 @@ class MainWindow(QMainWindow):
         payloads = pending.get("payloads") or []
         index = int(pending.get("index") or 0)
         while index < len(payloads) and payloads[index] in self._optical_pixmaps:
+            self._optical_pixmaps.move_to_end(payloads[index])
             index += 1
         pending["index"] = index
         if index < len(payloads):
             payload = payloads[index]
             try:
-                self._optical_pixmaps[payload] = self._build_optical_pixmap(payload)
+                self._cache_optical_pixmap(payload, self._build_optical_pixmap(payload))
             except Exception as exc:
                 # Invalid/oversized optical data cannot wedge the incremental
                 # renderer or leave an endless pending page after a Qt callback.
