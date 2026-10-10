@@ -969,7 +969,7 @@ def test_legacy_receipt_with_corrupt_duration_preserves_replay_identity(tmp_path
     assert finished["state"]=="DONE"
     for field,value in (("started_at","not-a-time"),
                         ("finished_at",[]),
-                        ("started_at",float("inf")),
+                        ("started_at","inf"),
                         ("finished_at",-1.0)):
         with pytest.raises(RuntimeError,match="RESULT_RECEIPT_UNREADABLE"):
             current=store.get(sequence)
