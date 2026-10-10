@@ -225,6 +225,58 @@ def test_cleanup_retains_completed_mutation_claim_after_result_ttl(tmp_path, mon
     assert read_prior["result"] is None
 
 
+def test_invalid_chunk_sizes_never_load_durable_result_or_raise_uncaught(tmp_path, monkeypatch):
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        def forbidden(*args,**kwargs):
+            raise AssertionError("INVALID_CHUNK_SIZE_DECODED_RESULT")
+
+        for method in ("header","chunk_meta","chunk","chunks",
+                       "stream_meta","stream_chunk","stream_chunks"):
+            monkeypatch.setattr(service.result_store,method,forbidden)
+        cases=(
+            ("result_header",{}),
+            ("result_meta",{}),
+            ("result_chunk",{"chunk_index":0}),
+            ("result_chunks",{"chunk_indexes":[0]}),
+            ("result_stream_meta",{}),
+            ("result_stream_chunk",{"chunk_index":0}),
+            ("result_stream_chunks",{"chunk_indexes":[0]}),
+        )
+        for operation,extra in cases:
+            for invalid in ("9"*100000,{},[],True,0.5,"bad"):
+                reply=service._execute_structured({
+                    "op":"operation","type":operation,
+                    "sequence":"QSIZELIMIT01","chunk_bytes":invalid,
+                    **extra,
+                })
+                assert reply.ok is False
+                assert reply.code==(
+                    "INVALID_RESULT_STREAM_CHUNK"
+                    if "stream" in operation else "INVALID_RESULT_CHUNK")
+    finally:
+        service.close()
+
+
+def test_valid_numeric_chunk_size_is_clamped_before_single_chunk_dispatch(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        observer=Mock(return_value={"chunk_index":0})
+        monkeypatch.setattr(service.result_store,"chunk",observer)
+        for raw,expected in (("1024",1024),("1",256),("9000",4096)):
+            response=service._execute_structured({
+                "op":"operation","type":"result_chunk",
+                "sequence":"QVALIDSIZE01","chunk_index":"0",
+                "chunk_bytes":raw,
+            })
+            assert response.ok is True
+            assert observer.call_args.kwargs["chunk_bytes"]==expected
+    finally:
+        service.close()
+
+
 def test_invalid_optical_recovery_indexes_never_decode_existing_receipt(tmp_path, monkeypatch):
     service=CommandService(Workspace.open(tmp_path))
     try:
