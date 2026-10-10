@@ -86,6 +86,27 @@ def test_ec2_sender_rejects_coerced_sequence_before_encoding():
     assert decode_result_chunks(valid)["sequence"]=="QVALID1"
 
 
+def test_ec2_headers_refuse_unencodable_unicode_before_json_serialization():
+    import pytest
+    from unittest.mock import patch
+    import easychange.remote.optical_protocol as optical
+
+    base={"sequence":"QHEADER_UTF8","finished":True,"success":True,
+          "sha256":"a"*64,"payload_length":32,"mutation":True,
+          "mutation_state":"APPLIED","command_id":"CVALID"}
+    for malformed in (chr(0xD800), "bad"+chr(0xDFFF)):
+        with patch.object(optical.json,"dumps",
+                          side_effect=AssertionError("INVALID_HEADER_SERIALIZED")) as encoder:
+            with pytest.raises(ValueError,match="durable result sequence required"):
+                optical.encode_durable_result_header(
+                    {**base,"sequence":malformed})
+            for name in ("mutation_state","command_id","return_code"):
+                with pytest.raises(ValueError,match="OPTICAL_HEADER_FIELD_INVALID"):
+                    optical.encode_durable_result_header(
+                        {**base,name:malformed})
+            encoder.assert_not_called()
+
+
 def test_durable_ec2_rejects_falsy_nonboolean_mutations_and_invalid_lengths():
     import pytest
     from easychange.remote.optical_protocol import encode_durable_result_header
