@@ -779,7 +779,10 @@ class DurableResultStore:
         # between two separate lookups.
         stream, stream_hash, result_hash, result_bytes = payload
         size = max(256, min(4096, int(chunk_bytes)))
-        ratio_limit = max(0.10, min(1.0, float(max_ratio)))
+        requested_ratio = float(max_ratio)
+        if not math.isfinite(requested_ratio):
+            raise ValueError("INVALID_RESULT_STREAM_MAX_RATIO")
+        ratio_limit = max(0.10, min(1.0, requested_ratio))
         ratio = (len(stream) / result_bytes) if result_bytes else 1.0
         eligible = bool(result_bytes >= 4096 and ratio <= ratio_limit)
         total = max(1, (len(stream) + size - 1) // size) if eligible else 0
