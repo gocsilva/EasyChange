@@ -266,6 +266,24 @@ class TestHubRedirectBoundary(unittest.TestCase):
                    side_effect=TimeoutError("SERVICE_UNAVAILABLE")):
             self.assertFalse(esp_online())
 
+    def test_local_peer_health_rejects_nan_and_overflow_json(self):
+        import io
+        from unittest.mock import patch
+        from mcp_adapter.module_service import esp_online
+
+        for raw in (
+            b'{"ok":true,"id":"esp","unused":NaN}',
+            b'{"ok":true,"id":"esp","unused":Infinity}',
+            b'{"ok":true,"id":"esp","unused":1e999}',
+        ):
+            with self.subTest(raw=raw), patch(
+                    "mcp_adapter.module_service.urlopen",
+                    return_value=io.BytesIO(raw)):
+                self.assertFalse(esp_online())
+        with patch("mcp_adapter.module_service.urlopen",
+                   return_value=io.BytesIO(b'{"ok":true,"id":"esp","unused":1.5}')):
+            self.assertTrue(esp_online())
+
     def test_esp_health_read_is_bounded_even_for_untrusted_local_service(self):
         import io
         from unittest.mock import patch
