@@ -821,6 +821,37 @@ def test_terminal_header_cache_preserves_expired_replay_tombstone(tmp_path, monk
     assert store.get(sequence)["state"]=="DONE"
 
 
+def test_cleanup_skips_invalid_legacy_sequence_and_continues_other_receipts(tmp_path):
+    import os
+    import time
+
+    folder=tmp_path / "receipts"
+    store=DurableResultStore(folder,ttl_seconds=60)
+    valid="QVALIDCLEAN1"
+    store.mark_running(valid,"a"*64,":state",mutation=False)
+    store.complete(valid,"a"*64,":state",{
+        "ok":True,"command":"state","data":{"text":"kept as tombstone"},
+        "sequence":valid,
+    })
+    # A legacy importer may have written valid compressed JSON but an
+    # invalid Unicode sequence. It must remain intact for diagnosis.
+    foreign=folder/"QBADLEGACY.json.zlib"
+    suspicious={"sequence":"Qé","state":"DONE","mutation":False,
+                "result":{"ok":True,"data":{"text":"legacy evidence"}}}
+    wire=store._encode(suspicious)
+    foreign.write_bytes(wire)
+    old=time.time()-store.ttl_seconds-300
+    for target in (foreign,store._path(valid)):
+        os.utime(target,(old,old))
+    store._cleanup()
+    assert foreign.read_bytes()==wire
+    kept=store.get(valid)
+    assert kept["state"]=="DONE"
+    assert kept["result_expired"] is True
+    assert kept["result"] is None
+    assert store.claim_running(valid,"a"*64,":state",mutation=False)[1] is False
+
+
 def test_cleanup_compacts_expired_read_result_but_keeps_replay_tombstone(tmp_path):
     import hashlib
     import os
