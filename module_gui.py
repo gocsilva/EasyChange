@@ -248,7 +248,9 @@ class ModuleGUI:
         # service. Cross-OS copies may retain both Windows and POSIX paths.
         python=(ROOT/".venv"/"Scripts"/"python.exe" if os.name=="nt"
                 else ROOT/".venv"/"bin"/"python")
-        if not python.is_file():
+        if not python.is_file() or (os.name!="nt" and not os.access(python,os.X_OK)):
+            # A checked-out POSIX venv without executable permission cannot
+            # start a service. Prefer a usable interpreter over a broken path.
             python=sys.executable
         opts={"creationflags":getattr(subprocess,"CREATE_NO_WINDOW",0)}
         if os.name=="nt":
