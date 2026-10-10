@@ -249,3 +249,22 @@ def test_login_keyword_does_not_stop_swagger_candidate_discovery():
     assert result["ok"] is True
     assert result["url"]==candidates[1]
     assert visited==candidates
+
+
+def test_openapi_json_rejects_duplicate_keys_and_nonfinite_values():
+    validate=ProjectRuntimeService._swagger_document_valid
+    rejected=(
+        b'{"openapi":"2.0","openapi":"3.0.3","paths":{}}',
+        b'{"openapi":"3.0.3","paths":{},"paths":{"/fake":{}}}',
+        b'{"openapi":"3.0.3","paths":{"/a":{"method":1,"method":2}}}',
+        b'{"openapi":"3.0.3","paths":{},"x-synthetic":NaN}',
+        b'{"swagger":"2.0","paths":{},"x-synthetic":Infinity}',
+        b'{"openapi":"3.0.3","paths":{},"x-synthetic":-Infinity}',
+    )
+    for body in rejected:
+        assert not validate({"body":body}),body
+    for body in (
+        b'{"openapi":"3.0.3","paths":{"/acam225":{"get":{}}}}',
+        b'{"swagger":"2.0","paths":{"/acam225":{"post":{}}}}',
+    ):
+        assert validate({"body":body}),body
