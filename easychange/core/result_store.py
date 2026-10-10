@@ -136,15 +136,12 @@ class DurableResultStore:
                 raise
             with handle:
                 metadata=os.fstat(handle.fileno())
-                if (not stat.S_ISREG(metadata.st_mode) or
-                        metadata.st_nlink != 1):
-                    # A hard link to another file can share the lock inode
-                    # with an unrelated owner and can be modified when the
-                    # claim byte is initialized. Require a unique lock path.
+                if not stat.S_ISREG(metadata.st_mode):
                     raise RuntimeError("RESULT_CLAIM_UNSAFE_LOCK_TYPE")
-                if os.name=="posix" and metadata.st_nlink != 1:
-                    # A hard link to the predictable claim-lock inode can
-                    # weaken per-sequence ownership across checkout aliases.
+                if metadata.st_nlink != 1:
+                    # Even a private, regular lock file must have a unique
+                    # name: hard-link aliases break the ownership boundary.
+                    # Check Windows too when the filesystem reports links.
                     raise RuntimeError("RESULT_CLAIM_UNSAFE_LOCK_LINKS")
                 if os.name=="posix" and (
                         metadata.st_uid!=os.getuid() or
