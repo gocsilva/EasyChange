@@ -283,7 +283,7 @@ def test_ec2_does_not_erase_boolean_vs_integer_differences():
     assert type(decoded["data"]["primary"]["value"]) is bool
     assert type(decoded["data"]["results"][0]["value"]) is int
     assert type(decoded["data"]["primary"]["nested"][0]) is bool
-    assert type(decoded["data"]["results"][0]["nested"][0]) is bool
+    assert type(decoded["data"]["results"][0]["nested"][0]) is int
     assert decoded["data"]["primary"]["nested"][0] is False
 
 
