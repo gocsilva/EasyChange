@@ -1105,25 +1105,57 @@ def test_oversized_compressed_result_never_overwrites_claim(tmp_path, monkeypatc
 
 
 def test_compressed_receipt_file_read_is_bounded(tmp_path, monkeypatch):
-    import io
-    from pathlib import Path
     import pytest
     import easychange.core.result_store as result_module
 
     target = tmp_path / "QBOUNDED.json.zlib"
-    observed = []
-
-    class RecordedStream(io.BytesIO):
-        def read(self, limit=-1):
-            observed.append(limit)
-            return super().read(limit)
-
-    stream = RecordedStream(b"X" * 30)
+    target.write_bytes(b"X" * 30)
     monkeypatch.setattr(result_module, "MAX_COMPRESSED_RECEIPT_BYTES", 8)
-    monkeypatch.setattr(Path, "open", lambda self, mode="r": stream)
     with pytest.raises(ValueError, match="RESULT_RECEIPT_COMPRESSED_TOO_LARGE"):
         result_module.DurableResultStore._read_compressed(target)
-    assert observed == [9]
+    assert target.read_bytes() == b"X" * 30
+
+
+def test_receipt_path_symlink_swap_fails_closed_at_open(tmp_path, monkeypatch):
+    import os
+    import pytest
+    import easychange.core.result_store as result_module
+
+    if not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("Platform lacks O_NOFOLLOW for atomic symlink protection")
+    store=DurableResultStore(tmp_path / "results")
+    sequence="QSYMLINKSWAP01"
+    store.mark_running(sequence,"a"*64,":job",mutation=True)
+    path=store._path(sequence)
+    original=path.read_bytes()
+    private=tmp_path / "private.txt"
+    private.write_bytes(b"private content outside result store")
+    real_open=os.open
+    swapped=[]
+
+    def replace_just_before_open(candidate, flags, *args, **kwargs):
+        if str(candidate)==str(path) and not swapped:
+            path.unlink()
+            try:
+                path.symlink_to(private)
+            except (OSError,NotImplementedError):
+                # The target is intentionally not recreated: fail closed.
+                pass
+            swapped.append(flags)
+        return real_open(candidate,flags,*args,**kwargs)
+
+    with monkeypatch.context() as ctx:
+        ctx.setattr(result_module.os,"open",replace_just_before_open)
+        with pytest.raises(RuntimeError,match="RESULT_RECEIPT_UNREADABLE"):
+            store.get(sequence)
+    assert len(swapped)==1 and swapped[0] & os.O_NOFOLLOW
+    assert private.read_bytes()==b"private content outside result store"
+    # The forged pathname is not a missing sequence. Restore the original
+    # receipt and verify the same sequence remains in STARTED state.
+    if path.is_symlink():
+        path.unlink()
+    path.write_bytes(original)
+    assert store.get(sequence)["state"]=="RUNNING"
 
 
 def test_oversized_receipt_fails_closed_without_deleting_disk_evidence(tmp_path, monkeypatch):
