@@ -455,8 +455,11 @@ class TestHubRedirectBoundary(unittest.TestCase):
             result=client.send("esp","job.status",{"ok":True})
         self.assertEqual(result,success)
         self.assertEqual(client._request.call_count,2)
-        self.assertEqual(client._request.call_args_list[0],
-                         client._request.call_args_list[1])
+        first,second=client._request.call_args_list
+        self.assertEqual(first.args,second.args)
+        self.assertGreater(first.kwargs["timeout"],0)
+        self.assertGreater(second.kwargs["timeout"],0)
+        self.assertLessEqual(second.kwargs["timeout"],first.kwargs["timeout"])
         sleeping.assert_called_once_with(0.025)
 
         for response in (rejected(accepted=True),rejected(retryable=False),
@@ -496,6 +499,47 @@ class TestHubRedirectBoundary(unittest.TestCase):
                 client.send("esp","job.status")
         self.assertEqual(client._request.call_count,7)
         self.assertEqual(sleeping.call_count,6)
+
+    def test_mailbox_admission_retries_share_single_six_second_deadline(self):
+        import io
+        import json
+        from unittest.mock import patch
+        from urllib.error import HTTPError
+
+        client=module_bridge.MCPBridge(token="local-test-token")
+        response=json.dumps({
+            "error":"MODULE_INBOX_FULL_RETRY_LATER",
+            "accepted":False,"retryable":True}).encode("utf-8")
+        clock={"now":0.0}
+        attempts=[]
+        sleeps=[]
+
+        def rejected(path,payload,*,timeout):
+            attempts.append((path,payload,timeout))
+            clock["now"]+=4.0
+            raise HTTPError("http://127.0.0.1:8786/v1/send",
+                            429,"busy",{},io.BytesIO(response))
+
+        def sleep(delay):
+            sleeps.append(delay)
+            clock["now"]+=delay
+
+        with patch.object(module_bridge.time,"monotonic",
+                          side_effect=lambda:clock["now"]), \
+             patch.object(module_bridge.time,"sleep",side_effect=sleep), \
+             patch.object(client,"_request",side_effect=rejected):
+            with self.assertRaises(HTTPError):
+                client.send("esp","job.status",{"sequence":1})
+
+        # A slow 429 rejection does not restart a six-second RPC clock.
+        self.assertEqual(len(attempts),2)
+        self.assertEqual(attempts[0][0],"/v1/send")
+        self.assertEqual(attempts[0][1],attempts[1][1])
+        self.assertGreater(attempts[0][2],5.9)
+        self.assertLess(attempts[1][2],2.1)
+        self.assertGreater(attempts[1][2],0)
+        self.assertEqual(len(sleeps),1)
+        self.assertLessEqual(sleeps[0],0.025)
 
     def test_tool_rpc_busy_retry_only_when_hub_confirms_not_executed(self):
         import io
