@@ -225,6 +225,39 @@ def test_cleanup_retains_completed_mutation_claim_after_result_ttl(tmp_path, mon
     assert read_prior["result"] is None
 
 
+def test_receipt_encoder_streams_byte_exact_json_without_full_dumps(monkeypatch):
+    import zlib
+    import easychange.core.result_store as result_module
+
+    payload={"sequence":"QSTREAMJSON1","ok":True,
+             "data":{"accent":"ação","emoji":"🙂","values":[1,2,False,None]}}
+    expected=json.dumps(payload,ensure_ascii=False,allow_nan=False,
+                        separators=(",",":")).encode("utf-8")
+    with monkeypatch.context() as ctx:
+        ctx.setattr(result_module.json,"dumps",
+                    lambda *args,**kwargs: (_ for _ in ()).throw(
+                        AssertionError("FULL_JSON_SERIALIZATION")))
+        packed=DurableResultStore._encode(payload)
+    assert zlib.decompress(packed)==expected
+
+
+def test_receipt_writer_rejects_shared_dag_expansion_before_compression(monkeypatch):
+    import pytest
+    import easychange.core.result_store as result_module
+
+    node={"result":"many shared references"}
+    for _ in range(24):
+        node=[node,node]
+    with monkeypatch.context() as ctx:
+        ctx.setattr(result_module,"MAX_DECODED_RECEIPT_BYTES",256)
+        ctx.setattr(result_module.zlib,"compress",
+                    lambda *args,**kwargs: (_ for _ in ()).throw(
+                        AssertionError("COMPRESSED_OVERSIZED_JSON")))
+        with pytest.raises(
+                ValueError,match="RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE"):
+            DurableResultStore._encode({"payload":node})
+
+
 def test_invalid_chunk_sizes_never_load_durable_result_or_raise_uncaught(tmp_path, monkeypatch):
     service=CommandService(Workspace.open(tmp_path))
     try:
