@@ -834,6 +834,35 @@ def test_complete_persists_exact_hashed_snapshot_when_caller_mutates(tmp_path, m
     assert store.header(sequence)["sha256"] == finished["result_hash"]
 
 
+def test_legacy_result_size_metadata_is_bounded_before_header_chunk_math(tmp_path):
+    import pytest
+    from easychange.core.result_store import MAX_DECODED_RECEIPT_BYTES
+
+    store = DurableResultStore(tmp_path / "legacy-size")
+    seq = "QLEGACYSIZE1"
+    key = "a" * 64
+    store.claim_running(seq, key, ":read", mutation=False)
+    store.complete(seq, key, ":read", {"ok": True, "command": "read"})
+
+    original = store.get(seq)
+    original["result_bytes"] = "42"
+    store._write(seq, original, run_cleanup=False)
+    assert store.header(seq)["payload_length"] == 42
+
+    for malformed in (
+        True, False, 3.75, "-1", "9" * 10000, [], {},
+        MAX_DECODED_RECEIPT_BYTES + 1, "NaN",
+    ):
+        changed = store.get(seq)
+        changed["result_bytes"] = malformed
+        store._write(seq, changed, run_cleanup=False)
+        with pytest.raises(RuntimeError, match="RESULT_RECEIPT_UNREADABLE"):
+            store.header(seq)
+        # A rejected header does not erase the on-disk sequence receipt:
+        # the same mutation/command must remain claimed after corruption.
+        assert store.get(seq)["command_hash"] == key
+
+
 def test_invalid_chunk_sizes_never_load_durable_result_or_raise_uncaught(tmp_path, monkeypatch):
     service=CommandService(Workspace.open(tmp_path))
     try:
