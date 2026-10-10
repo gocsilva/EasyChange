@@ -109,6 +109,17 @@ class ModuleGUI:
         if status()["running"]:
             self.message.set("Serviço já iniciado fora desta GUI (mantido).")
             return
+        # An external instance may be bound but still initializing or hung.
+        # Never spawn a second owner of this module's device/port merely
+        # because its HTTP /health has not answered yet.
+        import socket
+        try:
+            with socket.create_connection(("127.0.0.1",PORT),timeout=0.2):
+                self.message.set(
+                    "Porta local ocupada; serviço externo ainda não confirmado.")
+                return
+        except OSError:
+            pass
         folder=ROOT/"logs"
         python=ROOT/".venv"/"Scripts"/"python.exe"
         if not python.is_file():
