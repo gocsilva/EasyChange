@@ -163,6 +163,24 @@ def test_distinct_store_instances_cannot_replace_conflicting_chunk_concurrently(
     assert (root/"UCROSSLOCK1"/"0000.part").read_bytes()==one
 
 
+def test_failed_stream_wrapper_releases_chunk_fd_and_removes_staging(tmp_path):
+    import os
+    target=tmp_path / "part-0.bin"
+    real_close=os.close
+    closed=[]
+    def tracked_close(fd):
+        closed.append(fd)
+        return real_close(fd)
+    with patch.object(inbound_module.os,"fdopen",
+                      side_effect=OSError("SIMULATED_FDOPEN_ERROR")), \
+         patch.object(inbound_module.os,"close",side_effect=tracked_close):
+        with pytest.raises(OSError,match="SIMULATED_FDOPEN_ERROR"):
+            InboundCommandStore._atomic_write(target,b"chunk")
+    assert len(closed)==1
+    assert not target.exists()
+    assert list(tmp_path.iterdir())==[]
+
+
 def test_failed_chunk_atomic_replace_preserves_previous_bytes_and_cleans_temp(tmp_path):
     path=tmp_path/"inbound"/"USAMEINDEX"/"0000.part"
     InboundCommandStore._atomic_write(path,b"original")
