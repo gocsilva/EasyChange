@@ -51,6 +51,28 @@ def test_ec2_encoder_rejects_identity_receiver_would_drop(monkeypatch):
     assert optical.decode_result_chunks(valid)["sequence"]=="Q"*256
 
 
+def test_ec2_surrogate_transfer_id_never_claims_a_receiver_or_encoder():
+    import pytest
+    from unittest.mock import patch
+    import easychange.remote.optical_protocol as optical
+
+    valid=optical.encode_result_chunks(
+        {"sequence":"QVALID_UTF8","ok":True,"data":{"message":"Olá"}})
+    assert len(valid)>=1
+    for malformed in ("Q"+chr(0xD800),chr(0xDFFF)+"Q"):
+        with patch.object(optical,"_encode_raw",
+                          side_effect=AssertionError("UNNECESSARY_ENCODING")) as encode:
+            with pytest.raises(ValueError,match="OPTICAL_SEQUENCE_INVALID_UNICODE"):
+                optical.encode_result_chunks(
+                    {"sequence":malformed,"ok":True,"data":{"message":"safe"}})
+            encode.assert_not_called()
+        altered=json.loads(valid[0])
+        altered["s"]=malformed
+        assert not optical.valid_ec2_identity(altered)
+        with pytest.raises(ValueError,match="invalid optical transfer identity"):
+            optical.decode_result_chunks([json.dumps(altered)])
+
+
 def test_ec2_sender_rejects_coerced_sequence_before_encoding():
     import pytest
     from easychange.remote.optical_protocol import encode_result_bundle
