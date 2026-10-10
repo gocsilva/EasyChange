@@ -4671,6 +4671,16 @@ class CommandService:
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(journal_name, self.transaction_log_path)
+                if os.name == "posix":
+                    # Sync directory metadata before publishing a header that
+                    # depends on this newly renamed log. File fsync alone does
+                    # not guarantee the rename survives a power loss.
+                    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                    directory_fd = os.open(self.transaction_path.parent, flags)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
             finally:
                 Path(journal_name).unlink(missing_ok=True)
 
