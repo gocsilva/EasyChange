@@ -952,6 +952,33 @@ class DurableResultStore:
         raise RuntimeError("RESULT_RECEIPT_CHANGED_DURING_READ")
 
     @staticmethod
+    def _validated_stream_options(
+        chunk_bytes: int, max_ratio: float,
+    ) -> tuple[int, float]:
+        # Validate cheap wire parameters before reading and recompressing a
+        # potentially 64 MiB durable result. Keep the historical clamping
+        # behavior for finite numeric values, including short numeric strings.
+        if (isinstance(chunk_bytes, bool)
+                or not isinstance(chunk_bytes, (int, float, str))
+                or (isinstance(chunk_bytes, str) and len(chunk_bytes) > 32)):
+            raise ValueError("INVALID_RESULT_STREAM_CHUNK_BYTES")
+        try:
+            size = int(chunk_bytes)
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValueError("INVALID_RESULT_STREAM_CHUNK_BYTES") from exc
+        if (isinstance(max_ratio, bool)
+                or not isinstance(max_ratio, (int, float, str))
+                or (isinstance(max_ratio, str) and len(max_ratio) > 32)):
+            raise ValueError("INVALID_RESULT_STREAM_MAX_RATIO")
+        try:
+            ratio = float(max_ratio)
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValueError("INVALID_RESULT_STREAM_MAX_RATIO") from exc
+        if not math.isfinite(ratio):
+            raise ValueError("INVALID_RESULT_STREAM_MAX_RATIO")
+        return max(256, min(4096, size)), max(0.10, min(1.0, ratio))
+
+    @staticmethod
     def _stream_metadata(
         sequence: str,
         payload: tuple[bytes, str, str, int],
@@ -963,11 +990,8 @@ class DurableResultStore:
         # snapshot. A receipt can be atomically replaced by another process
         # between two separate lookups.
         stream, stream_hash, result_hash, result_bytes = payload
-        size = max(256, min(4096, int(chunk_bytes)))
-        requested_ratio = float(max_ratio)
-        if not math.isfinite(requested_ratio):
-            raise ValueError("INVALID_RESULT_STREAM_MAX_RATIO")
-        ratio_limit = max(0.10, min(1.0, requested_ratio))
+        size, ratio_limit = DurableResultStore._validated_stream_options(
+            chunk_bytes, max_ratio)
         ratio = (len(stream) / result_bytes) if result_bytes else 1.0
         eligible = bool(result_bytes >= 4096 and ratio <= ratio_limit)
         total = max(1, (len(stream) + size - 1) // size) if eligible else 0
@@ -992,6 +1016,8 @@ class DurableResultStore:
         chunk_bytes: int = 2048,
         max_ratio: float = 0.85,
     ) -> dict[str, Any] | None:
+        chunk_bytes, max_ratio = self._validated_stream_options(
+            chunk_bytes, max_ratio)
         payload = self._result_stream_payload(sequence)
         if payload is None:
             return None
@@ -1013,6 +1039,8 @@ class DurableResultStore:
         # not consume the entire EC2 recovery CPU/memory budget.
         if not isinstance(indexes, list) or not indexes:
             raise ValueError("RESULT_STREAM_CHUNK_INDEXES_REQUIRED")
+        chunk_bytes, max_ratio = self._validated_stream_options(
+            chunk_bytes, max_ratio)
         limit = max(1, min(16, int(max_chunks)))
         # The returned batch is capped at 16, but duplicate raw indexes could
         # otherwise make parsing cost grow without a bound. Check the raw
