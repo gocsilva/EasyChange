@@ -92,6 +92,10 @@ class _BoundedProcessCapture:
         return text[-self.max_chars:]
 
 
+MAX_CDP_WS_MESSAGE_BYTES = 64 * 1024 * 1024
+MAX_CDP_WS_CONTROL_BYTES = 125
+
+
 class _WebSocket:
     """Small CDP WebSocket client with one continuous reader.
 
@@ -183,6 +187,8 @@ class _WebSocket:
             raise CdpError("CDP_WEBSOCKET_ACCEPT_MISMATCH")
 
     def _recv_exact(self, count: int) -> bytes:
+        if count < 0 or count > MAX_CDP_WS_MESSAGE_BYTES:
+            raise CdpError("CDP_WEBSOCKET_MESSAGE_TOO_LARGE")
         output = bytearray()
         while len(output) < count:
             chunk = self.sock.recv(count - len(output))
@@ -221,6 +227,15 @@ class _WebSocket:
                 length = struct.unpack("!H", self._recv_exact(2))[0]
             elif length == 127:
                 length = struct.unpack("!Q", self._recv_exact(8))[0]
+            # Check advertised frame length BEFORE reading or allocating any
+            # attacker-controlled payload. A frame may be valid on its own
+            # yet exceed the cap when concatenated with prior fragments.
+            if length > MAX_CDP_WS_MESSAGE_BYTES:
+                raise CdpError("CDP_WEBSOCKET_MESSAGE_TOO_LARGE")
+            if opcode >= 8 and (not fin or length > MAX_CDP_WS_CONTROL_BYTES):
+                raise CdpError("CDP_WEBSOCKET_INVALID_CONTROL_FRAME")
+            if opcode in (0,1,2) and len(fragments) + length > MAX_CDP_WS_MESSAGE_BYTES:
+                raise CdpError("CDP_WEBSOCKET_MESSAGE_TOO_LARGE")
             mask = self._recv_exact(4) if masked else b""
             payload = self._recv_exact(length) if length else b""
             if mask:
