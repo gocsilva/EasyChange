@@ -824,10 +824,12 @@ class Indexer:
             for term in clean:
                 argv += ["-e", term]
             argv += ["--"]
-            if prefix and ext:
-                argv.append(f":(glob){prefix}/**/*{ext}")
-            elif prefix:
-                argv.append(f":(glob){prefix}/**")
+            if prefix:
+                # Match the user-supplied path literally. Treating names with
+                # [, ], *, ? as Git pathspec globs drops legitimate files;
+                # a concrete file prefix must also work, not only directories.
+                # The extension is intersected after Git returns candidates.
+                argv.append(f":(literal){prefix}")
             elif ext:
                 argv.append(f":(glob)**/*{ext}")
             rows: list[tuple[str, int, str]] = []
