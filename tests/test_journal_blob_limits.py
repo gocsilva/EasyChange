@@ -79,6 +79,34 @@ def test_simultaneous_identical_snapshot_writers_have_unique_staging_paths(tmp_p
     assert not list(journal.blob_root.glob("*.tmp"))
 
 
+@pytest.mark.parametrize("writer", ("blob", "rewrite"))
+def test_fdopen_failure_releases_journal_staging_fd_and_preserves_file(tmp_path, writer):
+    import os
+
+    target=tmp_path / ".easychange" / "journal.jsonl"
+    journal=Journal(target,"S1")
+    if writer=="rewrite":
+        journal.record("write","note.txt","before","after")
+    previous=target.read_bytes() if target.exists() else None
+    real_close=os.close
+    closed=[]
+    def tracked_close(fd):
+        closed.append(fd)
+        return real_close(fd)
+
+    with patch.object(journal_module.os,"fdopen",
+                      side_effect=OSError("SIMULATED_STREAM_FAILURE")), \
+         patch.object(journal_module.os,"close",side_effect=tracked_close):
+        with pytest.raises(OSError,match="SIMULATED_STREAM_FAILURE"):
+            if writer=="blob":
+                journal._store_text("large-snapshot\n"*1000)
+            else:
+                journal._rewrite()
+    assert len(closed)==1
+    assert (target.read_bytes() if target.exists() else None)==previous
+    assert not list(target.parent.rglob("*.tmp"))
+
+
 def test_untrusted_journal_jsonl_record_size_is_bounded_before_parsing(tmp_path, monkeypatch):
     folder=tmp_path / ".easychange"
     folder.mkdir()
