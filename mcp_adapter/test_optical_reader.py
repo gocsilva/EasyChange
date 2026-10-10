@@ -20,6 +20,49 @@ class OpticalReaderTests(unittest.TestCase):
                     self.assertEqual(reader.decode_hdmi_qr(frame),[])
         qr.assert_not_called()
 
+    def test_absurd_dimensions_and_invalid_channels_skip_qr_decoder(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from mcp_adapter import optical_reader as reader
+
+        qr=Mock()
+        cv2_stub=SimpleNamespace(error=RuntimeError,QRCodeDetector=qr)
+        invalid=(
+            (100_000,100_000,3),
+            (7680,9000,3),
+            (240,320,2),
+            (240,320,"3"),
+            (240,320,0),
+        )
+        with patch.dict(sys.modules,{"cv2":cv2_stub}):
+            for dims in invalid:
+                with self.subTest(shape=dims):
+                    self.assertEqual(
+                        reader.decode_hdmi_qr(SimpleNamespace(shape=dims)),[])
+        qr.assert_not_called()
+
+    def test_non_cv2_image_type_error_is_recoverable_on_next_frame(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import Mock,patch
+        from mcp_adapter import optical_reader as reader
+
+        detector=Mock()
+        detector.detectAndDecodeMulti.side_effect=[
+            TypeError("UNEXPECTED_IMAGE_BUFFER"),
+            (False,[],None,None),
+        ]
+        detector.detectAndDecode.return_value=("EC2_RECOVERED",None,None)
+        cv2_stub=SimpleNamespace(error=RuntimeError,
+                                 QRCodeDetector=lambda:detector)
+        image=SimpleNamespace(shape=(480,640,3))
+        with patch.dict(sys.modules,{"cv2":cv2_stub}), \
+             patch.object(reader._qr_detectors,"detector",None,create=True):
+            self.assertEqual(reader.decode_hdmi_qr(image),[])
+            self.assertEqual(reader.decode_hdmi_qr(image),["EC2_RECOVERED"])
+        self.assertEqual(detector.detectAndDecodeMulti.call_count,2)
+
     def test_transient_qr_decoder_exception_allows_next_frame(self):
         import sys
         from types import SimpleNamespace
