@@ -75,3 +75,37 @@ def test_valid_stream_options_preserve_clamping_and_absent_result(tmp_path):
     assert store.stream_meta("QABSENT", chunk_bytes="512", max_ratio="0.8") is None
     assert store.stream_chunks(
         "QABSENT", [0], chunk_bytes="512", max_ratio="0.8") is None
+
+
+@pytest.mark.parametrize("invalid", [
+    True, False, float("inf"), float("nan"), "9" * 2048, "not-a-number",
+])
+def test_invalid_chunk_batch_limits_fail_before_spool_read(
+    invalid, tmp_path, monkeypatch,
+):
+    store = DurableResultStore(tmp_path / "results")
+    calls = []
+    monkeypatch.setattr(
+        store, "_result_stream_payload",
+        lambda sequence: calls.append("stream") or (_ for _ in ()).throw(
+            AssertionError("STREAM_READ_BEFORE_BATCH_VALIDATION")),
+    )
+    monkeypatch.setattr(
+        store, "_result_payload",
+        lambda sequence: calls.append("plain") or (_ for _ in ()).throw(
+            AssertionError("PLAIN_READ_BEFORE_BATCH_VALIDATION")),
+    )
+    with pytest.raises(ValueError, match="INVALID_RESULT_STREAM_MAX_CHUNKS"):
+        store.stream_chunks("QINVALID", [0], max_chunks=invalid)
+    with pytest.raises(ValueError, match="INVALID_RESULT_MAX_CHUNKS"):
+        store.chunks("QINVALID", [0], max_chunks=invalid)
+    assert calls == []
+
+
+def test_small_numeric_batch_limits_remain_compatible(tmp_path):
+    store = DurableResultStore(tmp_path / "results")
+    assert store._validated_batch_limit("3", "INVALID") == 3
+    assert store._validated_batch_limit(0, "INVALID") == 1
+    assert store._validated_batch_limit(999999, "INVALID") == 16
+    assert store.stream_chunks("QABSENT", [0], max_chunks="3") is None
+    assert store.chunks("QABSENT", [0], max_chunks="3") is None
