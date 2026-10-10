@@ -6,6 +6,41 @@ from urllib.error import HTTPError
 import module_bridge
 
 class TestHubRedirectBoundary(unittest.TestCase):
+    def test_offline_hub_attach_returns_recoverable_http_503(self):
+        import io
+        from unittest.mock import Mock,patch
+        from mcp_adapter.module_service import Handler
+
+        for exc in (OSError("SECRET_CONNECTION_STRING"),
+                    RuntimeError("MCP_HOST_UNAVAILABLE")):
+            with self.subTest(exc=type(exc).__name__):
+                handler=object.__new__(Handler)
+                handler.path="/v1/attach"
+                payload=b'{"token":"test-private-bearer"}'
+                handler.headers={"Content-Type":"application/json",
+                                 "Content-Length":str(len(payload))}
+                handler.rfile=io.BytesIO(payload)
+                handler.send=Mock()
+                with patch("module_bridge.attach_hub",side_effect=exc):
+                    handler.do_POST()
+                handler.send.assert_called_once_with(
+                    503,{"error":"HUB_UNAVAILABLE"})
+                self.assertNotIn("SECRET_CONNECTION_STRING",
+                                 str(handler.send.call_args))
+
+        handler=object.__new__(Handler)
+        handler.path="/v1/attach"
+        payload=b'{"token":"bad-private-bearer"}'
+        handler.headers={"Content-Type":"application/json",
+                         "Content-Length":str(len(payload))}
+        handler.rfile=io.BytesIO(payload)
+        handler.send=Mock()
+        with patch("module_bridge.attach_hub",
+                   side_effect=PermissionError("INVALID_DETACH_CREDENTIAL")):
+            handler.do_POST()
+        handler.send.assert_called_once_with(
+            403,{"error":"PermissionError"})
+
     def test_duplicate_attach_token_cannot_change_live_bus_credentials(self):
         import io
         from unittest.mock import Mock,patch
