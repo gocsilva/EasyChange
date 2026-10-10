@@ -1346,8 +1346,11 @@ class ProjectRuntimeService:
         script=re.search(
             rb"<script\b[^>]{0,512}\bsrc\s*=\s*[\x22\x27][^\x22\x27]*swagger-ui-bundle(?:\.min)?\.js(?:\?[^\x22\x27]*)?[\x22\x27]",
             sample)
-        javascript=(b"<script" in sample and
-                    re.search(rb"\bswaggeruibundle\s*\(",sample))
+        # Keep the loader call inside the same inline <script> element:
+        # an unrelated analytics tag plus a documentation link is not proof.
+        javascript=re.search(
+            rb"<script\b[^>]{0,512}>[^<]{0,65536}\bswaggeruibundle\s*\(",
+            sample)
         redoc=re.search(rb"<(?:redoc|redocly-api-reference)\b",sample)
         return bool(mount or script or javascript or redoc)
 
