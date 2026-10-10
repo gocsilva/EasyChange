@@ -284,6 +284,37 @@ def test_complete_limits_shared_dag_json_before_full_dumps_or_receipt_write(tmp_
     assert store.get(sequence)["state"]=="RUNNING"
 
 
+def test_cached_receipt_is_invalidated_when_replaced_by_symlink_to_same_inode(tmp_path):
+    import pytest
+
+    store = DurableResultStore(tmp_path / "receipts")
+    sequence = "QCACHEDSYMLINK"
+    result = {"ok": True, "command": "state", "sequence": sequence,
+              "data": {"text": "unchanged"}}
+    store.mark_running(sequence, "a" * 64, ":state", mutation=False)
+    store.complete(sequence, "a" * 64, ":state", result)
+    assert store.header(sequence)["success"] is True
+    assert store.result(sequence) == result
+
+    # Move the existing regular inode away, then make its original pathname
+    # a symlink to that *same inode*. Following stat() would see an identical
+    # stamp and mistakenly accept the old cached header/result.
+    original = store._path(sequence)
+    moved = tmp_path / "saved-valid-receipt.bin"
+    original.replace(moved)
+    try:
+        original.symlink_to(moved)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip("filesystem does not permit symlinks: " + type(exc).__name__)
+
+    with pytest.raises(RuntimeError, match="RESULT_RECEIPT_UNREADABLE"):
+        store.header(sequence)
+    with pytest.raises(RuntimeError, match="RESULT_RECEIPT_UNREADABLE"):
+        store.result(sequence)
+    assert moved.is_file()
+    assert original.is_symlink()
+
+
 def test_symlinked_durable_receipt_cannot_read_unrelated_file_or_be_reexecuted(tmp_path):
     import pytest
 
