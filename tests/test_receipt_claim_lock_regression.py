@@ -116,3 +116,31 @@ def test_duplicate_completion_avoids_large_result_serialization(tmp_path, monkey
             store.complete(seq,"b"*64,":operation",original)
         with pytest.raises(RuntimeError,match="RESULT_SEQUENCE_NOT_CLAIMED"):
             store.complete("QFASTREPLAY2","a"*64,":operation",original)
+
+
+def test_cross_process_terminal_race_rechecks_claim_after_json_encoding(tmp_path, monkeypatch):
+    import easychange.core.result_store as store_module
+
+    folder=tmp_path/"receipts"
+    first=DurableResultStore(folder)
+    second=DurableResultStore(folder)
+    seq="QRACEENCODE1"
+    original={"ok":True,"sequence":seq,"data":{"writer":"first"}}
+    competing={"ok":True,"sequence":seq,"data":{"writer":"second"}}
+    first.claim_running(seq,"a"*64,":operation",mutation=False)
+    json_dumps=store_module.json.dumps
+    injected=[]
+
+    def during_first_encoding(value, *args, **kwargs):
+        if not injected and value is original:
+            injected.append(True)
+            second.complete(seq,"a"*64,":operation",competing)
+        return json_dumps(value,*args,**kwargs)
+
+    with monkeypatch.context() as context:
+        context.setattr(store_module.json,"dumps",during_first_encoding)
+        returned=first.complete(seq,"a"*64,":operation",original)
+    assert injected==[True]
+    assert returned["result"]["data"]["writer"]=="second"
+    assert first.get(seq)["result"]["data"]["writer"]=="second"
+    assert returned["state"]=="DONE"
