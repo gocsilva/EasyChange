@@ -109,3 +109,34 @@ def test_small_numeric_batch_limits_remain_compatible(tmp_path):
     assert store._validated_batch_limit(999999, "INVALID") == 16
     assert store.stream_chunks("QABSENT", [0], max_chunks="3") is None
     assert store.chunks("QABSENT", [0], max_chunks="3") is None
+
+
+@pytest.mark.parametrize("invalid", [
+    True, False, None, float("nan"), float("inf"), "9" * 2048, "not-a-size",
+])
+def test_plain_chunk_size_preflight_avoids_disk_reads(
+    invalid, tmp_path, monkeypatch,
+):
+    store = DurableResultStore(tmp_path / "results")
+    read_calls = []
+    def never_read(sequence):
+        read_calls.append(sequence)
+        raise AssertionError("RECEIPT_READ_BEFORE_SIZE_VALIDATION")
+    monkeypatch.setattr(store, "_result_payload", never_read)
+    for action in (
+        lambda: store.chunk_meta("QPLAIN", chunk_bytes=invalid),
+        lambda: store.chunks("QPLAIN", [0], chunk_bytes=invalid),
+        lambda: store.chunk("QPLAIN", 0, chunk_bytes=invalid),
+    ):
+        with pytest.raises(ValueError, match="INVALID_RESULT_CHUNK_BYTES"):
+            action()
+    assert read_calls == []
+
+
+def test_plain_chunk_size_clamps_short_numeric_values(tmp_path):
+    store = DurableResultStore(tmp_path / "results")
+    assert store._validated_chunk_size("1") == 256
+    assert store._validated_chunk_size("999999") == 4096
+    assert store.chunk_meta("QABSENT", chunk_bytes="1024") is None
+    assert store.chunks("QABSENT", [0], chunk_bytes="1024") is None
+    assert store.chunk("QABSENT", 0, chunk_bytes="1024") is None
