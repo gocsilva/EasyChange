@@ -325,7 +325,12 @@ class OpticalReaderTests(unittest.TestCase):
                 repeated=assembly.ingest(packets)
                 self.assertTrue(repeated["complete"])
                 self.assertIs(repeated["payload"],first["payload"])
-            decoder.assert_called_once_with(list(assembly.chunks.values()))
+            decoder.assert_called_once()
+            received=decoder.call_args.args[0]
+            # The decoder receives a live dict_values view, avoiding one
+            # unnecessary list allocation for large EC2 carousels.
+            self.assertIsInstance(received,type(assembly.chunks.values()))
+            self.assertEqual(list(received),list(assembly.chunks.values()))
 
     def test_mismatched_packet_manifest_cannot_poison_later_retransmission(self):
         import json
