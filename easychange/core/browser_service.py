@@ -313,7 +313,12 @@ class _WebSocket:
             else:
                 continue
             if fin:
-                return fragments.decode("utf-8", errors="replace")
+                # WebSocket text frames must contain valid UTF-8. Replacement
+                # characters silently corrupt CDP ids, selectors and data.
+                try:
+                    return fragments.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise CdpError("CDP_WEBSOCKET_INVALID_UTF8") from exc
 
     def _dispatch_message(self, message: dict) -> None:
         if not isinstance(message, dict):
