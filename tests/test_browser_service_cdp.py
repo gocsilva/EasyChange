@@ -396,6 +396,90 @@ def test_cdp_ws_oversized_ping_rejected_before_body_read():
     assert ws.sock.buffer.tell()==4
 
 
+def test_cdp_upgrade_preserves_first_frame_from_same_socket_read(monkeypatch):
+    import hashlib
+
+    fixed_key=b"\x00"*16
+    encoded_key=base64.b64encode(fixed_key).decode("ascii")
+    accept=base64.b64encode(hashlib.sha1(
+        (encoded_key+"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+    ).digest())
+    reply=(b"HTTP/1.1 101 Switching Protocols\r\n"
+           b"Upgrade: websocket\r\n"
+           b"Sec-WebSocket-Accept: "+accept+b"\r\n\r\n"
+           b"\x81\x02OK")
+
+    class SyntheticSocket:
+        def __init__(self, segments):
+            self.segments=list(segments)
+            self.calls=0
+            self.sent=[]
+        def recv(self, size):
+            self.calls+=1
+            return self.segments.pop(0) if self.segments else b""
+        def sendall(self, data):
+            self.sent.append(data)
+
+    ws=browser_module._WebSocket.__new__(browser_module._WebSocket)
+    ws.host="127.0.0.1"
+    ws.port=9222
+    ws.path="/devtools/page/1"
+    ws.sock=SyntheticSocket([reply])
+    monkeypatch.setattr(browser_module.os,"urandom",lambda size:fixed_key)
+    ws._handshake()
+    assert ws._recv_text()=="OK"
+    assert ws.sock.calls==1
+    assert b"GET /devtools/page/1 HTTP/1.1" in ws.sock.sent[0]
+
+
+def test_cdp_upgrade_handles_partial_coalesced_first_frame(monkeypatch):
+    import hashlib
+
+    key=b"\x01"*16
+    encoded=base64.b64encode(key).decode("ascii")
+    accept=base64.b64encode(hashlib.sha1(
+        (encoded+"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+    ).digest())
+    headers=(b"HTTP/1.1 101 Switching Protocols\r\n"
+             b"Sec-WebSocket-Accept: "+accept+b"\r\n\r\n")
+    class SyntheticSocket:
+        def __init__(self):
+            self.parts=[headers+b"\x81",b"\x02OK"]
+        def sendall(self,_data):
+            pass
+        def recv(self,size):
+            part=self.parts.pop(0) if self.parts else b""
+            if len(part)>size:
+                self.parts.insert(0,part[size:])
+                return part[:size]
+            return part
+    ws=browser_module._WebSocket.__new__(browser_module._WebSocket)
+    ws.host="127.0.0.1";ws.port=9222;ws.path="/devtools/page/1"
+    ws.sock=SyntheticSocket()
+    monkeypatch.setattr(browser_module.os,"urandom",lambda size:key)
+    ws._handshake()
+    assert ws._recv_text()=="OK"
+
+
+def test_cdp_rejects_truncated_http_upgrade_headers():
+    class SyntheticSocket:
+        def __init__(self):
+            self.received=False
+        def sendall(self,_request):
+            pass
+        def recv(self,size):
+            if not self.received:
+                self.received=True
+                return b"HTTP/1.1 101 Switching Protocols\r\n"
+            return b""
+    ws=browser_module._WebSocket.__new__(browser_module._WebSocket)
+    ws.host="127.0.0.1";ws.port=9222;ws.path="/devtools/page/1"
+    ws.sock=SyntheticSocket()
+    with pytest.raises(browser_module.CdpError,
+                       match="CDP_WEBSOCKET_HANDSHAKE_TRUNCATED"):
+        ws._handshake()
+
+
 def _bare_async_websocket():
     ws = browser_module._WebSocket.__new__(browser_module._WebSocket)
     ws._next_id = 0
