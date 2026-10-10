@@ -274,6 +274,17 @@ class MCPBridge:
                         len(set(already))!=len(already) or
                         acked+len(already)!=len(accepted)):
                     raise RuntimeError("MCP_ACK_UNCONFIRMED")
+                confirmed_ids=receipt.get("acked_ids")
+                if confirmed_ids is not None:
+                    # New hubs provide exact identities, not only a count.
+                    # Older hub receipts without acked_ids remain compatible.
+                    if (not isinstance(confirmed_ids,list) or
+                            any(type(item) is not int for item in confirmed_ids) or
+                            len(set(confirmed_ids))!=len(confirmed_ids) or
+                            len(confirmed_ids)!=acked or
+                            set(confirmed_ids)&set(already) or
+                            set(confirmed_ids)|set(already)!=set(accepted)):
+                        raise RuntimeError("MCP_ACK_UNCONFIRMED")
                 count+=len(accepted)
                 accepted.clear()
             for message, original_id in zip(selected, validated_ids):
