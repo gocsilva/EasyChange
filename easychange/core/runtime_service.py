@@ -25,6 +25,7 @@ _SKIP = {".git", ".easychange", "bin", "obj", "node_modules", ".venv", "venv", "
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SENSITIVE_ENV_RE = re.compile(r"(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|CONNECTION_?STRING)", re.I)
 _ENV_REF_PREFIXES = {"PROCESS_ENV", "REMOTE_ENV", "ENV", "MCP_HOST_ENV"}
+_MAX_RUNTIME_PROFILE_BYTES = 1_048_576
 
 
 def _rel(root: Path, path: Path) -> str:
@@ -357,8 +358,8 @@ class ProjectRuntimeService:
             return []
         try:
             with self.config_path.open("rb") as stream:
-                raw=stream.read(1_048_577)
-            if len(raw)>1_048_576:
+                raw=stream.read(_MAX_RUNTIME_PROFILE_BYTES+1)
+            if len(raw)>_MAX_RUNTIME_PROFILE_BYTES:
                 return []
             value=json.loads(raw.decode("utf-8-sig"))
         except (OSError, ValueError, UnicodeError, RecursionError):
@@ -456,6 +457,8 @@ class ProjectRuntimeService:
         }
         by_id = {item["id"]: item for item in existing}
         by_id[profile_id] = row
+        if len(by_id)>256:
+            raise ValueError("RUNTIME_PROFILE_CONFIG_TOO_LARGE")
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         # A crash during write_text() can truncate every configured profile.
         # Write a private, unique sibling and atomically replace the old JSON
@@ -474,8 +477,16 @@ class ProjectRuntimeService:
                 os.close(descriptor)
                 raise
             with output:
-                json.dump({"profiles":list(by_id.values())},output,
-                          ensure_ascii=False,indent=2)
+                # A written profile must remain readable by _configured_profiles.
+                # Stream JSON fragments and refuse a total above the read cap
+                # before atomically replacing the last valid configuration.
+                emitted=0
+                encoder=json.JSONEncoder(ensure_ascii=False,indent=2,allow_nan=False)
+                for fragment in encoder.iterencode({"profiles":list(by_id.values())}):
+                    emitted+=len(fragment.encode("utf-8"))
+                    if emitted>_MAX_RUNTIME_PROFILE_BYTES:
+                        raise ValueError("RUNTIME_PROFILE_CONFIG_TOO_LARGE")
+                    output.write(fragment)
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary,self.config_path)
