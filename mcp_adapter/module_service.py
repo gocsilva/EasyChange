@@ -19,12 +19,20 @@ def esp_online():
             body=response.read(2049)
         if len(body)>2048:
             return False
-        status=json.loads(body)
+        status=json.loads(body,object_pairs_hook=_unique_service_fields)
         # The loopback port is not an identity: another service may occupy it.
         return (isinstance(status,dict) and status.get("ok") is True
                 and status.get("id")=="esp")
     except Exception:
         return False
+
+def _unique_service_fields(pairs):
+    fields={}
+    for name,value in pairs:
+        if name in fields:
+            raise ValueError("MODULE_SERVICE_DUPLICATE_JSON_KEY")
+        fields[name]=value
+    return fields
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*args):
@@ -40,7 +48,7 @@ class Handler(BaseHTTPRequestHandler):
             size=int(self.headers.get("Content-Length","0"))
             if not 0<size<=512:
                 return self.send(413,{"error":"PAYLOAD_TOO_LARGE"})
-            request=json.loads(self.rfile.read(size))
+            request=json.loads(self.rfile.read(size),object_pairs_hook=_unique_service_fields)
             if not isinstance(request,dict):
                 raise ValueError("ATTACH_BODY_REQUIRED")
             from module_bridge import attach_hub,detach_hub
