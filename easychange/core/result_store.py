@@ -636,10 +636,13 @@ class DurableResultStore:
         )
 
     def header(self, sequence: str, *, chunk_bytes: int = 640) -> dict[str, Any] | None:
+        # Header polling is as frequent as chunk recovery. Reject a malformed
+        # size before taking locks, hitting the disk or decoding a receipt.
+        size = self._validated_chunk_size(chunk_bytes)
         with self._lock:
             cached = self._terminal_header_cache_get(sequence)
         if cached is not None:
-            size = max(256, min(4096, int(chunk_bytes)))
+            size = self._validated_chunk_size(chunk_bytes)
             result_bytes = int(cached.get("payload_length") or 0)
             cached["chunk_count"] = (
                 max(1, (result_bytes + size - 1) // size) if result_bytes else 0
@@ -658,7 +661,7 @@ class DurableResultStore:
                 self._terminal_header_cache_put(sequence, value)
         result = value.get("result")
         result_bytes = int(value.get("result_bytes") or 0)
-        size = max(256, min(4096, int(chunk_bytes)))
+        size = self._validated_chunk_size(chunk_bytes)
         chunk_count = max(1, (result_bytes + size - 1) // size) if result_bytes else 0
         if base is not None:
             base["chunk_count"] = chunk_count
