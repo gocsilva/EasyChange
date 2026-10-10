@@ -440,3 +440,52 @@ def test_consumer_lease_key_is_canonical_across_installations(tmp_path):
     # Independent canonical module identities must not block each other.
     with patch.object(module_bridge,"CANONICAL_MODULE_ID",declared+"-other"):
         assert module_bridge._consumer_lease_path()!=initial
+
+
+def test_consumer_lease_rejects_preexisting_shared_writable_temp_file(tmp_path):
+    import os
+    import stat
+    from unittest.mock import patch
+    import pytest
+    import module_bridge
+
+    if os.name!="posix":
+        pytest.skip("POSIX ownership checks only")
+    lease_path=tmp_path/"consumer.lock"
+    lease_path.write_bytes(b"0")
+    lease_path.chmod(0o666)
+    with patch.object(module_bridge,"_consumer_lease_path",
+                      return_value=str(lease_path)):
+        with pytest.raises(RuntimeError,match="MCP_CONSUMER_LEASE_UNSAFE_OWNER"):
+            module_bridge._acquire_consumer_lease()
+        # Rejecting a hostile or legacy temp entry must not delete it or
+        # leave the descriptor locked.
+        assert lease_path.exists()
+        assert stat.S_IMODE(lease_path.stat().st_mode)==0o666
+        lease_path.chmod(0o600)
+        lock=module_bridge._acquire_consumer_lease()
+        module_bridge._release_consumer_lease(lock)
+
+
+def test_consumer_lease_rejects_foreign_posix_uid_before_locking(tmp_path):
+    import os
+    import stat
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import pytest
+    import module_bridge
+
+    if os.name!="posix":
+        pytest.skip("POSIX ownership checks only")
+    lease_path=tmp_path/"consumer.lock"
+    with patch.object(module_bridge,"_consumer_lease_path",
+                      return_value=str(lease_path)):
+        # Simulate a regular 0600 file that belongs to a different user.
+        fake=SimpleNamespace(st_mode=stat.S_IFREG|0o600,
+                             st_uid=os.getuid()+1, st_size=0)
+        with patch("module_bridge.os.fstat",return_value=fake):
+            with pytest.raises(RuntimeError,match="MCP_CONSUMER_LEASE_UNSAFE_OWNER"):
+                module_bridge._acquire_consumer_lease()
+        assert lease_path.exists()
+        lock=module_bridge._acquire_consumer_lease()
+        module_bridge._release_consumer_lease(lock)
