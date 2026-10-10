@@ -96,6 +96,7 @@ def _release_consumer_lease(lease):
 
 class MCPBridge:
     def __init__(self,token=None):
+        self._implicit_credential=(token is None)
         # Explicit detach overrides an inherited bootstrap credential.
         # The host must also rotate its token to revoke pre-existing clients.
         self.token=(token if token is not None else
@@ -105,10 +106,17 @@ class MCPBridge:
 
     @property
     def connected(self):
-        return bool(self.token)
+        if not self.token:
+            return False
+        # Previously instantiated implicit clients must not keep using a
+        # credential after the module has detached or adopted a newer one.
+        if self._implicit_credential and (_runtime_detached or
+                (_runtime_token and not hmac.compare_digest(self.token,_runtime_token))):
+            return False
+        return True
 
     def _request(self,path,body=None,*,timeout=40):
-        if not self.token:raise RuntimeError("MCP_NOT_CONNECTED_STANDALONE")
+        if not self.connected:raise RuntimeError("MCP_NOT_CONNECTED_STANDALONE")
         if path not in ("/v1/tools","/v1/tools/call","/v1/peers","/v1/send",
                         "/v1/inbox","/v1/inbox/peek","/v1/inbox/ack"):
             raise ValueError("MCP_BUS_PATH_NOT_ALLOWED")
