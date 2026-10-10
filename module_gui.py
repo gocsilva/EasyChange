@@ -126,9 +126,9 @@ class ModuleGUI:
     def start(self):
         if self.process and self.process.poll() is None:
             return self.refresh()
-        if status()["running"]:
-            self.message.set("Serviço já iniciado fora desta GUI (mantido).")
-            return
+        # Keep the Tk callback nonblocking: /health can stall for 600ms.
+        # The fixed-port ownership check below is fail-closed; the regular
+        # background refresh reports whether an external listener is healthy.
         # An external instance may be bound but still initializing or hung.
         # Never spawn a second owner of this module's device/port merely
         # because its HTTP /health has not answered yet.
@@ -136,7 +136,8 @@ class ModuleGUI:
         try:
             with socket.create_connection(("127.0.0.1",PORT),timeout=0.2):
                 self.message.set(
-                    "Porta local ocupada; serviço externo ainda não confirmado.")
+                    "Porta local ocupada; verificando serviço externo.")
+                self.refresh()
                 return
         except ConnectionRefusedError:
             # Explicitly refused: no listener currently owns the local port.
