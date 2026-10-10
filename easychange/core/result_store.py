@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import sys
 import tempfile
 import threading
@@ -114,7 +115,24 @@ class DurableResultStore:
         # File locks are advisory: all claim writers must use this context.
         # A single byte is locked for the full read-then-write transaction.
         with self._lock:
-            with open(self._claim_lock_path, "a+b") as handle:
+            # The claim inode is the authority for cross-process mutation
+            # ownership. Never follow a symlink to an unrelated file/lock.
+            if self._claim_lock_path.is_symlink():
+                raise RuntimeError("RESULT_CLAIM_UNSAFE_LOCK_PATH")
+            flags=(os.O_CREAT|os.O_RDWR|getattr(os,"O_BINARY",0)|
+                   getattr(os,"O_NOFOLLOW",0))
+            try:
+                fd=os.open(self._claim_lock_path,flags,0o600)
+            except OSError as exc:
+                raise RuntimeError("RESULT_CLAIM_LOCK_UNAVAILABLE") from exc
+            try:
+                handle=os.fdopen(fd,"r+b")
+            except BaseException:
+                os.close(fd)
+                raise
+            with handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise RuntimeError("RESULT_CLAIM_UNSAFE_LOCK_TYPE")
                 handle.seek(0)
                 if sys.platform == "win32":
                     import msvcrt
