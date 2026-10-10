@@ -313,9 +313,16 @@ class DurableResultStore:
             raise
         with stream:
             metadata=os.fstat(stream.fileno())
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink!=1:
-                # A hard-linked receipt can alias a file outside the result
-                # store despite a safe-looking on-disk pathname.
+            # On platforms without O_NOFOLLOW (notably Windows), comparing
+            # the opened descriptor to the *unfollowed* path closes the gap
+            # left by a symlink/path swap between get() and os.open().
+            pathname=path.lstat()
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink!=1
+                    or not stat.S_ISREG(pathname.st_mode)
+                    or pathname.st_nlink!=1
+                    or (pathname.st_dev,pathname.st_ino)!=(metadata.st_dev,metadata.st_ino)):
+                # Never interpret an aliased or replaced foreign file as an
+                # authoritative durable execution receipt.
                 raise ValueError("RESULT_RECEIPT_UNSAFE_TYPE")
             raw=stream.read(MAX_COMPRESSED_RECEIPT_BYTES+1)
         if len(raw)>MAX_COMPRESSED_RECEIPT_BYTES:
