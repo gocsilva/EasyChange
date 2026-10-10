@@ -433,13 +433,26 @@ class ProjectRuntimeService:
             if strict:
                 raise ValueError("RUNTIME_PROFILE_CONFIG_UNREADABLE") from exc
             return []
+        # Unknown future-version keys cannot be round-tripped by this writer.
+        # Refuse mutation rather than silently erasing them on os.replace().
+        if strict and (not isinstance(value,dict) or set(value)!={"profiles"}):
+            raise ValueError("RUNTIME_PROFILE_CONFIG_UNKNOWN_FIELDS")
         rows = value.get("profiles") if isinstance(value, dict) else None
         if not isinstance(rows, list) or len(rows)>256:
             if strict:
                 raise ValueError("RUNTIME_PROFILE_CONFIG_INVALID")
             return []
         output = []
+        known_row_fields={
+            "id","ecosystem","kind","project","runnable",
+            "run_argv","test_argv","build_argv","urls",
+            "swagger_candidates","configured","env","env_refs",
+            "inherit_env","env_allowlist","resolved_env_keys",
+            "unresolved_env_refs",
+        }
         for row in rows:
+            if strict and isinstance(row,dict) and set(row)-known_row_fields:
+                raise ValueError("RUNTIME_PROFILE_CONFIG_UNKNOWN_FIELDS")
             if (not isinstance(row, dict) or
                     type(row.get("id")) is not str or
                     not 1<=len(row["id"].strip())<=128):
