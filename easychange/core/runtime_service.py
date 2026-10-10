@@ -1152,10 +1152,17 @@ class ProjectRuntimeService:
                 process_stopped = True
             except Exception:
                 pass
+        # HTTP 200 verifies the endpoint, not the screenshot. This runtime
+        # intentionally does not spin up an automated browser; a missing
+        # image must never be reported as complete visual evidence.
+        screenshot_captured = screenshot_path is not None
         evidence = {
             "created_utc": stamp, "profile": profile, "probe": probe,
             "response_file": _rel(self.workspace.root_path, response_path),
             "screenshot_file": _rel(self.workspace.root_path, screenshot_path) if screenshot_path else None,
+            "http_verified": True,
+            "screenshot_requested": bool(screenshot),
+            "screenshot_captured": screenshot_captured,
             "process": started_process, "process_stopped": process_stopped,
             "keep_running": bool(keep_running), "logs": logs,
         }
@@ -1173,8 +1180,14 @@ class ProjectRuntimeService:
             f"- Process kept running: {bool(keep_running)}\n",
             encoding="utf-8",
         )
-        return {"ok": True, "evidence_dir": _rel(self.workspace.root_path, folder),
-                "report": _rel(self.workspace.root_path, report_path), **evidence}
+        complete = not screenshot or screenshot_captured
+        return {
+            "ok": complete,
+            **({"error": "SWAGGER_SCREENSHOT_NOT_CAPTURED"} if not complete else {}),
+            "evidence_dir": _rel(self.workspace.root_path, folder),
+            "report": _rel(self.workspace.root_path, report_path),
+            **evidence,
+        }
 
     def _evidence_metadata(self, folder: Path) -> dict:
         files = []
