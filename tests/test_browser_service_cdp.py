@@ -554,6 +554,7 @@ def test_cdp_upgrade_preserves_first_frame_from_same_socket_read(monkeypatch):
     ).digest())
     reply=(b"HTTP/1.1 101 Switching Protocols\r\n"
            b"Upgrade: websocket\r\n"
+           b"Connection: Upgrade\r\n"
            b"Sec-WebSocket-Accept: "+accept+b"\r\n\r\n"
            b"\x81\x02OK")
 
@@ -589,6 +590,8 @@ def test_cdp_upgrade_handles_partial_coalesced_first_frame(monkeypatch):
         (encoded+"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
     ).digest())
     headers=(b"HTTP/1.1 101 Switching Protocols\r\n"
+             b"Upgrade: websocket\r\n"
+             b"Connection: Upgrade\r\n"
              b"Sec-WebSocket-Accept: "+accept+b"\r\n\r\n")
     class SyntheticSocket:
         def __init__(self):
