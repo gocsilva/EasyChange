@@ -1423,7 +1423,7 @@ class CommandService:
                 data = self.ubuntu.batch(
                     session_id,
                     commands,
-                    continue_on_error=bool(item.get("continue_on_error", False)),
+                    continue_on_error=item.get("continue_on_error", False),
                     timeout=max(0.5, min(120.0, float(item.get("timeout") or 15.0))),
                     max_bytes=max_bytes,
                 )
