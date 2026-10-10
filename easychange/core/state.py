@@ -85,6 +85,26 @@ class MachineSession:
                     if (type(history) is not list or
                             any(type(item) is not str for item in history)):
                         safe.pop("history", None)
+                    # Scalar session fields also flow into command parsing,
+                    # string operations, editor navigation and transport
+                    # selection. Invalid imported values must not poison an
+                    # otherwise usable workspace on the next startup.
+                    current_file = safe.get("current_file")
+                    if (current_file is not None and
+                            (type(current_file) is not str or
+                             len(current_file) > 4096 or
+                             any(ord(ch) < 32 or 0xD800 <= ord(ch) <= 0xDFFF
+                                 for ch in current_file))):
+                        safe.pop("current_file", None)
+                    line = safe.get("line")
+                    if type(line) is not int or not 1 <= line <= 2_147_483_647:
+                        safe.pop("line", None)
+                    if safe.get("output_mode") not in ("text", "json", "compact"):
+                        safe.pop("output_mode", None)
+                    if safe.get("transport") not in ("local", "hid", "esp_hid"):
+                        safe.pop("transport", None)
+                    if safe.get("mode") not in ("human", "machine"):
+                        safe.pop("mode", None)
                     counts = safe.get("id_counts")
                     if counts is not None and (
                             type(counts) is not dict or
