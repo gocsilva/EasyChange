@@ -219,7 +219,8 @@ class InboundCommandStore:
             value = json.loads(raw)
             if not isinstance(value, dict):
                 raise ValueError("INBOUND_META_NOT_OBJECT")
-            if (value.get("version") != 1
+            if (type(value.get("version")) is not int
+                    or value["version"] != 1
                     or value.get("transfer_id") != transfer_id
                     or value.get("codec") != "zlib"
                     or type(value.get("chunk_count")) is not int
