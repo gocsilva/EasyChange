@@ -92,33 +92,43 @@ def _result_value(result: Any) -> dict[str, Any]:
 
 
 def _json_equal_with_types(left: Any, right: Any) -> bool:
-    """Compare JSON values without Python's True == 1 numeric aliasing.
+    """Compare JSON values without coercing True to 1 or copying wide arrays.
 
-    Iterate rather than recursively allocating two canonical JSON strings:
-    a large structured primary/result is compared without extra serialization.
+    Keep only a depth-first iterator stack and active ancestor pairs. A
+    pending.extend(zip(...)) copies one pair for each element of a wide result
+    before the optical byte-budget check, unnecessarily spiking peak memory.
     """
-    pending = [(left, right)]
-    seen_pairs: set[tuple[int,int]] = set()
-    while pending:
-        lhs, rhs = pending.pop()
+    stack = [(iter(((left, right),)), None)]
+    ancestors: set[tuple[int, int]] = set()
+    while stack:
+        iterator, owner = stack[-1]
+        try:
+            lhs, rhs = next(iterator)
+        except StopIteration:
+            stack.pop()
+            if owner is not None:
+                ancestors.remove(owner)
+            continue
         if type(lhs) is not type(rhs):
             return False
-        if isinstance(lhs, (dict,list)):
-            pair=(id(lhs),id(rhs))
-            if pair in seen_pairs:
-                continue
-            seen_pairs.add(pair)
         if isinstance(lhs, dict):
-            # Non-string keys can serialize to the same name despite having
-            # different Python types (e.g. 1 and "1"). Skip compaction.
+            # JSON stringifies non-string keys, potentially aliasing 1 and "1".
             if (any(type(key) is not str for key in lhs)
                     or lhs.keys() != rhs.keys()):
                 return False
-            pending.extend((value, rhs[key]) for key, value in lhs.items())
+            pair = (id(lhs), id(rhs))
+            if pair in ancestors:
+                continue
+            ancestors.add(pair)
+            stack.append(((value, rhs[key]) for key, value in lhs.items()), pair)
         elif isinstance(lhs, list):
             if len(lhs) != len(rhs):
                 return False
-            pending.extend(zip(lhs, rhs))
+            pair = (id(lhs), id(rhs))
+            if pair in ancestors:
+                continue
+            ancestors.add(pair)
+            stack.append((zip(lhs, rhs), pair))
         elif lhs != rhs:
             return False
     return True
