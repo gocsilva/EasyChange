@@ -248,10 +248,10 @@ def decode_hdmi_qr(frame) -> list[str]:
                     # Never exhaust an unbounded iterator in the HDMI reader.
                     decoded=[value for value in itertools.islice(texts,32)
                              if isinstance(value,str) and value]
-            except TypeError:
-                # An older OpenCV binding can expose multi-QR but reject its
-                # invocation/signature. Attempt the single-QR API on this
-                # same observed frame rather than needlessly losing it.
+            except (TypeError, cv2.error):
+                # OpenCV builds can expose multi-QR yet fail at runtime due
+                # to unsupported signatures or an internal decoder error.
+                # Fall back to the single-QR API on this same observed frame.
                 decoded=[]
         else:
             decoded=[]
