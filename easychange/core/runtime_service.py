@@ -411,25 +411,31 @@ class ProjectRuntimeService:
             "compact": True,
         }
 
-    def _configured_profiles(self) -> list[dict[str, Any]]:
+    def _configured_profiles(self, *, strict: bool = False) -> list[dict[str, Any]]:
         if not self.config_path.exists():
             return []
         try:
             with self.config_path.open("rb") as stream:
                 raw=stream.read(_MAX_RUNTIME_PROFILE_BYTES+1)
             if len(raw)>_MAX_RUNTIME_PROFILE_BYTES:
-                return []
+                raise ValueError("RUNTIME_PROFILE_CONFIG_TOO_LARGE")
             value=json.loads(raw.decode("utf-8-sig"))
-        except (OSError, ValueError, UnicodeError, RecursionError):
+        except (OSError, ValueError, UnicodeError, RecursionError) as exc:
+            if strict:
+                raise ValueError("RUNTIME_PROFILE_CONFIG_UNREADABLE") from exc
             return []
         rows = value.get("profiles") if isinstance(value, dict) else None
         if not isinstance(rows, list) or len(rows)>256:
+            if strict:
+                raise ValueError("RUNTIME_PROFILE_CONFIG_INVALID")
             return []
         output = []
         for row in rows:
             if (not isinstance(row, dict) or
                     type(row.get("id")) is not str or
                     not 1<=len(row["id"].strip())<=128):
+                if strict:
+                    raise ValueError("RUNTIME_PROFILE_CONFIG_INVALID")
                 continue
             # Legacy null fields mean "not configured", unlike a malformed
             # string/dictionary which must not be treated as an iterable.
@@ -441,6 +447,8 @@ class ProjectRuntimeService:
             if (type(raw_urls) is not list or len(raw_urls)>128 or
                     type(raw_swagger) is not list or len(raw_swagger)>128 or
                     type(inherit_env) is not bool):
+                if strict:
+                    raise ValueError("RUNTIME_PROFILE_CONFIG_INVALID")
                 continue
             try:
                 run_argv = self._argv(row.get("run_argv"))
@@ -449,7 +457,9 @@ class ProjectRuntimeService:
                 env_values = self._env_values(row.get("env"))
                 env_refs = self._env_refs(row.get("env_refs"))
                 env_allowlist = self._env_allowlist(row.get("env_allowlist"))
-            except ValueError:
+            except ValueError as exc:
+                if strict:
+                    raise ValueError("RUNTIME_PROFILE_CONFIG_INVALID") from exc
                 continue
             profile_row = {
                 "id": str(row["id"]).strip(),
@@ -475,6 +485,8 @@ class ProjectRuntimeService:
             profile_row["resolved_env_keys"] = env_meta.get("resolved_env_keys", [])
             profile_row["unresolved_env_refs"] = env_meta.get("unresolved_env_refs", [])
             output.append(profile_row)
+        if strict and len({item["id"] for item in output}) != len(output):
+            raise ValueError("RUNTIME_PROFILE_CONFIG_DUPLICATE_ID")
         return output
 
     def configure_profile(
@@ -494,6 +506,8 @@ class ProjectRuntimeService:
         profile_id = str(profile_id or "").strip()
         if not profile_id:
             raise ValueError("PROFILE_ID_REQUIRED")
+        if len(profile_id)>128:
+            raise ValueError("PROFILE_ID_TOO_LONG")
         run = self._argv(run_argv)
         test = self._argv(test_argv)
         build = self._argv(build_argv)
@@ -502,7 +516,9 @@ class ProjectRuntimeService:
         safe_refs = self._env_refs(env_refs)
         safe_allowlist = self._env_allowlist(env_allowlist)
         with _runtime_profile_lock(self.config_path):
-            existing = self._configured_profiles()
+            # Discovery is tolerant, but mutation must never silently
+            # overwrite malformed or unreadable historical configurations.
+            existing = self._configured_profiles(strict=True)
             row = {
                 "id": profile_id, "ecosystem": "custom", "kind": str(kind or "custom"),
                 "project": "runtime_profiles.json", "runnable": bool(run),
