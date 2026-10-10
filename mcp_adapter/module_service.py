@@ -116,7 +116,10 @@ class Handler(BaseHTTPRequestHandler):
             size=int(self.headers.get("Content-Length","0"))
             if not 0<size<=512:
                 return self.send(413,{"error":"PAYLOAD_TOO_LARGE"})
-            request=json.loads(self.rfile.read(size),object_pairs_hook=_unique_service_fields)
+            request=json.loads(
+                self.rfile.read(size), object_pairs_hook=_unique_service_fields,
+                parse_float=_finite_service_json_number,
+                parse_constant=_finite_service_json_number)
             if not isinstance(request,dict):
                 raise ValueError("ATTACH_BODY_REQUIRED")
             from module_bridge import attach_hub,detach_hub
