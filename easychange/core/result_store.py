@@ -988,6 +988,12 @@ class DurableResultStore:
                 # string with millions of digits can monopolize parsing CPU.
                 raise ValueError("INVALID_RESULT_STREAM_CHUNK_INDEX")
             index = int(raw_index)
+            # Reject impossible indexes before a full receipt read/decode.
+            # Even a 64 MiB JSON receipt cannot create more chunks than this
+            # conservative 65 MiB upper bound at the 256-byte minimum size.
+            maximum_index=(MAX_DECODED_RECEIPT_BYTES + 1_048_576) // 256
+            if not 0 <= index <= maximum_index:
+                raise IndexError("RESULT_STREAM_CHUNK_OUT_OF_RANGE")
             if index not in seen:
                 seen.add(index)
                 unique.append(index)
@@ -1121,6 +1127,12 @@ class DurableResultStore:
                 # string with millions of digits can monopolize parsing CPU.
                 raise ValueError("INVALID_RESULT_CHUNK_INDEX")
             index = int(raw_index)
+            # Reject impossible indexes before a full receipt read/decode.
+            # Even a 64 MiB JSON receipt cannot create more chunks than this
+            # conservative 65 MiB upper bound at the 256-byte minimum size.
+            maximum_index=(MAX_DECODED_RECEIPT_BYTES + 1_048_576) // 256
+            if not 0 <= index <= maximum_index:
+                raise IndexError("RESULT_CHUNK_OUT_OF_RANGE")
             if index not in seen:
                 seen.add(index)
                 unique.append(index)
