@@ -52,19 +52,16 @@ def test_invalid_middle_journal_line_cannot_hide_later_rollback_record(tmp_path)
     assert log.read_text(encoding="utf-8")==content
 
 
-def test_only_last_unterminated_append_may_be_skipped_during_recovery(tmp_path):
+def test_torn_final_append_is_uncertain_and_must_not_be_skipped(tmp_path):
     header,log=_paths(tmp_path)
     header.write_text(json.dumps({"format":"append-v2","transaction_id":"TXTRUNC"}),
                       encoding="utf-8")
     partial=_record()+"\n"+'{"path":"not-finished"'
     log.write_text(partial,encoding="utf-8")
-    restored=CommandService(Workspace.open(tmp_path))
-    try:
-        assert restored.transaction_id=="TXTRUNC"
-        assert restored.transaction is not None
-        assert len(restored.transaction)==1
-        assert restored.transaction[0].path=="sample.txt"
-        assert restored._transaction_persisted_count==1
+    for _ in range(2):
+        with pytest.raises(RuntimeError,match="ACTIVE_TRANSACTION_RECOVERY_FAILED"):
+            CommandService(Workspace.open(tmp_path))
+        # Starting the service cannot truncate or silently repair possible
+        # rollback evidence, even on repeated initialization attempts.
         assert log.read_text(encoding="utf-8")==partial
-    finally:
-        restored.close()
+        assert json.loads(header.read_text(encoding="utf-8"))["transaction_id"]=="TXTRUNC"
