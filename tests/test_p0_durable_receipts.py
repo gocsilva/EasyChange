@@ -794,6 +794,46 @@ def test_complete_incremental_json_preserves_exact_result_hash_and_bytes(tmp_pat
     assert store.header(sequence)["sha256"]==finished["result_hash"]
 
 
+def test_complete_persists_exact_hashed_snapshot_when_caller_mutates(tmp_path, monkeypatch):
+    import hashlib
+
+    store = DurableResultStore(tmp_path / "snapshot-receipts")
+    sequence = "QSNAPSHOTRACE1"
+    command_hash = "a" * 64
+    store.claim_running(sequence, command_hash, ":read", mutation=False)
+    result = {
+        "ok": True, "command_id": "before",
+        "data": {"text": "original", "numbers": [1, 2, 3]},
+    }
+    original_encoder = store._encode_result_json
+    captured = []
+
+    def mutate_after_encode(value):
+        raw = original_encoder(value)
+        captured.append(raw)
+        # Deterministically reproduce a concurrent worker mutating the input
+        # after the hash bytes are frozen but before the durable receipt write.
+        value["ok"] = False
+        value["command_id"] = "after"
+        value["data"]["text"] = "changed"
+        value["data"]["numbers"].append(4)
+        return raw
+
+    monkeypatch.setattr(store, "_encode_result_json", mutate_after_encode)
+    finished = store.complete(sequence, command_hash, ":read", result)
+    expected = json.loads(captured[0])
+
+    assert result["ok"] is False
+    assert finished["success"] is True
+    assert finished["command_id"] == "before"
+    assert finished["result"] == expected
+    assert store.result(sequence) == expected
+    assert store.status(sequence)["success"] is True
+    assert finished["result_hash"] == hashlib.sha256(captured[0]).hexdigest()
+    assert finished["result_bytes"] == len(captured[0])
+    assert store.header(sequence)["sha256"] == finished["result_hash"]
+
+
 def test_invalid_chunk_sizes_never_load_durable_result_or_raise_uncaught(tmp_path, monkeypatch):
     service=CommandService(Workspace.open(tmp_path))
     try:
