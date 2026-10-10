@@ -766,16 +766,17 @@ class DurableResultStore:
             )
         return stream, stream_hash, result_hash, len(raw)
 
-    def stream_meta(
-        self,
+    @staticmethod
+    def _stream_metadata(
         sequence: str,
+        payload: tuple[bytes, str, str, int],
         *,
-        chunk_bytes: int = 2048,
-        max_ratio: float = 0.85,
-    ) -> dict[str, Any] | None:
-        payload = self._result_stream_payload(sequence)
-        if payload is None:
-            return None
+        chunk_bytes: int,
+        max_ratio: float,
+    ) -> dict[str, Any]:
+        # Metadata and chunk bytes must come from the *same* immutable
+        # snapshot. A receipt can be atomically replaced by another process
+        # between two separate lookups.
         stream, stream_hash, result_hash, result_bytes = payload
         size = max(256, min(4096, int(chunk_bytes)))
         ratio_limit = max(0.10, min(1.0, float(max_ratio)))
@@ -796,6 +797,20 @@ class DurableResultStore:
             "max_ratio": ratio_limit,
         }
 
+    def stream_meta(
+        self,
+        sequence: str,
+        *,
+        chunk_bytes: int = 2048,
+        max_ratio: float = 0.85,
+    ) -> dict[str, Any] | None:
+        payload = self._result_stream_payload(sequence)
+        if payload is None:
+            return None
+        return self._stream_metadata(
+            sequence, payload, chunk_bytes=chunk_bytes, max_ratio=max_ratio,
+        )
+
     def stream_chunks(
         self,
         sequence: str,
@@ -805,13 +820,12 @@ class DurableResultStore:
         max_chunks: int = 8,
         max_ratio: float = 0.85,
     ) -> dict[str, Any] | None:
-        meta = self.stream_meta(
-            sequence,
-            chunk_bytes=chunk_bytes,
-            max_ratio=max_ratio,
-        )
-        if meta is None:
+        payload = self._result_stream_payload(sequence)
+        if payload is None:
             return None
+        meta = self._stream_metadata(
+            sequence, payload, chunk_bytes=chunk_bytes, max_ratio=max_ratio,
+        )
         if not meta["eligible"]:
             return {**meta, "requested_indexes": [], "chunks": [], "complete": False}
         if not isinstance(indexes, list) or not indexes:
@@ -838,9 +852,6 @@ class DurableResultStore:
                 if len(unique) > limit:
                     raise ValueError(f"RESULT_STREAM_CHUNK_BATCH_LIMIT:{limit}")
 
-        payload = self._result_stream_payload(sequence)
-        if payload is None:
-            return None
         stream, stream_hash, result_hash, result_bytes = payload
         size = int(meta["chunk_bytes"])
         total = int(meta["total_chunks"])
