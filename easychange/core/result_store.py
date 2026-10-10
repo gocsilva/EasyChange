@@ -135,8 +135,16 @@ class DurableResultStore:
                 os.close(fd)
                 raise
             with handle:
-                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                metadata=os.fstat(handle.fileno())
+                if not stat.S_ISREG(metadata.st_mode):
                     raise RuntimeError("RESULT_CLAIM_UNSAFE_LOCK_TYPE")
+                if os.name=="posix" and (
+                        metadata.st_uid!=os.getuid() or
+                        metadata.st_mode & 0o022):
+                    # The predictable lock file must not be writable by a
+                    # different user. Otherwise a second inode or tampered
+                    # lock can invalidate cross-process sequence ownership.
+                    raise RuntimeError("RESULT_CLAIM_UNSAFE_LOCK_OWNER")
                 handle.seek(0)
                 if sys.platform == "win32":
                     import msvcrt
