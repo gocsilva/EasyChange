@@ -53,6 +53,9 @@ from .. import __version__
 # Defensive restart budgets: normal edited text is capped at 4 MiB by
 # FileService; allow generous headroom for legacy JSON escaping/snapshots.
 MAX_ACTIVE_TRANSACTION_HEADER_BYTES = 64 * 1024 * 1024
+# Enforce a generous command envelope *before* strip/casefold/regex or
+# chained parser allocations. Full-file transfers have their own staged path.
+MAX_COMMAND_INPUT_CHARS = 32 * 1024 * 1024
 MAX_ACTIVE_TRANSACTION_RECORD_CHARS = 64 * 1024 * 1024
 
 
@@ -400,6 +403,11 @@ class CommandService:
                 sequence=sequence,
             )
     def execute(self, command: str) -> Result:
+        if not isinstance(command, str):
+            return Result(False, "", error="Command must be text", code="INVALID_COMMAND")
+        if len(command) > MAX_COMMAND_INPUT_CHARS:
+            return Result(False, "", error="Command exceeds input budget",
+                          code="COMMAND_INPUT_TOO_LARGE")
         raw = command.strip()
         if not raw: return Result(False, "", error="Empty command", code="INVALID_COMMAND")
         if raw.casefold().startswith(":u1 "):
