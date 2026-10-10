@@ -585,14 +585,22 @@ class DurableResultStore:
                 # Duplicate delivery must never rewrite the terminal receipt,
                 # even when a retry arrives with a different result payload.
                 return current
-            # A duplicate terminal receipt is already committed. Serialize
-            # the possibly multi-megabyte result only for a newly completed
-            # sequence, after the exclusive claim and hash checks.
-            serialized = json.dumps(
-                result, ensure_ascii=False, separators=(",", ":")
-            ).encode("utf-8")
-            serialized_hash = hashlib.sha256(serialized).hexdigest()
-            execution_summary = _find_execution_summary(result)
+        # No writer needs the receipt lock while a potentially large tool
+        # result is serialized. Re-check under the lock afterward: another
+        # process may have completed this sequence during serialization.
+        serialized = json.dumps(
+            result, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        serialized_hash = hashlib.sha256(serialized).hexdigest()
+        execution_summary = _find_execution_summary(result)
+        with self._claim_lock():
+            current = self.get(sequence)
+            if current is None:
+                raise RuntimeError("RESULT_SEQUENCE_NOT_CLAIMED")
+            if current.get("command_hash") != command_hash:
+                raise ValueError("RESULT_SEQUENCE_COMMAND_HASH_MISMATCH")
+            if current.get("state") == "DONE":
+                return current
             success = bool(result.get("ok"))
             lifecycle = None
             if isinstance(mutation_receipt, dict):
