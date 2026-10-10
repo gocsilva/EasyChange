@@ -165,3 +165,62 @@ def test_empty_buffer_metadata_is_cached_without_full_rescan(tmp_path, monkeypat
         cached=service.info()
     assert cached["bytes"]==0
     assert cached["sha256"]==hashlib.sha256(b"").hexdigest()
+
+
+def test_oversized_metadata_falls_back_to_verified_text_without_unbounded_read(tmp_path,monkeypatch):
+    from pathlib import Path
+
+    service=HumanTextService(tmp_path)
+    saved=service.save("persisted content")
+    oversized=b'{"bytes":17,"padding":"' + b"x"*2048 + b'"}'
+    service.meta_path.write_bytes(oversized)
+    observed=[]
+    original_open=Path.open
+
+    class MeasuredReader:
+        def __init__(self,inner):
+            self.inner=inner
+        def __enter__(self):
+            return self
+        def __exit__(self,*args):
+            return self.inner.__exit__(*args)
+        def read(self,size=-1):
+            observed.append(size)
+            return self.inner.read(size)
+
+    def guarded_open(path,*args,**kwargs):
+        handle=original_open(path,*args,**kwargs)
+        if path==service.meta_path and args and args[0]=="rb":
+            return MeasuredReader(handle)
+        return handle
+
+    with monkeypatch.context() as ctx:
+        ctx.setattr(human_module,"MAX_HUMAN_TEXT_METADATA_BYTES",128)
+        ctx.setattr(Path,"open",guarded_open)
+        refreshed=service.info()
+    assert observed==[129]
+    assert refreshed["sha256"]==saved["sha256"]
+    assert service.load()=="persisted content"
+    assert service.meta_path.read_bytes()!=oversized
+
+
+def test_malformed_metadata_digest_is_not_trusted_as_buffer_identity(tmp_path):
+    import json
+
+    service=HumanTextService(tmp_path)
+    saved=service.save("safe data")
+    spoof=dict(saved)
+    spoof["sha256"]="WRONG"
+    service.meta_path.write_text(json.dumps(spoof),encoding="utf-8")
+    verified=service.info()
+    assert verified["sha256"]==hashlib.sha256(b"safe data").hexdigest()
+    assert verified["sha256"]!="WRONG"
+
+
+def test_human_text_save_rejects_impossible_character_count_before_utf8_copy(tmp_path):
+    service=HumanTextService(tmp_path)
+    service.max_bytes=16
+    with pytest.raises(ValueError,match="HUMAN_TEXT_TOO_LARGE"):
+        service.save("x"*10000)
+    assert not service.path.exists()
+    assert service.save("ótimo")["bytes"]==len("ótimo".encode("utf-8"))
