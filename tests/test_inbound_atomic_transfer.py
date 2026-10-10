@@ -27,6 +27,49 @@ def test_inbound_transfer_id_rejects_unicode_aliases_before_staging(tmp_path, id
     assert not any(item.is_dir() for item in store.root.iterdir())
 
 
+def test_inbound_lock_context_is_invoked_for_full_transfer_lifecycle(tmp_path):
+    import base64
+    import binascii
+    import zlib
+
+    store=InboundCommandStore(tmp_path / "transfer")
+    command=b":state"
+    encoded=zlib.compress(command)
+    key="ULOCKFLOW01"
+    digest=hashlib.sha256(command).hexdigest()
+    begin=store.begin(key,raw_bytes=len(command),
+                      compressed_bytes=len(encoded),chunk_count=1,
+                      sha256=digest)
+    assert begin["duplicate"] is False
+    assert store.status(key)["ready"] is False
+    token=base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+    crc=f"{binascii.crc32(encoded) & 0xffffffff:08x}"
+    assert store.put_chunk(key,index=0,crc32=crc,token=token)["duplicate"] is False
+    assert store.status(key)["verified"] is True
+    recovered,receipt=store.assemble(key)
+    assert recovered==":state" and receipt["sha256"]==digest
+    assert store.abort(key)["removed"] is True
+    assert store.abort(key)["removed"] is False
+
+
+def test_inbound_lock_rejects_symlink_without_touching_external_file(tmp_path):
+    store=InboundCommandStore(tmp_path / "transfer")
+    foreign=tmp_path / "private.txt"
+    foreign.write_bytes(b"do not write to this file")
+    try:
+        store._process_lock_path.symlink_to(foreign)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip("Symlinks not available: "+type(exc).__name__)
+    with pytest.raises(InboundTransferError,match="INBOUND_UNSAFE_LOCK_PATH"):
+        store.begin("USAFEPATH1",raw_bytes=3,compressed_bytes=3,
+                    chunk_count=1,sha256="a"*64)
+    assert foreign.read_bytes()==b"do not write to this file"
+    assert store._process_lock_path.is_symlink()
+    store._process_lock_path.unlink()
+    assert store.begin("USAFEPATH1",raw_bytes=3,compressed_bytes=3,
+                       chunk_count=1,sha256="a"*64)["duplicate"] is False
+
+
 def test_inbound_transfer_ascii_casefold_preserves_existing_directory(tmp_path):
     store=InboundCommandStore(tmp_path / "inbound")
     first=store.begin("uss234567",raw_bytes=10,compressed_bytes=8,
