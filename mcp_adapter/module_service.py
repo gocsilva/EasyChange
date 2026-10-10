@@ -164,6 +164,12 @@ class Handler(BaseHTTPRequestHandler):
                                           "error":"MCP_MODULE_CATALOG_INVALID"})
                 return self.send(200,{"connected":True,"identity":members.get("self"),
                                       "peers":peers,"tools":len(tools)})
+            except HTTPError as exc:
+                # Close the rejected MCP response even when the local send fails.
+                try:
+                    return self.send(503,{"connected":False,"error":"HTTPError"})
+                finally:
+                    exc.close()
             except Exception as exc:
                 return self.send(503,{"connected":False,"error":type(exc).__name__})
         if self.path=="/health":
