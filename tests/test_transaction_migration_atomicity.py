@@ -79,3 +79,32 @@ def test_failed_header_publication_retains_complete_legacy_rollback(tmp_path,mon
             recovered.close()
     finally:
         service.close()
+
+
+def test_append_v2_save_flushes_one_durable_batch_not_each_record(tmp_path,monkeypatch):
+    import easychange.core.command_service as command_module
+    from easychange.core.command_service import Change
+
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        assert service.execute(":begin").ok
+        service.transaction.extend((
+            Change("one.txt","before-1","after-1",command="replace"),
+            Change("two.txt","before-2","after-2",command="replace"),
+        ))
+        actual_fsync=os.fsync
+        calls=[]
+        def observed_fsync(fd):
+            calls.append(fd)
+            return actual_fsync(fd)
+        with monkeypatch.context() as patcher:
+            patcher.setattr(command_module.os,"fsync",observed_fsync)
+            service._save_transaction()
+        assert len(calls)==1
+        assert service._transaction_persisted_count==2
+        log=service.transaction_log_path
+        records=[json.loads(line) for line in log.read_text(
+            encoding="utf-8").splitlines()]
+        assert [item["path"] for item in records]==["one.txt","two.txt"]
+    finally:
+        service.close()
