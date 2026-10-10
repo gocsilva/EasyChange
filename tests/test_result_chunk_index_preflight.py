@@ -32,6 +32,34 @@ def test_plain_chunk_index_rejected_before_read(index,tmp_path,monkeypatch):
     assert calls==[]
 
 
+@pytest.mark.parametrize("invalid", [
+    "false", "true", 0, 1, None, [], {}, float("nan"),
+])
+def test_chunk_compression_must_be_literal_boolean_before_receipt_io(
+    invalid, tmp_path, monkeypatch,
+):
+    store=DurableResultStore(tmp_path/"results")
+    reads=[]
+    def forbidden(sequence):
+        reads.append(sequence)
+        raise AssertionError("COMPRESS_FLAG_TRIGGERED_UNNECESSARY_RESULT_READ")
+    monkeypatch.setattr(store,"_result_payload",forbidden)
+    for action in (
+        lambda: store.chunks("QCOMPRESS", [0], compress_payload=invalid),
+        lambda: store.chunk("QCOMPRESS", 0, compress_payload=invalid),
+    ):
+        with pytest.raises(ValueError,match="INVALID_RESULT_CHUNK_COMPRESSION"):
+            action()
+    assert reads==[]
+
+
+def test_literal_chunk_compression_options_preserve_absent_result(tmp_path):
+    store=DurableResultStore(tmp_path/"results")
+    for allowed in (True,False):
+        assert store.chunks("QABSENT",[0],compress_payload=allowed) is None
+        assert store.chunk("QABSENT",0,compress_payload=allowed) is None
+
+
 def test_well_formed_in_range_index_preserves_empty_receipt_semantics(tmp_path):
     store=DurableResultStore(tmp_path/"results")
     assert store.stream_chunks("QABSENT",[0]) is None
