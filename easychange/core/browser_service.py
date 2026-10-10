@@ -161,7 +161,13 @@ class _WebSocket:
             self.path += "?" + parsed.query
         sock = socket.create_connection((self.host, self.port), timeout=timeout)
         if parsed.scheme == "wss":
-            sock = ssl.create_default_context().wrap_socket(sock, server_hostname=self.host)
+            try:
+                sock = ssl.create_default_context().wrap_socket(
+                    sock, server_hostname=self.host)
+            except BaseException:
+                # A failed TLS upgrade still owns the underlying TCP socket.
+                sock.close()
+                raise
         self.sock = sock
         self.sock.settimeout(timeout)
         self._next_id = 0
@@ -256,8 +262,11 @@ class _WebSocket:
         return bytes(output)
 
     def _send_frame(self, payload: bytes, opcode: int = 1) -> None:
-        mask = os.urandom(4)
         length = len(payload)
+        if length > MAX_CDP_WS_MESSAGE_BYTES:
+            # Masking constructs another complete copy of the payload.
+            raise CdpError("CDP_WEBSOCKET_MESSAGE_TOO_LARGE")
+        mask = os.urandom(4)
         header = bytearray([0x80 | (opcode & 0x0F)])
         if length < 126:
             header.append(0x80 | length)
