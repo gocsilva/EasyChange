@@ -36,6 +36,27 @@ def test_z1_malformed_headers_rejected_before_base64_decode(size,crc):
     decoder.assert_not_called()
 
 
+def test_ec1_codec_never_stringifies_nontext_commands_or_packets():
+    import pytest
+
+    class SideEffectString:
+        def __str__(self):
+            raise AssertionError("COERCED_UNTRUSTED_COMMAND")
+
+    for invalid in (None,False,0,[],{},SideEffectString()):
+        with pytest.raises(ValueError,match="INVALID_EC1_COMMAND"):
+            transport_codec.encode_command(invalid)
+        with pytest.raises(ValueError,match="INVALID_EC1_Z1_PACKET"):
+            transport_codec.decode_command(invalid)
+
+
+def test_ec1_encoder_rejects_unpaired_surrogates_before_compression():
+    import pytest
+    text=":write unsafe.txt "+chr(0xD800)
+    with pytest.raises(ValueError,match="EC1_COMMAND_INVALID_UTF8"):
+        transport_codec.encode_command(text,threshold_bytes=0)
+
+
 def test_z1_legitimate_compressed_command_still_round_trips():
     command=":write sample.txt \"" + ("valid text " * 140) + "\""
     packet,metadata=transport_codec.encode_command(command,threshold_bytes=0)
