@@ -23,6 +23,31 @@ def test_ec2_encoder_rejects_identity_receiver_would_drop(monkeypatch):
     assert optical.decode_result_chunks(valid)["sequence"]=="Q"*256
 
 
+def test_ec2_never_interprets_truthy_nonboolean_as_success():
+    import pytest
+    from easychange.remote import optical_protocol as optical
+
+    for invalid in ("false","true",1,0,{},[]):
+        with pytest.raises(ValueError, match="OPTICAL_RESULT_OK_BOOLEAN_REQUIRED"):
+            optical.encode_result_bundle(
+                {"sequence":"QBOOLQR1","ok":invalid,"data":{"message":"safe"}})
+        with pytest.raises(ValueError, match="OPTICAL_RESULT_OK_BOOLEAN_REQUIRED"):
+            optical.encode_durable_result_header({
+                "sequence":"QBOOLQR1","finished":True,
+                "success":invalid,"sha256":"a"*64,
+                "payload_length":3,
+            })
+
+    failure={"sequence":"QBOOLQR1","ok":False,"data":{}}
+    chunks, final=optical.encode_result_bundle(failure)
+    assert json.loads(final)["ok"] is False
+    assert optical.decode_result_chunks(chunks)["ok"] is False
+    provisional=optical.encode_durable_result_header({
+        "sequence":"QBOOLQR1","finished":True,
+        "success":False,"sha256":"a"*64,"payload_length":3})
+    assert json.loads(provisional)["ok"] is False
+
+
 def test_ec2_final_and_durable_headers_also_fit_qr_render_capacity():
     import pytest
     import easychange.remote.optical_protocol as optical
