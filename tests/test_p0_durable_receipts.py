@@ -2229,3 +2229,33 @@ def test_active_result_store_record_remains_claimed_even_after_active_ttl(tmp_pa
         sequence,"c"*64,":test-job",mutation=False)
     assert acquired is False
     assert replay["execution_id"]==persisted["execution_id"]
+
+
+def test_cleanup_preserves_ambiguous_done_receipt_full_result(tmp_path):
+    import os
+    import time
+
+    store=DurableResultStore(tmp_path/"ambiguous-receipts",ttl_seconds=60)
+    for sequence,field in (
+        ("QAMBIGMUT1","mutation"),
+        ("QAMBIGEXE1","execution_state"),
+        ("QAMBIGHASH1","command_hash"),
+    ):
+        store.claim_running(sequence,"a"*64,":state",mutation=False)
+        done=store.complete(
+            sequence,"a"*64,":state",
+            {"ok":True,"command":"state",
+             "data":{"important":"full replay evidence"},"sequence":sequence})
+        assert done["state"]=="DONE" and done["mutation"] is False
+        ambiguous=dict(done)
+        ambiguous.pop(field)
+        store._write(sequence,ambiguous,run_cleanup=False)
+        path=store._path(sequence)
+        before=path.read_bytes()
+        old=time.time()-store.ttl_seconds-120
+        os.utime(path,(old,old))
+        store._cleanup()
+        assert path.read_bytes()==before
+        receipt=store.get(sequence)
+        assert receipt["result"]["data"]["important"]=="full replay evidence"
+        assert receipt.get("result_expired") is not True
