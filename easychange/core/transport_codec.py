@@ -7,22 +7,29 @@ import zlib
 
 
 def encode_command(command: str, threshold_bytes: int = 256) -> tuple[str, dict]:
-    raw = str(command).encode("utf-8")
+    if type(command) is not str:
+        raise ValueError("INVALID_EC1_COMMAND")
+    try:
+        raw = command.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("EC1_COMMAND_INVALID_UTF8") from exc
     metadata = {"encoding": "raw", "raw_bytes": len(raw), "wire_bytes": len(raw), "crc32": f"{binascii.crc32(raw) & 0xffffffff:08x}"}
     if len(raw) < max(0, int(threshold_bytes)):
-        return str(command), metadata
+        return command, metadata
     compressed = zlib.compress(raw, level=6)
     token = base64.urlsafe_b64encode(compressed).decode("ascii").rstrip("=")
     packet = f":z1 {len(raw)} {binascii.crc32(raw) & 0xffffffff:08x} {token}"
     wire = len(packet.encode("ascii"))
     if wire >= len(raw):
-        return str(command), metadata
+        return command, metadata
     return packet, {"encoding": "zlib+base64url", "raw_bytes": len(raw), "wire_bytes": wire,
                     "compressed_bytes": len(compressed), "crc32": f"{binascii.crc32(raw) & 0xffffffff:08x}"}
 
 
 def decode_command(packet: str, max_raw_bytes: int = 262144) -> tuple[str, dict]:
-    parts = str(packet).split(" ", 3)
+    if type(packet) is not str:
+        raise ValueError("INVALID_EC1_Z1_PACKET")
+    parts = packet.split(" ", 3)
     if len(parts) != 4 or parts[0].casefold() != ":z1":
         raise ValueError("INVALID_EC1_Z1_PACKET")
     # Header values are untrusted HID text. Limit decimal and CRC fields
