@@ -17,6 +17,9 @@ OPTICAL_COMPRESSION_LEVEL = 3
 # Decoder limits apply to untrusted QR strings, not to durable on-disk results.
 MAX_EC2_PACKETS = 200_000
 MAX_EC2_PACKET_TEXT_CHARS = 65_536
+# The desktop Qt renderer uses QR error correction M: Version 40 byte-mode
+# capacity is 2331 bytes. Keep outgoing EC2 envelopes renderable as QR.
+MAX_EC2_QR_RENDER_BYTES = 2331
 # Includes envelope overhead and duplicates: cap the complete untrusted QR set.
 MAX_EC2_PACKET_SET_CHARS = 64 * 1024 * 1024
 MAX_EC2_TOKEN_CHARS = 16 * 1024 * 1024
@@ -259,6 +262,8 @@ def _packet_json(
     # byte budgets pass, the receiver rejects a >64 KiB QR envelope.
     if len(rendered) > MAX_EC2_PACKET_TEXT_CHARS:
         raise ValueError("OPTICAL_PACKET_TEXT_TOO_LARGE")
+    if len(rendered.encode("utf-8")) > MAX_EC2_QR_RENDER_BYTES:
+        raise ValueError("OPTICAL_QR_CAPACITY_EXCEEDED")
     return rendered
 
 
