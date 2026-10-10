@@ -90,6 +90,25 @@ def test_inbound_lock_fdopen_failure_releases_raw_descriptor(tmp_path):
         assert store._process_lock_path.is_file()
 
 
+def test_inbound_lock_rejects_hardlink_to_another_regular_file(tmp_path):
+    import os
+
+    store=InboundCommandStore(tmp_path / "transfer")
+    foreign=tmp_path / "external-control.txt"
+    foreign.write_bytes(b"private contents")
+    try:
+        os.link(foreign,store._process_lock_path)
+    except (OSError,NotImplementedError) as exc:
+        pytest.skip("Hard links not supported: "+type(exc).__name__)
+    with pytest.raises(InboundTransferError,match="INBOUND_UNSAFE_LOCK_TYPE"):
+        store.begin("UHARDLINK1",raw_bytes=3,compressed_bytes=3,
+                    chunk_count=1,sha256="a"*64)
+    assert foreign.read_bytes()==b"private contents"
+    store._process_lock_path.unlink()
+    assert store.begin("UHARDLINK1",raw_bytes=3,compressed_bytes=3,
+                       chunk_count=1,sha256="a"*64)["duplicate"] is False
+
+
 def test_inbound_transfer_ascii_casefold_preserves_existing_directory(tmp_path):
     store=InboundCommandStore(tmp_path / "inbound")
     first=store.begin("uss234567",raw_bytes=10,compressed_bytes=8,
