@@ -6,6 +6,42 @@ from urllib.error import HTTPError
 import module_bridge
 
 class TestHubRedirectBoundary(unittest.TestCase):
+    def test_attach_never_accepts_other_modules_identity_or_credential(self):
+        from unittest.mock import patch
+
+        canonical=module_bridge.CANONICAL_MODULE_ID
+        foreign=next(name for name in ("esp","easychange","android","bmollm")
+                     if name!=canonical)
+        token="T"*48
+        with patch.object(module_bridge,"_runtime_token","previous-token"), \
+             patch.object(module_bridge.MCPBridge,"peers",
+                          side_effect=AssertionError("FOREIGN_IDENTITY_CONTACTED")) as peers:
+            with self.assertRaisesRegex(PermissionError,"HUB_MODULE_IDENTITY_MISMATCH"):
+                module_bridge.attach_hub(token,foreign)
+            self.assertEqual(module_bridge._runtime_token,"previous-token")
+            peers.assert_not_called()
+
+    def test_attach_requires_hub_confirmation_of_own_identity(self):
+        from unittest.mock import patch
+
+        canonical=module_bridge.CANONICAL_MODULE_ID
+        wrong=next(name for name in ("esp","easychange","android","bmollm")
+                   if name!=canonical)
+        token="T"*48
+        with patch.object(module_bridge,"_runtime_token","previous-token"), \
+             patch.object(module_bridge.MCPBridge,"peers",
+                          return_value={"ok":True,"self":wrong}):
+            with self.assertRaisesRegex(PermissionError,"HUB_MODULE_IDENTITY_MISMATCH"):
+                module_bridge.attach_hub(token,canonical)
+            self.assertEqual(module_bridge._runtime_token,"previous-token")
+        with patch.object(module_bridge,"_runtime_token",""), \
+             patch.object(module_bridge.MCPBridge,"peers",
+                          return_value={"ok":True,"self":canonical}):
+            connected=module_bridge.attach_hub(token,canonical)
+            self.assertEqual(connected,{"connected":True,"id":canonical})
+            self.assertEqual(module_bridge._runtime_token,token)
+            self.assertEqual(module_bridge.detach_hub(token),{"connected":False})
+
     def test_no_external_proxy_config(self):
         from urllib.request import ProxyHandler
         handlers=[h for h in module_bridge._local_opener.handlers
