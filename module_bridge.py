@@ -103,11 +103,24 @@ class MCPBridge:
         headers={"Authorization":"Bearer "+self.token}
         payload=None
         if body is not None:
-            payload=json.dumps(body,ensure_ascii=False).encode("utf-8")
-            # Mirror the server's admission limits before sending anything.
-            # The ordinary mailbox/ACK plane must not inherit the larger
-            # tool-RPC allowance.
+            # Reject a single huge direct text field *before* json.dumps
+            # copies and escapes it. This covers ordinary send payloads,
+            # batched ACK IDs and top-level tool arguments. Nested structures
+            # remain subject to the exact encoded-byte limit below.
             request_limit=(1_048_576 if path=="/v1/tools/call" else 16384+1024)
+            if isinstance(body,dict):
+                fields=list(body.values())
+                for field in fields:
+                    if isinstance(field,(dict,list)):
+                        fields.extend(field.values() if isinstance(field,dict) else field)
+                    elif isinstance(field,str) and len(field)>request_limit:
+                        raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
+                # The loop above only expands one nesting layer; check all
+                # collected leaves without repeatedly serializing inputs.
+                if any(isinstance(v,str) and len(v)>request_limit for v in fields):
+                    raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
+            payload=json.dumps(body,ensure_ascii=False).encode("utf-8")
+            # The exact UTF-8 byte budget still decides final admission.
             if len(payload)>request_limit:
                 raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
             headers["Content-Type"]="application/json"
