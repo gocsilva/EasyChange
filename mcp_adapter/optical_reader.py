@@ -204,11 +204,13 @@ def decode_hdmi_qr(frame) -> list[str]:
         # allocate multiple temporary images, so reject before calling cv2.
         return []
     import cv2
-    detector=getattr(_qr_detectors,"detector",None)
-    if detector is None:
-        detector=cv2.QRCodeDetector()
-        _qr_detectors.detector=detector
     try:
+        detector=getattr(_qr_detectors,"detector",None)
+        if detector is None:
+            # Decoder construction can fail transiently as a capture backend
+            # is reset. Leave the thread-local slot empty for a later retry.
+            detector=cv2.QRCodeDetector()
+            _qr_detectors.detector=detector
         ok, texts, _points, _rectified=detector.detectAndDecodeMulti(frame)
         decoded=[value for value in texts if isinstance(value,str) and value] if ok and texts else []
         if not decoded:
