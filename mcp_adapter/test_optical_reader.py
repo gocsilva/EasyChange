@@ -161,6 +161,54 @@ class OpticalReaderTests(unittest.TestCase):
                          sum(len(__import__("json").loads(raw)["d"])
                              for raw in session.chunks.values()))
 
+    def test_verified_ec2_result_hands_off_immediately_to_new_transfer(self):
+        import hashlib
+        import json
+
+        first=encode_result_chunks({
+            "sequence":"EC2-OLD-DONE","ok":True,"data":{"text":"first"}})
+        next_text="".join(hashlib.sha256(str(i).encode()).hexdigest()
+                          for i in range(90))
+        next_packets=encode_result_chunks({
+            "sequence":"EC2-NEXT-DONE","ok":True,"data":{"text":next_text}})
+        self.assertGreater(len(next_packets),1)
+        assembler=OpticalAssembler()
+        old=assembler.ingest(first)
+        self.assertTrue(old["verified"])
+        self.assertEqual(old["sequence"],"EC2-OLD-DONE")
+        # A late packet from another carousel cannot evict the verified
+        # result before the beginning (index zero) arrives.
+        still_old=assembler.ingest(next_packets[1:])
+        self.assertTrue(still_old["verified"])
+        self.assertEqual(still_old["sequence"],"EC2-OLD-DONE")
+        first_new=assembler.ingest(next_packets[:1])
+        self.assertFalse(first_new["complete"])
+        self.assertEqual(first_new["sequence"],"EC2-NEXT-DONE")
+        result=assembler.ingest(next_packets[1:])
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["sequence"],"EC2-NEXT-DONE")
+        self.assertEqual(result["payload"]["data"]["text"],next_text)
+        self.assertEqual(assembler.ingest([])["sequence"],"EC2-NEXT-DONE")
+
+    def test_bad_crc_start_packet_cannot_evict_verified_transfer(self):
+        import json
+
+        first=encode_result_chunks({
+            "sequence":"EC2-SAFE-DONE","ok":True,"data":{"text":"verified"}})
+        next_packets=encode_result_chunks({
+            "sequence":"EC2-CORRUPT-NEXT","ok":True,"data":{"text":"next"}})
+        assembler=OpticalAssembler()
+        assembler.ingest(first)
+        invalid=json.loads(next_packets[0])
+        invalid["d"]="!"+invalid["d"][1:]
+        held=assembler.ingest([json.dumps(invalid)])
+        self.assertTrue(held["verified"])
+        self.assertEqual(held["sequence"],"EC2-SAFE-DONE")
+        verified=assembler.ingest(next_packets)
+        self.assertTrue(verified["verified"])
+        self.assertEqual(verified["sequence"],"EC2-CORRUPT-NEXT")
+
+
     def test_unpaired_provisional_header_expires_only_on_new_frames(self):
         from easychange.remote.optical_protocol import encode_durable_result_header
         from mcp_adapter import optical_reader
