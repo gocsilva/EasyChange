@@ -118,8 +118,14 @@ class ModuleGUI:
                 self.message.set(
                     "Porta local ocupada; serviço externo ainda não confirmado.")
                 return
-        except OSError:
+        except ConnectionRefusedError:
+            # Explicitly refused: no listener currently owns the local port.
             pass
+        except OSError as exc:
+            # A timeout or socket/resource error is not proof the port is free.
+            self.message.set(
+                "Não foi possível confirmar porta local: "+type(exc).__name__)
+            return
         folder=ROOT/"logs"
         python=ROOT/".venv"/"Scripts"/"python.exe"
         if not python.is_file():
