@@ -210,7 +210,12 @@ class Handler(BaseHTTPRequestHandler):
                 parse_constant=_finite_service_json_number)
             if not isinstance(request,dict):
                 raise ValueError("ATTACH_BODY_REQUIRED")
-            from module_bridge import attach_hub,detach_hub
+            try:
+                from module_bridge import attach_hub,detach_hub
+            except (ImportError,RuntimeError,ValueError,OSError):
+                # Invalid optional MCP bootstrap must not masquerade as
+                # malformed caller credentials or strand the standalone peer.
+                return self.send(503,{"error":"HUB_UNAVAILABLE"})
             token=request.get("token")
             if self.path=="/v1/attach":
                 return self.send(200,attach_hub(token,"easychange"))
