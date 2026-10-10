@@ -315,12 +315,21 @@ class _WebSocket:
             if opcode == 10:
                 continue
             if opcode == 1:
+                if started:
+                    # A second text start cannot replace or append to a
+                    # partially received CDP reply. Discard the corrupt
+                    # connection rather than mixing unrelated request IDs.
+                    raise CdpError("CDP_WEBSOCKET_INVALID_FRAGMENT_SEQUENCE")
                 fragments.extend(payload)
                 started = True
-            elif opcode == 0 and started:
+            elif opcode == 0:
+                if not started:
+                    raise CdpError("CDP_WEBSOCKET_INVALID_FRAGMENT_SEQUENCE")
                 fragments.extend(payload)
             else:
-                continue
+                # CDP transports JSON only as text; binary and reserved
+                # opcodes cannot be interpreted as safe JSON boundaries.
+                raise CdpError("CDP_WEBSOCKET_UNSUPPORTED_OPCODE")
             if fin:
                 # WebSocket text frames must contain valid UTF-8. Replacement
                 # characters silently corrupt CDP ids, selectors and data.
