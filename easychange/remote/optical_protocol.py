@@ -283,7 +283,10 @@ def _header_json(
     }
     if broadcast_count is not None:
         header["w"] = max(0, min(int(total), int(broadcast_count)))
-    return json.dumps(header, ensure_ascii=False, separators=(",", ":"))
+    rendered = json.dumps(header, ensure_ascii=False, separators=(",", ":"))
+    if len(rendered.encode("utf-8")) > MAX_EC2_QR_RENDER_BYTES:
+        raise ValueError("OPTICAL_QR_CAPACITY_EXCEEDED")
+    return rendered
 
 
 
@@ -307,13 +310,16 @@ def encode_durable_result_header(header: dict[str, Any]) -> str:
     mutation_state = (
         header.get("mutation_state") if bool(header.get("mutation")) else None
     )
-    return json.dumps({
+    rendered = json.dumps({
         "p": HEADER_PROTOCOL, "v": 1, "s": sequence, "f": True,
         "ok": bool(header.get("success")), "rc": header.get("return_code"),
         "l": payload_length, "n": 0, "h": str(header.get("sha256") or ""),
         "m": mutation_state, "cid": header.get("command_id"),
         "w": 0, "d": 1,
     }, ensure_ascii=False, separators=(",", ":"))
+    if len(rendered.encode("utf-8")) > MAX_EC2_QR_RENDER_BYTES:
+        raise ValueError("OPTICAL_QR_CAPACITY_EXCEEDED")
+    return rendered
 def encode_result_chunks(
     result: Any,
     *,
