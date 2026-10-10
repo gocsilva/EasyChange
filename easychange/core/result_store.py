@@ -53,6 +53,10 @@ def _preflight_result_json(value: Any, byte_budget: int) -> None:
         elif isinstance(item,(dict,list,tuple)):
             if len(item)>byte_budget:
                 raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+            if isinstance(item,dict) and any(type(key) is not str for key in item):
+                # JSON coerces integer/bool keys to strings, which can collide
+                # with existing string keys in a durable replay receipt.
+                raise ValueError("INVALID_RESULT_RECEIPT_KEY")
             identity=id(item)
             if identity in ancestors:
                 raise ValueError("Circular reference detected")
