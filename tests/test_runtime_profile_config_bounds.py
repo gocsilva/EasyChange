@@ -77,3 +77,49 @@ def test_oversized_or_excessive_profile_data_is_rejected(tmp_path):
 def test_deeply_nested_profile_config_fails_without_recursing_forever(tmp_path):
     malformed='{"profiles":'+("["*1500)+"0"+("]"*1500)+"}"
     assert _read_profiles(tmp_path,malformed)==[]
+
+
+def test_profile_update_is_atomic_and_preserves_original_after_replace_failure(
+        tmp_path):
+    import pytest
+
+    root=tmp_path/".easychange"
+    root.mkdir()
+    runtime=object.__new__(ProjectRuntimeService)
+    runtime.workspace=SimpleNamespace(root_path=tmp_path)
+    runtime.config_path=root/"runtime_profiles.json"
+    runtime.resolve_environment=lambda *_a,**_k: (
+        {},{"resolved_env_keys":[],"unresolved_env_refs":[]})
+
+    runtime.configure_profile("first",run_argv=["python","--version"],
+                              inherit_env=False)
+    original=runtime.config_path.read_bytes()
+    with patch("easychange.core.runtime_service.os.replace",
+               side_effect=OSError("SIMULATED_REPLACE_FAILURE")):
+        with pytest.raises(OSError,match="SIMULATED_REPLACE_FAILURE"):
+            runtime.configure_profile("second",test_argv=["python","-m","pytest"])
+    assert runtime.config_path.read_bytes()==original
+    assert not list(root.glob(".runtime_profiles.json.*.tmp"))
+    assert [row["id"] for row in runtime._configured_profiles()]==["first"]
+
+    runtime.configure_profile("second",test_argv=["python","-m","pytest"])
+    assert {row["id"] for row in runtime._configured_profiles()}=={"first","second"}
+
+
+def test_runtime_profile_replacement_stays_owner_only_on_posix(tmp_path):
+    import os
+    import stat
+
+    root=tmp_path/".easychange"
+    root.mkdir()
+    runtime=object.__new__(ProjectRuntimeService)
+    runtime.workspace=SimpleNamespace(root_path=tmp_path)
+    runtime.config_path=root/"runtime_profiles.json"
+    runtime.resolve_environment=lambda *_a,**_k: (
+        {},{"resolved_env_keys":[],"unresolved_env_refs":[]})
+    runtime.configure_profile("private",env={"TEST_VALUE":"synthetic"},
+                              inherit_env=False)
+    assert runtime.config_path.is_file()
+    if os.name=="posix":
+        assert stat.S_IMODE(runtime.config_path.stat().st_mode)==0o600
+    assert not list(root.glob(".runtime_profiles.json.*.tmp"))
