@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 from pathlib import Path
 import subprocess
 import sys
@@ -75,6 +76,8 @@ class ModuleGUI:
         self._refresh_inflight=False
         self._refresh_generation=0
         self._readiness_job=None
+        self._gui_results=queue.Queue(maxsize=16)
+        self._gui_pump_job=None
         parent=ttk.Frame(self.root,padding=18)
         parent.pack(fill="both",expand=True)
         ttk.Label(parent,text=NAME,font=("Segoe UI",17,"bold")).pack(anchor="w")
@@ -88,7 +91,42 @@ class ModuleGUI:
         self.message=tk.StringVar(value="Verificando serviço...")
         ttk.Label(parent,textvariable=self.message,wraplength=460).pack(anchor="w",pady=12)
         self.root.protocol("WM_DELETE_WINDOW",self.close)
+        self._gui_pump_job=self.root.after(75,self._drain_gui_results)
         self.refresh()
+
+    def _post_gui_result(self, callback):
+        """Worker threads submit data; only the Tk owner schedules callbacks."""
+        pending=getattr(self,"_gui_results",None)
+        if pending is None:
+            # Minimal headless unit harnesses instantiate ModuleGUI without
+            # __init__. Normal GUI instances always use the bounded queue.
+            self.root.after(0,callback)
+            return True
+        if self._closing:
+            return False
+        try:
+            pending.put_nowait(callback)
+            return True
+        except queue.Full:
+            return False
+
+    def _drain_gui_results(self):
+        """Called only by Tk. Never invoke root.after from a health worker."""
+        self._gui_pump_job=None
+        if self._closing:
+            return
+        for _ in range(16):
+            try:
+                callback=self._gui_results.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback()
+            except Exception as exc:
+                if not self._closing:
+                    self.message.set("Falha na atualização: "+type(exc).__name__)
+        if not self._closing:
+            self._gui_pump_job=self.root.after(75,self._drain_gui_results)
 
     def _cancel_readiness(self):
         pending=getattr(self,"_readiness_job",None)
@@ -149,10 +187,9 @@ class ModuleGUI:
                     # releasing here (not after I/O) prevents callback storms.
                     if generation==self._refresh_generation:
                         self._refresh_inflight=False
-            try:
-                self.root.after(0,update)
-            except (RuntimeError,tk.TclError):
-                # A closing Tk interpreter cannot receive the callback.
+            if not self._post_gui_result(update):
+                # Never retain a busy flag if the bounded result queue cannot
+                # accept this update or the window has already closed.
                 if generation==self._refresh_generation:
                     self._refresh_inflight=False
         try:
@@ -290,6 +327,10 @@ class ModuleGUI:
         self._closing=True
         self._cancel_readiness()
         if self.stop():
+            job=getattr(self,"_gui_pump_job",None)
+            if job is not None:
+                self.root.after_cancel(job)
+                self._gui_pump_job=None
             self.root.destroy()
         else:
             # Preserve ownership and let the user retry stopping the service.
