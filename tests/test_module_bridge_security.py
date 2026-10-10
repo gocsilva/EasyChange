@@ -6,6 +6,32 @@ from urllib.error import HTTPError
 import module_bridge
 
 class TestHubRedirectBoundary(unittest.TestCase):
+    def test_hub_rejections_close_http_error_response(self):
+        import io
+        from urllib.error import HTTPError
+        from unittest.mock import Mock, patch
+        from mcp_adapter.module_service import Handler
+
+        for upstream, expected in ((403, 403),(503, 503)):
+            with self.subTest(status=upstream):
+                payload=b'{"token":"invalid-test-token"}'
+                handler=object.__new__(Handler)
+                handler.path="/v1/attach"
+                handler.headers={"Content-Type":"application/json",
+                                 "Content-Length":str(len(payload))}
+                handler.rfile=io.BytesIO(payload)
+                handler.send=Mock()
+                response=io.BytesIO(b'{"error":"UNTRUSTED_UPSTREAM_CONTENT"}')
+                failure=HTTPError("http://127.0.0.1:8786/v1/peers",
+                                  upstream,"hub rejected",{},response)
+                with patch("module_bridge.attach_hub",side_effect=failure):
+                    handler.do_POST()
+                self.assertTrue(response.closed)
+                label=("HUB_CREDENTIAL_REJECTED" if expected==403
+                       else "HUB_UNAVAILABLE")
+                handler.send.assert_called_once_with(expected,{"error":label})
+
+
     def test_offline_hub_attach_returns_recoverable_http_503(self):
         import io
         from unittest.mock import Mock,patch
