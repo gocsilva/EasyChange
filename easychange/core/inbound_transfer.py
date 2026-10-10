@@ -152,11 +152,26 @@ class InboundCommandStore:
 
     @classmethod
     def _read_chunk_bounded(cls, path: Path) -> bytes:
-        # An interrupted/legacy or externally corrupted part may be larger
-        # than the protocol allows. Never allocate its entire disk contents.
+        # Chunks are untrusted local files after a restart. Never follow a
+        # swapped symlink, read a FIFO/device, or load unbounded data.
+        if path.is_symlink():
+            raise InboundTransferError("INBOUND_CHUNK_READ_FAILED")
+        flags=(os.O_RDONLY|getattr(os,"O_BINARY",0)|
+               getattr(os,"O_NOFOLLOW",0))
         try:
-            with path.open("rb") as stream:
-                payload = stream.read(cls.MAX_CHUNK_BYTES + 1)
+            fd=os.open(path,flags)
+        except OSError as exc:
+            raise InboundTransferError("INBOUND_CHUNK_READ_FAILED") from exc
+        try:
+            stream=os.fdopen(fd,"rb")
+        except BaseException:
+            os.close(fd)
+            raise
+        try:
+            with stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise InboundTransferError("INBOUND_CHUNK_READ_FAILED")
+                payload=stream.read(cls.MAX_CHUNK_BYTES+1)
         except OSError as exc:
             raise InboundTransferError("INBOUND_CHUNK_READ_FAILED") from exc
         if len(payload) > cls.MAX_CHUNK_BYTES:
