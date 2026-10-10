@@ -419,7 +419,16 @@ class ProjectRuntimeService:
                 raw=stream.read(_MAX_RUNTIME_PROFILE_BYTES+1)
             if len(raw)>_MAX_RUNTIME_PROFILE_BYTES:
                 raise ValueError("RUNTIME_PROFILE_CONFIG_TOO_LARGE")
-            value=json.loads(raw.decode("utf-8-sig"))
+            def unique_fields(pairs):
+                fields={}
+                for key,item in pairs:
+                    if key in fields:
+                        raise ValueError("RUNTIME_PROFILE_CONFIG_DUPLICATE_KEY")
+                    fields[key]=item
+                return fields
+            value=json.loads(
+                raw.decode("utf-8-sig"),
+                object_pairs_hook=unique_fields if strict else dict)
         except (OSError, ValueError, UnicodeError, RecursionError) as exc:
             if strict:
                 raise ValueError("RUNTIME_PROFILE_CONFIG_UNREADABLE") from exc
@@ -446,7 +455,12 @@ class ProjectRuntimeService:
             # a dict can hide executable-looking URLs in arbitrary keys.
             if (type(raw_urls) is not list or len(raw_urls)>128 or
                     type(raw_swagger) is not list or len(raw_swagger)>128 or
-                    type(inherit_env) is not bool):
+                    type(inherit_env) is not bool or
+                    (strict and (
+                        len(raw_urls)>16 or len(raw_swagger)>32 or
+                        any(type(item) is not str or not item.startswith(
+                            ("http://","https://")) for item in raw_urls+raw_swagger)
+                    ))):
                 if strict:
                     raise ValueError("RUNTIME_PROFILE_CONFIG_INVALID")
                 continue
