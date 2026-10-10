@@ -24,6 +24,21 @@ MAX_EC2_COMPRESSED_BYTES = 12 * 1024 * 1024
 MAX_EC2_RESULT_BYTES = 16 * 1024 * 1024
 
 
+def valid_ec2_identity(packet: dict) -> bool:
+    """The first QR cannot reserve an assembly using malformed hash metadata."""
+    if not isinstance(packet, dict):
+        return False
+    seq, digest, crc = packet.get("s"), packet.get("h"), packet.get("c")
+    alphabet = "0123456789abcdef"
+    return (
+        isinstance(seq, str) and bool(seq) and len(seq) <= 256
+        and isinstance(digest, str) and len(digest) == 16
+        and all(char in alphabet for char in digest)
+        and isinstance(crc, str) and len(crc) == 8
+        and all(char in alphabet for char in crc)
+    )
+
+
 def _unique_optical_json_fields(pairs):
     fields={}
     for key,value in pairs:
@@ -373,6 +388,8 @@ def decode_result_chunks(payloads: Collection[str]) -> dict[str, Any]:
         chunk = decode_ec2_packet_json(raw_packet)
         if not isinstance(chunk, dict) or chunk.get("p") != PROTOCOL:
             continue
+        if not valid_ec2_identity(chunk):
+            raise ValueError("invalid optical transfer identity")
         if first is None:
             first = chunk
             total = chunk.get("n")
