@@ -27,6 +27,7 @@ def _gui(tmp_path, *, healthy=False):
     exec(compile(ast.Module(body=[klass],type_ignores=[]),
                  "<standalone-port-test>","exec"),ns)
     gui=object.__new__(ns["ModuleGUI"])
+    gui._refresh_generation=0
     gui.process=None
     gui.message=Mock()
     gui.root=Mock()
@@ -45,15 +46,16 @@ def test_bound_port_during_unhealthy_startup_does_not_spawn_competitor(tmp_path)
     assert "Porta local ocupada" in gui.message.set.call_args.args[0]
 
 
-def test_healthy_external_service_is_preserved_without_even_probing_port(tmp_path):
-    gui,_settings=_gui(tmp_path,healthy=True)
-    with patch("socket.create_connection") as probe, \
+def test_external_listener_is_preserved_without_blocking_on_http_health(tmp_path):
+    gui,settings=_gui(tmp_path,healthy=True)
+    connection=MagicMock()
+    with patch("socket.create_connection",return_value=connection) as probe, \
          patch("subprocess.Popen") as spawn:
         gui.start()
-    probe.assert_not_called()
+    probe.assert_called_once_with(("127.0.0.1",settings["PORT"]),timeout=0.2)
     spawn.assert_not_called()
     assert gui.process is None
-    assert "fora desta GUI" in gui.message.set.call_args.args[0]
+    assert "Porta local ocupada" in gui.message.set.call_args.args[0]
 
 
 def test_ambiguous_port_probe_failure_fails_closed(tmp_path):
