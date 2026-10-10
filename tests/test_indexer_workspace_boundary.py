@@ -51,6 +51,45 @@ def test_case_variant_protection_is_durable_and_scrubs_legacy_rows(tmp_path):
     reopened.close()
 
 
+def test_concurrent_indexers_merge_protected_paths_without_losing_exclusions(tmp_path):
+    root=tmp_path/"project"
+    root.mkdir()
+    for name in ("FirstSecret.py","SecondSecret.py","Visible.py"):
+        (root/name).write_text(
+            f"def {name[:-3]}Symbol(): return 'SENSITIVE_{name[:-3]}'\n",
+            encoding="utf-8")
+
+    a=Indexer(root)
+    b=Indexer(root)
+    try:
+        assert b.refresh(force=True)["files"]==3
+        a.protect_path("firstsecret.py",scrub=False)
+        # b opened before a protected the file. It must pick up protection
+        # from the shared metadata rather than returning stale FTS results.
+        assert b.search("SENSITIVE_FirstSecret")==[]
+        assert b.symbols(name="FirstSecretSymbol")==[]
+        assert b.update_path("FirstSecret.py")["protected"] is True
+
+        b.protect_path("secondsecret.py",scrub=False)
+        assert a.search("SENSITIVE_SecondSecret")==[]
+        assert a.update_path("SecondSecret.py")["protected"] is True
+
+        # Serialized metadata merge must retain both exclusion records.
+        check=Indexer(root)
+        try:
+            assert set(check.protected_paths())=={
+                "firstsecret.py","secondsecret.py"}
+            assert check.refresh(force=True)["files"]==1
+            assert check.search("SENSITIVE_Visible")
+            assert check.search("SENSITIVE_FirstSecret")==[]
+            assert check.search("SENSITIVE_SecondSecret")==[]
+        finally:
+            check.close()
+    finally:
+        a.close()
+        b.close()
+
+
 def test_corrupt_persisted_protection_metadata_fails_closed(tmp_path):
     root=tmp_path/"project"
     root.mkdir()
