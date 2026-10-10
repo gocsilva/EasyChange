@@ -186,10 +186,14 @@ class DurableResultStore:
         for fragment in encoder.iterencode(value):
             if len(fragment)>MAX_DECODED_RECEIPT_BYTES:
                 raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
-            encoded=fragment.encode("utf-8")
-            if len(wire)+len(encoded)>MAX_DECODED_RECEIPT_BYTES:
-                raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
-            wire.extend(encoded)
+            # iterencode can yield one very large Unicode value. Bound the
+            # transient UTF-8 allocation to 4096 code points (up to 16 KiB),
+            # not four times the complete receipt budget.
+            for offset in range(0,len(fragment),4096):
+                encoded=fragment[offset:offset+4096].encode("utf-8")
+                if len(wire)+len(encoded)>MAX_DECODED_RECEIPT_BYTES:
+                    raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+                wire.extend(encoded)
         compressed = zlib.compress(wire, level=1)
         if len(compressed) > MAX_COMPRESSED_RECEIPT_BYTES:
             raise ValueError("RESULT_RECEIPT_COMPRESSED_TOO_LARGE")
@@ -506,7 +510,8 @@ class DurableResultStore:
                 return None
             try:
                 value = self._decode(self._read_compressed(target))
-            except (OSError, ValueError, json.JSONDecodeError, zlib.error) as exc:
+            except (OSError, ValueError, UnicodeError, OverflowError,
+                    RecursionError, zlib.error) as exc:
                 # A present but unreadable receipt is not a never-seen command.
                 # Fail closed instead of allowing mark_running to execute again.
                 raise RuntimeError("RESULT_RECEIPT_UNREADABLE") from exc
