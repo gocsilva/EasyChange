@@ -109,16 +109,30 @@ class MCPBridge:
             # remain subject to the exact encoded-byte limit below.
             request_limit=(1_048_576 if path=="/v1/tools/call" else 16384+1024)
             if isinstance(body,dict):
-                fields=list(body.values())
-                for field in fields:
-                    if isinstance(field,(dict,list)):
-                        fields.extend(field.values() if isinstance(field,dict) else field)
-                    elif isinstance(field,str) and len(field)>request_limit:
+                # Iterative scan with a bounded visit budget: deep, shared
+                # or cyclic structures cannot make preflight loop forever.
+                pending=[body]
+                seen_containers=set()
+                visits=0
+                while pending:
+                    item=pending.pop()
+                    visits+=1
+                    if visits>request_limit:
                         raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
-                # The loop above only expands one nesting layer; check all
-                # collected leaves without repeatedly serializing inputs.
-                if any(isinstance(v,str) and len(v)>request_limit for v in fields):
-                    raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
+                    if isinstance(item,str):
+                        if len(item)>request_limit:
+                            raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
+                    elif isinstance(item,(dict,list,tuple)):
+                        if id(item) in seen_containers:
+                            continue
+                        seen_containers.add(id(item))
+                        if len(item)>request_limit:
+                            raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
+                        if isinstance(item,dict):
+                            pending.extend(item.keys())
+                            pending.extend(item.values())
+                        else:
+                            pending.extend(item)
             payload=json.dumps(body,ensure_ascii=False).encode("utf-8")
             # The exact UTF-8 byte budget still decides final admission.
             if len(payload)>request_limit:
