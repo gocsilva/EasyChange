@@ -178,6 +178,58 @@ def test_journal_rewrite_rejects_oversized_meta_without_damaging_prior_log(tmp_p
     assert not list(target.parent.glob(".*.tmp"))
 
 
+def test_new_journal_blob_and_rewrite_fsync_parent_directory(tmp_path,monkeypatch):
+    import os
+    import stat
+
+    if os.name != "posix":
+        pytest.skip("directory fsync applies to POSIX")
+    folder=tmp_path/".easychange"
+    journal=Journal(folder/"journal.jsonl","S1")
+    calls=[]
+    real_fsync=journal_module.os.fsync
+
+    def observed(fd):
+        calls.append("dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(journal_module.os,"fsync",observed)
+    journal.record("write","note.txt","before","after")
+    assert calls[-2:]==["file","dir"]
+    reference=journal._store_text("large immutable snapshot\n"*300)
+    assert reference.startswith("@zblob:")
+    assert calls[-2:]==["file","dir"]
+    journal._rewrite()
+    assert calls[-2:]==["file","dir"]
+    assert Journal(folder/"journal.jsonl","S1").count==1
+
+
+def test_directory_fsync_unavailable_does_not_lose_atomic_journal(tmp_path,monkeypatch):
+    import os
+    import stat
+
+    if os.name != "posix":
+        return
+    folder=tmp_path/".easychange"
+    journal=Journal(folder/"journal.jsonl","S1")
+    real_fsync=journal_module.os.fsync
+    attempted=[]
+
+    def directory_unsupported(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            attempted.append(True)
+            raise OSError("DIRECTORY_SYNC_UNSUPPORTED")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(journal_module.os,"fsync",directory_unsupported)
+    journal.record("write","note.txt","before","after")
+    reference=journal._store_text("important snapshot\n"*400)
+    journal._rewrite()
+    assert len(attempted)==3
+    assert journal._load_text(reference)=="important snapshot\n"*400
+    assert Journal(folder/"journal.jsonl","S1").count==1
+
+
 def test_journal_restart_still_recovers_small_valid_entry(tmp_path):
     path=tmp_path / ".easychange" / "journal.jsonl"
     first=Journal(path,"S1")
