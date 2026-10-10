@@ -288,7 +288,7 @@ def test_malformed_legacy_journal_never_claims_or_reexecutes_sequence(tmp_path, 
             assert answer.sequence==sequence
             assert service.state_store.data["ec_results"] is corrupt_root
             assert service.result_store.get(sequence) is None
-        for invalid_entry in (None, [], "DONE", True, 11):
+        for invalid_entry in (None, [], {}, "DONE", True, 11):
             journal={sequence:invalid_entry}
             service.state_store.data["ec_results"]=journal
             answer=service.execute(wire)
