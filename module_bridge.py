@@ -586,5 +586,5 @@ def detach_hub(token):
         return {"connected":False}
 
 def self_test():
-    return {"standalone":not bool(MCPBridge().token),
+    return {"standalone":not MCPBridge().connected,
             "hub_optional":True,"tools_from_mcp":True}
