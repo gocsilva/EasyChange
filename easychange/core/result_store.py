@@ -836,10 +836,14 @@ class DurableResultStore:
         for fragment in encoder.iterencode(value):
             if len(fragment)>MAX_DECODED_RECEIPT_BYTES:
                 raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
-            raw=fragment.encode("utf-8")
-            if len(wire)+len(raw)>MAX_DECODED_RECEIPT_BYTES:
-                raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
-            wire.extend(raw)
+            # JSONEncoder may yield a single large string. Never allocate a
+            # full additional UTF-8 copy of that fragment just to reject it
+            # against the byte budget: slice on code-point boundaries first.
+            for offset in range(0,len(fragment),4096):
+                encoded=fragment[offset:offset+4096].encode("utf-8")
+                if len(wire)+len(encoded)>MAX_DECODED_RECEIPT_BYTES:
+                    raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+                wire.extend(encoded)
         return bytes(wire)
 
     def _result_payload(self, sequence: str) -> tuple[dict[str, Any], bytes, str] | None:
