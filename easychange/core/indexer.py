@@ -909,7 +909,22 @@ class Indexer:
                 self.refresh()
 
             def resolve_term(term: str) -> tuple[str, list[dict], list[dict]]:
-                definitions = self.symbols(name=term)[:definitions_per_term]
+                # Scope definitions just like references. Limiting before
+                # filtering can return an out-of-scope symbol and hide the
+                # actual in-scope definition when definitions_per_term is low.
+                # Compare normalized relative paths, never Git pathspec globs.
+                def in_scope(item: dict) -> bool:
+                    relative = str(item.get("file") or "").casefold()
+                    if prefix and not (relative == prefix.casefold() or
+                                       relative.startswith(prefix.casefold() + "/")):
+                        return False
+                    if ext and not relative.endswith(ext.casefold()):
+                        return False
+                    return True
+
+                definitions = [
+                    item for item in self.symbols(name=term) if in_scope(item)
+                ][:definitions_per_term]
                 candidates = self.search(
                     term,
                     extension=ext or None,
