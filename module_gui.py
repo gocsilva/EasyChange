@@ -244,9 +244,10 @@ class ModuleGUI:
         self._refresh_inflight=False
         self._cancel_readiness()
         folder=ROOT/"logs"
-        python=ROOT/".venv"/"Scripts"/"python.exe"
-        if not python.is_file():
-            python=ROOT/".venv"/"bin"/"python"
+        # Only a platform-compatible venv interpreter can launch a Python
+        # service. Cross-OS copies may retain both Windows and POSIX paths.
+        python=(ROOT/".venv"/"Scripts"/"python.exe" if os.name=="nt"
+                else ROOT/".venv"/"bin"/"python")
         if not python.is_file():
             python=sys.executable
         opts={"creationflags":getattr(subprocess,"CREATE_NO_WINDOW",0)}
