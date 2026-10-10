@@ -34,6 +34,24 @@ def _slug(value: str) -> str:
     return value[:80] or "evidence"
 
 
+class _SameOriginRuntimeRedirect(urllib.request.HTTPRedirectHandler):
+    """Keep health/Swagger probes on the exact original HTTP origin."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        try:
+            old=urlsplit(req.full_url)
+            new=urlsplit(newurl)
+            def origin(parts):
+                port=parts.port
+                if port is None:
+                    port=443 if parts.scheme=="https" else 80
+                return parts.scheme, parts.hostname, port
+            if origin(old)!=origin(new) or new.username or new.password:
+                return None
+        except ValueError:
+            return None
+        return super().redirect_request(req,fp,code,msg,headers,newurl)
+
+
 class ProjectRuntimeService:
     """Deterministic project runtime/test/evidence helper for Machine Mode."""
 
@@ -1001,7 +1019,17 @@ class ProjectRuntimeService:
             loopback_tls = (parsed.scheme == "https" and
                             parsed.hostname in {"localhost", "127.0.0.1", "::1"})
             context = ssl._create_unverified_context() if loopback_tls else None
-            with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+            # A permissive localhost certificate context must never follow a
+            # 302 into an unrelated host. Keep same-origin Swagger redirects.
+            handlers=[
+                urllib.request.ProxyHandler({})
+                if parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+                else urllib.request.ProxyHandler(),
+                urllib.request.HTTPSHandler(context=context),
+                _SameOriginRuntimeRedirect(),
+            ]
+            opener=urllib.request.build_opener(*handlers)
+            with opener.open(request, timeout=timeout) as response:
                 body = response.read(max_bytes + 1)
                 return {"ok": True, "url": url, "status": int(response.status),
                         "content_type": response.headers.get("Content-Type", ""),
