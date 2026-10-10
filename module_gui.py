@@ -49,6 +49,7 @@ class ModuleGUI:
         self.process=None
         self._closing=False
         self._refresh_inflight=False
+        self._refresh_generation=0
         self._readiness_job=None
         parent=ttk.Frame(self.root,padding=18)
         parent.pack(fill="both",expand=True)
@@ -83,17 +84,18 @@ class ModuleGUI:
         if self._closing or self._refresh_inflight:
             return
         self._refresh_inflight=True
+        generation=self._refresh_generation
         def probe():
             try:
                 report=status()
             except Exception:
                 report={"running":False}
-            if self._closing:
+            if self._closing or generation!=self._refresh_generation:
                 self._refresh_inflight=False
                 return
             def update():
                 try:
-                    if self._closing:
+                    if self._closing or generation!=self._refresh_generation:
                         return
                     owned=self.process
                     if (not report["running"] and owned is not None
@@ -147,6 +149,8 @@ class ModuleGUI:
             self.message.set(
                 "Não foi possível confirmar porta local: "+type(exc).__name__)
             return
+        # Invalidate an older asynchronous /health result before spawning.
+        self._refresh_generation+=1
         folder=ROOT/"logs"
         python=ROOT/".venv"/"Scripts"/"python.exe"
         if not python.is_file():
@@ -177,6 +181,8 @@ class ModuleGUI:
         self.root.after(700,self.refresh)
 
     def stop(self):
+        # A late worker/callback cannot resurrect the state of a stopped PID.
+        self._refresh_generation+=1
         self._cancel_readiness()
         process=self.process
         if process and process.poll() is None:
