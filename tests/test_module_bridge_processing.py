@@ -17,6 +17,16 @@ class TestProcessPending(unittest.TestCase):
                             "already_acked":[],"unknown":[]})
         return b
 
+    def test_non_destructive_inbox_probe_has_short_timeout_without_ack(self):
+        from unittest.mock import patch
+
+        bridge=MCPBridge(token="A"*48)
+        page={"ok":True,"recipient":CANONICAL_MODULE_ID,
+              "messages":[],"pending":0,"requires_ack":True}
+        with patch.object(bridge,"_request",return_value=page) as request:
+            self.assertEqual(bridge.receive(),page)
+        request.assert_called_once_with("/v1/inbox/peek",timeout=8)
+
     def test_failed_or_unconfirmed_inbox_header_never_runs_handler(self):
         for ok in (False,None,"true",0):
             with self.subTest(ok=ok):
