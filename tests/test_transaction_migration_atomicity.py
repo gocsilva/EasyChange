@@ -108,3 +108,49 @@ def test_append_v2_save_flushes_one_durable_batch_not_each_record(tmp_path,monke
         assert [item["path"] for item in records]==["one.txt","two.txt"]
     finally:
         service.close()
+
+
+@pytest.mark.parametrize("failure_stage",(1,2))
+def test_migration_fd_wrapper_failure_closes_raw_descriptor_and_preserves_header(
+        tmp_path,monkeypatch,failure_stage):
+    import tempfile
+    import easychange.core.command_service as command_module
+
+    header,log,history=_legacy(tmp_path)
+    original=header.read_bytes()
+    service=CommandService(Workspace.open(tmp_path))
+    new_fds=[]
+    real_mkstemp=tempfile.mkstemp
+    real_fdopen=os.fdopen
+    calls=0
+
+    def tracked_mkstemp(*args,**kwargs):
+        fd,path=real_mkstemp(*args,**kwargs)
+        new_fds.append(fd)
+        return fd,path
+
+    def interrupted_fdopen(fd,*args,**kwargs):
+        nonlocal calls
+        calls+=1
+        if calls==failure_stage:
+            raise OSError("SIMULATED_FDOPEN_FAILURE")
+        return real_fdopen(fd,*args,**kwargs)
+
+    try:
+        with monkeypatch.context() as patcher:
+            patcher.setattr(command_module.tempfile,"mkstemp",tracked_mkstemp)
+            patcher.setattr(command_module.os,"fdopen",interrupted_fdopen)
+            with pytest.raises(OSError,match="SIMULATED_FDOPEN_FAILURE"):
+                service._save_transaction()
+        assert calls==failure_stage
+        assert len(new_fds)==failure_stage
+        for fd in new_fds:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+        assert header.read_bytes()==original
+        assert not list(header.parent.glob("active_transaction*.tmp"))
+        if failure_stage==2:
+            assert [json.loads(line) for line in
+                    log.read_text(encoding="utf-8").splitlines()]==history
+    finally:
+        service.close()
