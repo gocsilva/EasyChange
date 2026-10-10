@@ -27,6 +27,22 @@ class TestProcessPending(unittest.TestCase):
             self.assertEqual(bridge.receive(),page)
         request.assert_called_once_with("/v1/inbox/peek",timeout=8)
 
+    def test_idempotent_ack_uses_short_timeout_even_after_lost_reply(self):
+        from unittest.mock import Mock,patch
+
+        bridge=MCPBridge(token="A"*48)
+        receipt={"ok":True,"recipient":CANONICAL_MODULE_ID,
+                 "acked":0,"already_acked":[23],"unknown":[]}
+        bridge._request=Mock(side_effect=[TimeoutError("ACK_REPLY_LOST"),receipt])
+        with patch("module_bridge.time.sleep") as pause:
+            self.assertEqual(bridge.ack([23]),receipt)
+        self.assertEqual(bridge._request.call_count,2)
+        for attempt in bridge._request.call_args_list:
+            self.assertEqual(attempt.args,
+                             ("/v1/inbox/ack",{"ids":[23]}))
+            self.assertEqual(attempt.kwargs,{"timeout":8})
+        pause.assert_called_once_with(0.05)
+
     def test_failed_or_unconfirmed_inbox_header_never_runs_handler(self):
         for ok in (False,None,"true",0):
             with self.subTest(ok=ok):
