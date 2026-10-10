@@ -282,25 +282,36 @@ class Indexer:
             if existing.get(relative) != (stat.st_size, stat.st_mtime_ns):
                 changed.append((path, relative, stat.st_size, stat.st_mtime_ns))
 
+        loaded_count = 0
         if changed:
+            # Future.map() for *every* changed file can queue hundreds of
+            # decoded 2 MiB sources in RAM, even with just four workers.
+            # Read/write bounded batches; release the index lock between
+            # disk reads so GUI actions are not blocked by the cold scan.
+            batch_size = _INDEX_WORKERS * 4
             with ThreadPoolExecutor(max_workers=_INDEX_WORKERS, thread_name_prefix="easychange-read") as pool:
-                loaded = list(pool.map(self._read_candidate, changed))
-        else:
-            loaded = []
+                for offset in range(0, len(changed), batch_size):
+                    batch = changed[offset:offset + batch_size]
+                    loaded = list(pool.map(self._read_candidate, batch))
+                    loaded_count += len(loaded)
+                    with self._lock, self._connect() as db:
+                        for (path, relative, _, _), row in zip(batch, loaded):
+                            rel, size, mtime_ns, digest, content, symbols = row
+                            if rel in self._protected_paths:
+                                db.execute("DELETE FROM files WHERE path=?", (rel,))
+                                db.execute("DELETE FROM symbols WHERE path=?", (rel,))
+                                if self._fts_enabled:
+                                    db.execute("DELETE FROM files_fts WHERE path=?", (rel,))
+                                continue
+                            if not digest:
+                                continue
+                            self._replace_index_row(db, rel, path.suffix.lower(), size, mtime_ns, digest, content, symbols)
+                    # Do not retain the completed batch while the next one
+                    # hashes large, potentially binary files.
+                    del loaded
 
         removed = set(persisted) - seen
         with self._lock, self._connect() as db:
-            for (path, relative, _, _), row in zip(changed, loaded):
-                rel, size, mtime_ns, digest, content, symbols = row
-                if rel in self._protected_paths:
-                    db.execute("DELETE FROM files WHERE path=?", (rel,))
-                    db.execute("DELETE FROM symbols WHERE path=?", (rel,))
-                    if self._fts_enabled:
-                        db.execute("DELETE FROM files_fts WHERE path=?", (rel,))
-                    continue
-                if not digest:
-                    continue
-                self._replace_index_row(db, rel, path.suffix.lower(), size, mtime_ns, digest, content, symbols)
             if removed:
                 db.executemany("DELETE FROM files WHERE path=?", [(item,) for item in removed])
                 db.executemany("DELETE FROM symbols WHERE path=?", [(item,) for item in removed])
@@ -310,7 +321,7 @@ class Indexer:
 
         self._force_rebuild = False
         result = {
-            "indexed": len(loaded), "removed": len(removed), "files": len(seen),
+            "indexed": loaded_count, "removed": len(removed), "files": len(seen),
             "cached": False, "fts": self._fts_enabled, "workers": _INDEX_WORKERS,
         }
         self._last_refresh_at = time.monotonic()
