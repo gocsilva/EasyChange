@@ -170,10 +170,22 @@ class MCPBridge:
                             pending.extend(item.values())
                         else:
                             pending.extend(item)
-            payload=json.dumps(body,ensure_ascii=False,allow_nan=False).encode("utf-8")
-            # The exact UTF-8 byte budget still decides final admission.
-            if len(payload)>request_limit:
-                raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
+            # Shared object graphs can expand exponentially in JSON.
+            # json.dumps() materializes that expansion before a length check;
+            # stream encoder fragments into a byte-limited buffer instead.
+            encoded=bytearray()
+            try:
+                encoder=json.JSONEncoder(ensure_ascii=False,allow_nan=False)
+                for chunk in encoder.iterencode(body):
+                    if len(chunk)>request_limit:
+                        raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
+                    fragment=chunk.encode("utf-8")
+                    if len(encoded)+len(fragment)>request_limit:
+                        raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
+                    encoded.extend(fragment)
+            except (RecursionError,OverflowError) as exc:
+                raise ValueError("MCP_BUS_REQUEST_TOO_LARGE") from exc
+            payload=bytes(encoded)
             headers["Content-Type"]="application/json"
         req=Request(BUS+path,data=payload,method="POST" if payload is not None else "GET",headers=headers)
         # The tool-RPC endpoint can legitimately return an 8 MiB result.
