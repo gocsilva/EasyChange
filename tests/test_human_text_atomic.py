@@ -344,3 +344,39 @@ def test_human_text_regular_buffer_still_paginates_and_reloads(tmp_path):
     assert "".join(pages)==payload
 
 
+
+def test_human_text_matching_cached_metadata_never_trusts_symlink(tmp_path):
+    service=HumanTextService(tmp_path/"workspace")
+    original=service.save("private content")
+    moved=tmp_path/"outside-buffer.txt"
+    service.path.replace(moved)
+    try:
+        service.path.symlink_to(moved)
+    except (OSError,NotImplementedError):
+        pytest.skip("symlinks not available")
+    assert moved.stat().st_ino==original["file_inode"]
+    # The old Path.stat() fast path accepted this inode/size/mtime match.
+    with pytest.raises(ValueError,match="HUMAN_TEXT_UNSAFE_BUFFER"):
+        service.info()
+    assert moved.read_text(encoding="utf-8")=="private content"
+
+
+def test_human_text_regular_file_swap_during_safe_open_is_retryable(tmp_path,monkeypatch):
+    from pathlib import Path
+
+    service=HumanTextService(tmp_path)
+    service.save("old content")
+    actual_lstat=Path.lstat
+    checks=[]
+    def replace_after_open(path,*args,**kwargs):
+        if path==service.path:
+            checks.append(True)
+            if len(checks)==2:
+                service._atomic_write(service.path,b"new content")
+        return actual_lstat(path,*args,**kwargs)
+    monkeypatch.setattr(Path,"lstat",replace_after_open)
+    with pytest.raises(ValueError,match="HUMAN_TEXT_FILE_CHANGED_RETRY"):
+        service.load()
+    assert service.load()=="new content"
+
+
