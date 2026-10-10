@@ -436,6 +436,11 @@ class DurableResultStore:
         # anything that would exceed the per-header byte budget.
         encoded = bytearray()
         try:
+            # A large nested summary can make JSONEncoder materialize a huge
+            # quoted string before its fragment reaches the cache byte check.
+            # Cache is optional: reject oversized headers before encoding,
+            # while leaving the authoritative on-disk receipt untouched.
+            _preflight_result_json(base, MAX_CACHED_TERMINAL_HEADER_BYTES)
             for fragment in json.JSONEncoder(
                     ensure_ascii=False, allow_nan=False,
                     separators=(",", ":")).iterencode(base):
