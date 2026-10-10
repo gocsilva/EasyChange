@@ -1184,12 +1184,19 @@ class ProjectRuntimeService:
 
     def wait_for_http(self, urls: list[str], timeout: float = 35.0,
                       *, require_swagger: bool = False) -> dict:
+        # A profile with no resolved addresses cannot become healthy by
+        # sleeping for 35 seconds. Keep the existing timeout result contract.
+        if not urls:
+            return {"ok":False,"error":"HTTP_STARTUP_TIMEOUT","last":{},"urls":urls}
+        # Repeated URLs may appear when profile and discovered candidates
+        # overlap. Probe each unique endpoint once per pass, in original order.
+        candidates=list(dict.fromkeys(urls))
         deadline = time.monotonic() + max(1.0, timeout)
         last = {}
         while True:
             if time.monotonic() >= deadline:
                 break
-            for url in urls:
+            for url in candidates:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
