@@ -65,9 +65,12 @@ class HumanTextService:
             opened=os.fstat(fd)
             pathname=path.lstat()
             if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
-                    or not stat.S_ISREG(pathname.st_mode) or pathname.st_nlink!=1
-                    or (opened.st_dev,opened.st_ino)!=(pathname.st_dev,pathname.st_ino)):
+                    or not stat.S_ISREG(pathname.st_mode) or pathname.st_nlink!=1):
                 raise ValueError("HUMAN_TEXT_UNSAFE_BUFFER")
+            if (opened.st_dev,opened.st_ino)!=(pathname.st_dev,pathname.st_ino):
+                # Concurrent atomic save replaced a regular file after open.
+                # This is retryable, unlike an unsafe symlink/hardlink/FIFO.
+                raise ValueError("HUMAN_TEXT_FILE_CHANGED_RETRY")
             return os.fdopen(fd,"rb")
         except BaseException:
             os.close(fd)
