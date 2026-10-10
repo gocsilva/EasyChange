@@ -30,7 +30,25 @@ def status():
             raw=r.read(2049)
         if len(raw)>2048:
             raise ValueError("MODULE_GUI_HEALTH_TOO_LARGE")
-        data=json.loads(raw)
+        # Health is an identity proof. Ambiguous duplicate fields or
+        # nonstandard/nonfinite JSON must not turn a foreign local listener
+        # into an apparently healthy module.
+        def unique_fields(pairs):
+            result={}
+            for key,value in pairs:
+                if key in result:
+                    raise ValueError("MODULE_GUI_DUPLICATE_HEALTH_FIELD")
+                result[key]=value
+            return result
+        def finite_float(token):
+            number=float(token)
+            if not -float("inf") < number < float("inf"):
+                raise ValueError("MODULE_GUI_NONFINITE_HEALTH")
+            return number
+        data=json.loads(
+            raw, object_pairs_hook=unique_fields, parse_float=finite_float,
+            parse_constant=lambda _: (_ for _ in ()).throw(
+                ValueError("MODULE_GUI_NONFINITE_HEALTH")))
         return {"running":isinstance(data,dict) and
                 data.get("ok") is True and data.get("id")==MODULE_ID,
                 "service":MODULE_ID,"standalone":True}
