@@ -771,7 +771,13 @@ class Indexer:
                      WHERE """ + " AND ".join(clauses)
             try:
                 with self._connect() as db:
-                    return db.execute(sql, params).fetchall()
+                    rows = db.execute(sql, params).fetchall()
+                # An imported/stale row may survive another process marking
+                # its path protected. Never expose its source text in search.
+                return [row for row in rows
+                        if not self._is_protected_path(row[0])
+                        and not any(part in SKIP_DIRS
+                                    for part in Path(row[0]).parts)]
             except sqlite3.OperationalError:
                 pass
 
@@ -788,9 +794,13 @@ class Indexer:
             clauses.append("instr(lower(content), ?) > 0")
             params.append(query.casefold())
         with self._connect() as db:
-            return db.execute(
+            rows = db.execute(
                 "SELECT path,content,size,mtime_ns FROM files WHERE " + " AND ".join(clauses), params
             ).fetchall()
+        return [row for row in rows
+                if not self._is_protected_path(row[0])
+                and not any(part in SKIP_DIRS
+                            for part in Path(row[0]).parts)]
 
     def search(self, query: str, *, regex: bool = False, extension: str | None = None,
                path_prefix: str | None = None, case_sensitive: bool = False,
