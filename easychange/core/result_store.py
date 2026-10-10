@@ -778,8 +778,12 @@ class DurableResultStore:
         # JSON expansion is enormous. Enforce the same receipt-size budget
         # *during* encoding, before constructing an unbounded json.dumps().
         serialized = self._encode_result_json(result)
+        # Persist the exact JSON snapshot whose bytes are hashed. Another
+        # worker can still mutate the caller's result while we re-acquire the
+        # durable claim lock; using that live dict corrupts replay hashes.
+        frozen_result = json.loads(serialized)
         serialized_hash = hashlib.sha256(serialized).hexdigest()
-        execution_summary = _find_execution_summary(result)
+        execution_summary = _find_execution_summary(frozen_result)
         with self._claim_lock():
             current = self.get(sequence)
             if current is None:
@@ -788,7 +792,7 @@ class DurableResultStore:
                 raise ValueError("RESULT_SEQUENCE_COMMAND_HASH_MISMATCH")
             if current.get("state") == "DONE":
                 return current
-            success = result.get("ok") is True
+            success = frozen_result.get("ok") is True
             lifecycle = None
             if isinstance(mutation_receipt, dict):
                 lifecycle = str(
@@ -808,7 +812,7 @@ class DurableResultStore:
                 ),
                 "command_hash": command_hash,
                 "command": command[:512],
-                "command_id": result.get("command_id"),
+                "command_id": frozen_result.get("command_id"),
                 "mutation": bool(current.get("mutation") or mutation_receipt),
                 "state": "DONE",
                 "execution_state": "FINISHED",
@@ -822,12 +826,12 @@ class DurableResultStore:
                 "return_code": (
                     execution_summary.get("return_code")
                     if isinstance(execution_summary, dict) and execution_summary.get("return_code") is not None
-                    else result.get("code")
+                    else frozen_result.get("code")
                 ),
                 "summary": execution_summary,
                 "result_hash": serialized_hash,
                 "result_bytes": len(serialized),
-                "result": result,
+                "result": frozen_result,
                 # An earlier update_mutation_receipt() may have persisted the
                 # verified physical/file side-effect before terminal delivery.
                 # Omitting a new receipt must never erase that audit evidence.
