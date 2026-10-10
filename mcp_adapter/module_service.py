@@ -110,7 +110,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404,{"error":"NOT_FOUND"})
         if "Origin" in self.headers:
             return self.send(403,{"error":"BROWSER_ORIGIN_NOT_ALLOWED"})
-        if self.headers.get("Content-Type","").split(";")[0].strip().lower()!="application/json":
+        # Reject ambiguous HTTP framing before decoding attach tokens.
+        if "Transfer-Encoding" in self.headers:
+            return self.send(400,{"error":"UNSUPPORTED_TRANSFER_ENCODING"})
+        content_types=(self.headers.get_all("Content-Type")
+                       if hasattr(self.headers,"get_all")
+                       else [self.headers.get("Content-Type","")])
+        if content_types is not None and len(content_types)>1:
+            return self.send(400,{"error":"INVALID_CONTENT_TYPE"})
+        content_type=content_types[0] if content_types else ""
+        if (not isinstance(content_type,str) or
+                content_type.split(";")[0].strip().lower()!="application/json"):
             return self.send(415,{"error":"JSON_REQUIRED"})
         try:
             raw_lengths=(self.headers.get_all("Content-Length")
