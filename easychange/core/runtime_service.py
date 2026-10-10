@@ -457,10 +457,20 @@ class ProjectRuntimeService:
         by_id = {item["id"]: item for item in existing}
         by_id[profile_id] = row
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config_path.write_text(
-            json.dumps({"profiles": list(by_id.values())}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        # A crash during write_text() can truncate every configured profile.
+        # Write a private, unique sibling and atomically replace the old JSON
+        # only after its complete UTF-8 contents reach the file descriptor.
+        temporary=self.config_path.with_name(
+            f".{self.config_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("x",encoding="utf-8") as output:
+                json.dump({"profiles":list(by_id.values())},output,
+                          ensure_ascii=False,indent=2)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary,self.config_path)
+        finally:
+            temporary.unlink(missing_ok=True)
         _resolved, env_meta = self.resolve_environment(row, require_all=False)
         public_row = {**row, **env_meta}
         return {"profile": public_row, "config": ".easychange/runtime_profiles.json"}
