@@ -24,6 +24,43 @@ MAX_CACHED_TERMINAL_HEADER_BYTES = 32 * 1024  # 128 entries => at most 4 MiB
 MAX_COMPRESSED_RESULT_STREAM_BYTES = 16 * 1024 * 1024
 
 
+def _preflight_result_json(value: Any, byte_budget: int) -> None:
+    """Reject impossible JSON sizes before expanding huge Python strings.
+
+    Use iterator frames and only track ancestor identities. Repeated shared
+    subtrees remain valid, while cycles are rejected without recursion.
+    """
+    frames=[(iter((value,)),None)]
+    ancestors=set()
+    visited=0
+    while frames:
+        iterator,owner=frames[-1]
+        try:
+            item=next(iterator)
+        except StopIteration:
+            frames.pop()
+            if owner is not None:
+                ancestors.remove(owner)
+            continue
+        visited+=1
+        if visited>byte_budget:
+            raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+        if isinstance(item,str):
+            # JSON escaping and UTF-8 never use fewer bytes than characters.
+            if len(item)>byte_budget:
+                raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+        elif isinstance(item,(dict,list,tuple)):
+            if len(item)>byte_budget:
+                raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+            identity=id(item)
+            if identity in ancestors:
+                raise ValueError("Circular reference detected")
+            ancestors.add(identity)
+            children=(iter(item.items()) if isinstance(item,dict)
+                      else iter(item))
+            frames.append((children,identity))
+
+
 def _receipt_pairs_unique(pairs):
     value = {}
     for key, member in pairs:
@@ -191,6 +228,7 @@ class DurableResultStore:
 
     @staticmethod
     def _encode(value: dict[str, Any]) -> bytes:
+        _preflight_result_json(value, MAX_DECODED_RECEIPT_BYTES)
         # Encode directly into zlib instead of retaining the entire JSON
         # alongside its compressed copy; preserve level 1 and the wire schema.
         compressor = zlib.compressobj(level=1)
@@ -914,6 +952,7 @@ class DurableResultStore:
     @staticmethod
     def _encode_result_json(value: dict[str, Any]) -> bytes:
         """Encode recovered payload once, under the receipt's byte budget."""
+        _preflight_result_json(value, MAX_DECODED_RECEIPT_BYTES)
         wire=bytearray()
         encoder=json.JSONEncoder(
             ensure_ascii=False, allow_nan=False, separators=(",", ":"))
