@@ -64,6 +64,9 @@ class Indexer:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._protected_paths: set[str] = set()
+        # Windows workspaces are typically case-insensitive. Match protected
+        # paths with Unicode casefold even when Git/SQLite stored another case.
+        self._protected_keys: set[str] = set()
         self._fully_indexed = False
         self._build_thread: threading.Thread | None = None
         self._last_refresh_at = 0.0
@@ -210,16 +213,30 @@ class Indexer:
                 return True
         return False
 
+    def _is_protected_path(self, relative_path: str) -> bool:
+        return relative_path.casefold() in self._protected_keys
+
     def protect_path(self, relative_path: str, *, scrub: bool = True) -> dict:
         """Exclude a known sensitive workspace file and purge prior indexed content."""
         relative = self._normalize_relative_path(relative_path)
         with self._lock:
             self._protected_paths.add(relative)
+            self._protected_keys.add(relative.casefold())
             with self._connect() as db:
-                db.execute("DELETE FROM files WHERE path=?", (relative,))
-                db.execute("DELETE FROM symbols WHERE path=?", (relative,))
-                if self._fts_enabled:
-                    db.execute("DELETE FROM files_fts WHERE path=?", (relative,))
+                # An old index can contain a different on-disk capitalization
+                # of the same Windows path. Scrub all aliases, including FTS.
+                for table in (("files", "symbols", "files_fts")
+                              if self._fts_enabled else ("files", "symbols")):
+                    paths = [
+                        row[0] for row in db.execute(
+                            f"SELECT DISTINCT path FROM {table}"
+                        ) if isinstance(row[0], str)
+                        and row[0].casefold() == relative.casefold()
+                    ]
+                    db.executemany(
+                        f"DELETE FROM {table} WHERE path=?",
+                        ((item,) for item in paths),
+                    )
             if scrub:
                 # Deleted SQLite cells/WAL frames may otherwise retain plaintext.
                 # Rebuild locally after the targeted delete; secret-source imports
@@ -257,7 +274,7 @@ class Indexer:
         except (OSError, RuntimeError) as exc:
             raise ValueError("INVALID_PROTECTED_INDEX_PATH") from exc
         with self._lock, self._connect() as db:
-            if relative in self._protected_paths:
+            if self._is_protected_path(relative):
                 db.execute("DELETE FROM files WHERE path=?", (relative,))
                 db.execute("DELETE FROM symbols WHERE path=?", (relative,))
                 if self._fts_enabled:
@@ -321,7 +338,7 @@ class Indexer:
                     if any(part in SKIP_DIRS for part in relative_path.parts):
                         continue
                     relative = relative_path.as_posix()
-                    if relative in self._protected_paths:
+                    if self._is_protected_path(relative):
                         continue
                     stat = path.stat()
                 except (OSError, RuntimeError):
@@ -346,7 +363,7 @@ class Indexer:
                     with self._lock, self._connect() as db:
                         for (path, relative, _, _), row in zip(batch, loaded):
                             rel, size, mtime_ns, digest, content, symbols = row
-                            if rel in self._protected_paths:
+                            if self._is_protected_path(rel):
                                 db.execute("DELETE FROM files WHERE path=?", (rel,))
                                 db.execute("DELETE FROM symbols WHERE path=?", (rel,))
                                 if self._fts_enabled:
@@ -400,7 +417,7 @@ class Indexer:
         # secret could be read directly before the index has warmed.
         if path is not None:
             path = self._normalize_relative_path(path)
-            if (path in self._protected_paths or
+            if (self._is_protected_path(path) or
                     any(part in SKIP_DIRS for part in Path(path).parts)):
                 return []
         def load_rows() -> list[tuple]:
@@ -441,7 +458,7 @@ class Indexer:
                 for candidate in candidate_paths[:64]:
                     try:
                         file_path = self._normalize_relative_path(candidate)
-                        if (file_path in self._protected_paths or
+                        if (self._is_protected_path(file_path) or
                                 any(part in SKIP_DIRS for part in Path(file_path).parts)):
                             continue
                         target = self.root / Path(file_path)
@@ -503,9 +520,9 @@ class Indexer:
         # Old indexes may still contain paths that are excluded by today's
         # scanner. Never expose such rows while an incremental refresh waits.
         with self._lock:
-            protected=set(self._protected_paths)
+            protected=set(self._protected_keys)
         visible=(row for row in rows
-                 if row[0] not in protected and
+                 if row[0].casefold() not in protected and
                  not any(part in SKIP_DIRS for part in Path(row[0]).parts))
         return [
             {"id": f"S{index}", "file": row[0], "name": row[1], "kind": row[2],
@@ -601,7 +618,7 @@ class Indexer:
             # Cold Git discovery must honor the same sensitive-file rules as
             # the SQLite/FTS index: protected files must never be returned.
             with self._lock:
-                if relative in self._protected_paths:
+                if self._is_protected_path(relative):
                     continue
             target = self.root / relative
             try:
@@ -885,7 +902,7 @@ class Indexer:
                             if ext and not folded.endswith(ext.casefold()):
                                 continue
                             with self._lock:
-                                if relative in self._protected_paths:
+                                if self._is_protected_path(relative):
                                     continue
                             target = self.root / Path(relative)
                             if (target.is_symlink() or not target.is_file() or
