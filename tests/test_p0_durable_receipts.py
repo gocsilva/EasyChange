@@ -273,6 +273,73 @@ def test_malformed_legacy_done_result_fails_closed_without_mutation(tmp_path, mo
         service.close()
 
 
+def test_corrupt_cached_legacy_done_is_definitive_and_never_mutates(tmp_path, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        seq="QCACHEDBAD1"
+        operation={"op":"operation","type":"replace_exact",
+                   "path":"missing.txt","old_text":"before","new_text":"after"}
+        canonical=json.dumps(operation,ensure_ascii=False,
+                             sort_keys=True,separators=(",",":"))
+        digest=hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        legacy={"sha256":digest,"state":"DONE","mutation":True}
+        service.state_store.data["ec_results"]={seq:legacy}
+        monkeypatch.setattr(
+            service,"_execute_structured",
+            lambda *_a,**_kw: (_ for _ in ()).throw(
+                AssertionError("previous mutation executed again")))
+        cases=(
+            {"ok":True,"command":"replace_exact","data":["not a dict"]},
+            {"ok":"false","command":"replace_exact","data":{}},
+            {"ok":True,"command":"replace_exact","data":{},"unknown":7},
+            {"command":"replace_exact","data":{}},
+        )
+        for invalid in cases:
+            service._ec_result_cache[seq]=SimpleNamespace(
+                to_dict=lambda invalid=invalid:invalid)
+            result=service.execute(":ec "+seq+" :j1 "+json.dumps(operation))
+            assert result.code=="SEQUENCE_RESULT_MISSING"
+            assert result.ok is False
+            assert result.data=={"state":"DONE","duplicate":True}
+            assert service.result_store.get(seq) is None
+            assert service.state_store.data["ec_results"][seq]==legacy
+    finally:
+        service.close()
+
+
+def test_valid_cached_legacy_done_still_migrates_without_reexecuting(tmp_path, monkeypatch):
+    import hashlib
+    from easychange.core.result import Result
+
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        seq="QCACHEDOK1"
+        operation={"op":"operation","type":"replace_exact",
+                   "path":"missing.txt","old_text":"before","new_text":"after"}
+        canonical=json.dumps(operation,ensure_ascii=False,
+                             sort_keys=True,separators=(",",":"))
+        digest=hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        service.state_store.data["ec_results"]={
+            seq:{"sha256":digest,"state":"DONE","mutation":True}}
+        service._ec_result_cache[seq]=Result(
+            True,"replace_exact",data={"changed":True})
+        monkeypatch.setattr(
+            service,"_execute_structured",
+            lambda *_a,**_kw: (_ for _ in ()).throw(
+                AssertionError("valid cached result executed twice")))
+        result=service.execute(":ec "+seq+" :j1 "+json.dumps(operation))
+        assert result.ok is True
+        assert result.data["duplicate"] is True
+        persisted=service.result_store.get(seq)
+        assert persisted["state"]=="DONE"
+        assert persisted["result"]["data"]["duplicate"] is True
+    finally:
+        service.close()
+
+
 def test_legacy_replay_does_not_overwrite_competing_durable_claim(tmp_path, monkeypatch):
     import hashlib
     from easychange.core.result import Result
