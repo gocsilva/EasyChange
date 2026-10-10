@@ -205,10 +205,14 @@ class MCPBridge:
                 for chunk in encoder.iterencode(body):
                     if len(chunk)>request_limit:
                         raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
-                    fragment=chunk.encode("utf-8")
-                    if len(encoded)+len(fragment)>request_limit:
-                        raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
-                    encoded.extend(fragment)
+                    # JSONEncoder can yield a huge single Unicode string.
+                    # Enforce the byte budget before allocating its full
+                    # UTF-8 expansion (up to 4x the source characters).
+                    for offset in range(0,len(chunk),4096):
+                        fragment=chunk[offset:offset+4096].encode("utf-8")
+                        if len(encoded)+len(fragment)>request_limit:
+                            raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
+                        encoded.extend(fragment)
             except (RecursionError,OverflowError) as exc:
                 raise ValueError("MCP_BUS_REQUEST_TOO_LARGE") from exc
             except UnicodeError as exc:
