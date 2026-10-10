@@ -144,7 +144,8 @@ def test_standalone_gui_launches_real_python_package_not_nested_script(tmp_path)
     gui.message=Mock()
     gui.root=Mock()
     fake_process=Mock()
-    with patch("subprocess.Popen",return_value=fake_process) as launched:
+    with patch("subprocess.Popen",return_value=fake_process) as launched, \
+         patch("socket.create_connection",side_effect=ConnectionRefusedError):
         gui.start()
     args=launched.call_args.args[0]
     assert args[1:]==["-B","-m",service[:-3].replace("/",".")]
@@ -155,7 +156,8 @@ def test_standalone_gui_launches_real_python_package_not_nested_script(tmp_path)
     linux_python.parent.mkdir(parents=True)
     linux_python.write_bytes(b"")
     gui.process=None
-    with patch("subprocess.Popen",return_value=fake_process) as launched_venv:
+    with patch("subprocess.Popen",return_value=fake_process) as launched_venv, \
+         patch("socket.create_connection",side_effect=ConnectionRefusedError):
         gui.start()
     assert launched_venv.call_args.args[0][0]==str(linux_python)
     assert launched_venv.call_args.args[0][1:]==[
@@ -187,12 +189,14 @@ def test_module_gui_startup_failures_stay_in_status_instead_of_raising(tmp_path)
     gui.process=None
     gui.message=Mock()
     gui.root=Mock()
-    with patch("subprocess.Popen",side_effect=OSError("BROKEN_INTERPRETER")):
+    with patch("subprocess.Popen",side_effect=OSError("BROKEN_INTERPRETER")), \
+         patch("socket.create_connection",side_effect=ConnectionRefusedError):
         gui.start()
     assert gui.process is None
     assert "OSError" in gui.message.set.call_args.args[0]
     gui.message.reset_mock()
-    with patch.object(Path,"mkdir",side_effect=PermissionError("LOG_DENIED")):
+    with patch.object(Path,"mkdir",side_effect=PermissionError("LOG_DENIED")), \
+         patch("socket.create_connection",side_effect=ConnectionRefusedError):
         gui.start()
     assert gui.process is None
     assert "PermissionError" in gui.message.set.call_args.args[0]
