@@ -1,7 +1,6 @@
 """Read EC2 optical receipts from HDMI frames; do not infer execution success from HID."""
 from __future__ import annotations
 import binascii
-import json
 import threading
 import time
 import zlib
@@ -12,7 +11,7 @@ from dataclasses import dataclass, field
 _qr_detectors = threading.local()
 
 from easychange.remote.optical_protocol import (
-    decode_result_chunks, MAX_EC2_PACKETS,
+    decode_result_chunks, decode_ec2_packet_json, MAX_EC2_PACKETS,
     MAX_EC2_PACKET_TEXT_CHARS, MAX_EC2_TOKEN_CHARS,
 )
 
@@ -56,7 +55,7 @@ class OpticalAssembler:
                 if (not isinstance(raw,str) or
                         len(raw)>MAX_EC2_PACKET_TEXT_CHARS):
                     continue
-                item=json.loads(raw)
+                item=decode_ec2_packet_json(raw)
                 if not isinstance(item,dict):continue
                 tag=str(item.get("p") or "")
                 if tag == "EC2H":
@@ -122,7 +121,7 @@ class OpticalAssembler:
                 prev=self.chunks.get(index)
                 if prev is not None and prev!=raw:
                     # Equivalent duplicate packet may differ only by whitespace.
-                    if json.loads(prev)!=item:continue
+                    if decode_ec2_packet_json(prev)!=item:continue
                 candidate=self.stored_chars - (len(prev) if prev is not None else 0) + len(raw)
                 token_candidate=self.stored_token_chars + (len(piece) if prev is None else 0)
                 if (candidate>MAX_EC2_ASSEMBLY_TEXT_CHARS or
