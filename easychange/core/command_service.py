@@ -62,6 +62,35 @@ class ProcessFailure(RuntimeError):
         self.result = result
 
 
+def _unique_structured_fields(pairs):
+    """Reject ambiguous J1 payloads before deduplication or mutation planning."""
+    value={}
+    for key,item in pairs:
+        if key in value:
+            raise ValueError("DUPLICATE_STRUCTURED_JSON_KEY")
+        value[key]=item
+    return value
+
+
+def _finite_structured_float(token):
+    number=float(token)
+    if not math.isfinite(number):
+        raise ValueError("NONFINITE_STRUCTURED_JSON_NUMBER")
+    return number
+
+
+def _reject_structured_constant(_token):
+    raise ValueError("NONFINITE_STRUCTURED_JSON_NUMBER")
+
+
+def _decode_structured_payload(raw):
+    return json.loads(
+        raw, object_pairs_hook=_unique_structured_fields,
+        parse_float=_finite_structured_float,
+        parse_constant=_reject_structured_constant,
+    )
+
+
 class CommandService:
     """Thread-safe deterministic control plane for CLI diagnostics and HID-driven Machine GUI."""
     def __init__(
@@ -428,7 +457,7 @@ class CommandService:
         external_env: dict[str, str] | None = None
         if command.casefold().startswith(":j1 "):
             try:
-                structured = json.loads(command[4:])
+                structured = _decode_structured_payload(command[4:])
                 if not isinstance(structured, dict):
                     raise ValueError("EC1_J1_OBJECT_REQUIRED")
                 if "_external_env" in structured:
