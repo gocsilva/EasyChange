@@ -796,6 +796,50 @@ def test_cached_receipt_is_invalidated_when_replaced_by_symlink_to_same_inode(tm
     assert original.is_symlink()
 
 
+def test_valid_receipt_cannot_be_replayed_under_another_sequence_name(tmp_path):
+    import shutil
+    import pytest
+
+    store=DurableResultStore(tmp_path/"results")
+    source="QORIGINAL1"
+    target="QFOREIGN1"
+    command_hash="a"*64
+    first,claimed=store.claim_running(
+        source,command_hash,":unsafe_mutation",mutation=True)
+    assert claimed is True
+    original=store._path(source)
+    mismatched=store._path(target)
+    shutil.copyfile(original,mismatched)
+    before=mismatched.read_bytes()
+
+    assert store.get(source)["execution_id"]==first["execution_id"]
+    with pytest.raises(RuntimeError,match="RESULT_RECEIPT_UNREADABLE"):
+        store.get(target)
+    with pytest.raises(RuntimeError,match="RESULT_RECEIPT_UNREADABLE"):
+        store.claim_running(target,command_hash,":unsafe_mutation",mutation=True)
+    with pytest.raises(RuntimeError,match="RESULT_RECEIPT_UNREADABLE"):
+        store.complete(target,command_hash,":unsafe_mutation",{"ok":True})
+    assert mismatched.read_bytes()==before
+    # Cleanup is explicit. Rejecting the false identity cannot delete evidence.
+    mismatched.unlink()
+    fresh,owned=store.claim_running(
+        target,command_hash,":unsafe_mutation",mutation=True)
+    assert owned is True
+    assert fresh["execution_id"]!=first["execution_id"]
+
+
+def test_receipt_sequence_identity_preserves_legacy_case_aliases(tmp_path):
+    store=DurableResultStore(tmp_path/"results")
+    original,claimed=store.claim_running(
+        "QMixedCase1","b"*64,":read",mutation=False)
+    assert claimed is True
+    assert store.get("qmixedcase1")["execution_id"]==original["execution_id"]
+    replay,claimed=store.claim_running(
+        "QMIXEDCASE1","b"*64,":read",mutation=False)
+    assert claimed is False
+    assert replay["sequence"]=="QMixedCase1"
+
+
 def test_symlinked_durable_receipt_cannot_read_unrelated_file_or_be_reexecuted(tmp_path):
     import pytest
 
