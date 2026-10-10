@@ -516,12 +516,13 @@ class Indexer:
         argv.append("-E" if regex else "-F")
         # -e disambiguates a literal leading hyphen from git grep flags.
         argv += ["-e", query, "--"]
-        prefix = path_prefix.replace("\\", "/").rstrip("/") if path_prefix else ""
+        prefix = self._normalize_relative_path(path_prefix) if path_prefix else ""
         ext = (extension if extension.startswith(".") else "." + extension) if extension else ""
-        if prefix and ext:
-            argv.append(f":(glob){prefix}/**/*{ext}")
-        elif prefix:
-            argv.append(f":(glob){prefix}/**")
+        if prefix:
+            # The path prefix is a literal directory or file path, not an
+            # attacker-controlled Git pathspec glob. Extension is verified
+            # below since separate pathspecs would be unioned, not intersected.
+            argv.append(f":(literal){prefix}")
         elif ext:
             argv.append(f":(glob)**/*{ext}")
         try:
@@ -542,6 +543,12 @@ class Indexer:
             except ValueError:
                 continue
             if any(part in SKIP_DIRS for part in Path(relative).parts):
+                continue
+            folded=relative.casefold()
+            if prefix and not (folded==prefix.casefold() or
+                               folded.startswith(prefix.casefold()+"/")):
+                continue
+            if ext and not folded.endswith(ext.casefold()):
                 continue
             # Cold Git discovery must honor the same sensitive-file rules as
             # the SQLite/FTS index: protected files must never be returned.
