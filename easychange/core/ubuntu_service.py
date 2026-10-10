@@ -233,8 +233,26 @@ class UbuntuService:
             threading.Thread(target=drain, args=(proc.stderr, 1),
                              daemon=True, name="easychange-wsl-stderr"),
         ]
-        for pump in pumps:
-            pump.start()
+        started_pumps = []
+        try:
+            for pump in pumps:
+                pump.start()
+                started_pumps.append(pump)
+        except (RuntimeError, OSError) as exc:
+            # A child with undrained PIPEs can otherwise remain blocked after
+            # a thread-start failure; never leave that subprocess orphaned.
+            try:
+                proc.kill()
+                proc.wait(timeout=3)
+            finally:
+                for started_pump in started_pumps:
+                    started_pump.join(timeout=3)
+                for stream in (proc.stdout, proc.stderr):
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+            raise UbuntuError("UBUNTU_OUTPUT_PUMP_START_FAILED") from exc
         timed_out = False
         try:
             try:
