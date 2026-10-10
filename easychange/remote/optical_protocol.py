@@ -276,6 +276,28 @@ def _packet_json(
     return rendered
 
 
+def _preflight_ec2_header_fields(fields: dict[str, Any]) -> None:
+    """Bound untrusted EC2H metadata before json.dumps allocates a string.
+
+    A durable receipt can be generated independently from the bounded EC2
+    payload encoder. A multi-megabyte command_id or mutation_state must
+    not be copied into a huge transient header just to reject QR capacity.
+    """
+    for field, value in fields.items():
+        if value is None or type(value) is bool:
+            continue
+        if type(value) is str:
+            if len(value) > MAX_EC2_QR_RENDER_BYTES:
+                raise ValueError("OPTICAL_QR_CAPACITY_EXCEEDED")
+        elif type(value) is int:
+            # Python 3.11+ limits decimal conversion; reject early on all
+            # supported runtimes without serializing arbitrarily large ints.
+            if value.bit_length() > MAX_EC2_QR_RENDER_BYTES * 4:
+                raise ValueError("OPTICAL_QR_CAPACITY_EXCEEDED")
+        else:
+            raise ValueError("OPTICAL_HEADER_FIELD_INVALID")
+
+
 def _header_json(
     value: dict[str, Any], raw: bytes, *, total: int, digest: str,
     broadcast_count: int | None = None,
@@ -292,6 +314,7 @@ def _header_json(
     }
     if broadcast_count is not None:
         header["w"] = max(0, min(int(total), int(broadcast_count)))
+    _preflight_ec2_header_fields(header)
     rendered = json.dumps(header, ensure_ascii=False, separators=(",", ":"))
     if len(rendered.encode("utf-8")) > MAX_EC2_QR_RENDER_BYTES:
         raise ValueError("OPTICAL_QR_CAPACITY_EXCEEDED")
@@ -322,13 +345,18 @@ def encode_durable_result_header(header: dict[str, Any]) -> str:
     if type(mutation) is not bool:
         raise ValueError("OPTICAL_MUTATION_BOOLEAN_REQUIRED")
     mutation_state=header.get("mutation_state") if mutation else None
-    rendered = json.dumps({
+    sha256=header.get("sha256") or ""
+    if type(sha256) is not str:
+        raise ValueError("OPTICAL_HEADER_FIELD_INVALID")
+    fields={
         "p": HEADER_PROTOCOL, "v": 1, "s": sequence, "f": True,
         "ok": header["success"], "rc": header.get("return_code"),
-        "l": payload_length, "n": 0, "h": str(header.get("sha256") or ""),
+        "l": payload_length, "n": 0, "h": sha256,
         "m": mutation_state, "cid": header.get("command_id"),
         "w": 0, "d": 1,
-    }, ensure_ascii=False, separators=(",", ":"))
+    }
+    _preflight_ec2_header_fields(fields)
+    rendered = json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
     if len(rendered.encode("utf-8")) > MAX_EC2_QR_RENDER_BYTES:
         raise ValueError("OPTICAL_QR_CAPACITY_EXCEEDED")
     return rendered
