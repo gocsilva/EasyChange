@@ -356,3 +356,71 @@ def test_owned_service_cold_start_keeps_polling_without_false_stopped_status():
     ready()
     assert gui.message.set.call_args.args[0]=="Serviço ativo"
     assert gui.root.after.call_count==count
+
+
+def test_readiness_poll_is_single_timer_and_stops_after_ready_or_stop():
+    """Repeated manual refreshes must not create repeated 1.6s poll chains."""
+    from unittest.mock import Mock
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    klass=next(item for item in ast.parse(source).body
+               if isinstance(item,ast.ClassDef) and item.name=="ModuleGUI")
+
+    class ImmediateThread:
+        def __init__(self,*,target,daemon):
+            self.target=target
+        def start(self):
+            self.target()
+
+    class FakeTkRoot:
+        def __init__(self):
+            self.next_id=0
+            self.pending={}
+        def after(self,delay,callback):
+            self.next_id+=1
+            self.pending[self.next_id]=(delay,callback)
+            return self.next_id
+        def after_cancel(self,token):
+            self.pending.pop(token,None)
+        def fire(self,delay):
+            token=next(k for k,v in self.pending.items() if v[0]==delay)
+            _,callback=self.pending.pop(token)
+            callback()
+
+    ns={"status":lambda:{"running":False},
+        "threading":type("Threading",(),{"Thread":ImmediateThread}),
+        "tk":type("Tk",(),{"TclError":RuntimeError}),
+        "subprocess":__import__("subprocess")}
+    exec(compile(ast.Module(body=[klass],type_ignores=[]),
+                 "<bounded-gui-readiness>","exec"),ns)
+    gui=object.__new__(ns["ModuleGUI"])
+    gui.root=FakeTkRoot()
+    gui.message=Mock()
+    gui.process=Mock()
+    gui.process.poll.return_value=None
+    gui._closing=False
+    gui._refresh_inflight=False
+    gui._readiness_job=None
+
+    gui.refresh()
+    gui.root.fire(0)
+    for _ in range(50):
+        gui.refresh()
+        gui.root.fire(0)
+    assert sum(delay==1600 for delay,_ in gui.root.pending.values())==1
+
+    ns["status"]=lambda:{"running":True}
+    gui.refresh()
+    gui.root.fire(0)
+    assert gui.message.set.call_args.args[0]=="Serviço ativo"
+    assert gui._readiness_job is None
+    assert gui.root.pending=={}
+
+    ns["status"]=lambda:{"running":False}
+    gui.refresh()
+    gui.root.fire(0)
+    assert sum(delay==1600 for delay,_ in gui.root.pending.values())==1
+    gui.stop()
+    assert gui._readiness_job is None
+    assert gui.root.pending=={}
