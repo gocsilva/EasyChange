@@ -1043,10 +1043,16 @@ class ProjectRuntimeService:
                         "body": body[:max_bytes], "truncated": len(body) > max_bytes,
                         "duration_ms": int((time.monotonic() - started) * 1000)}
         except urllib.error.HTTPError as exc:
-            body = exc.read(max_bytes)
-            return {"ok": False, "url": url, "status": int(exc.code), "body": body,
-                    "content_type": exc.headers.get("Content-Type", ""),
-                    "duration_ms": int((time.monotonic() - started) * 1000)}
+            try:
+                body = exc.read(max_bytes + 1)
+                return {"ok": False, "url": url, "status": int(exc.code),
+                        "body": body[:max_bytes], "truncated": len(body) > max_bytes,
+                        "content_type": exc.headers.get("Content-Type", ""),
+                        "duration_ms": int((time.monotonic() - started) * 1000)}
+            finally:
+                # HTTPError retains its HTTP response/socket until closed.
+                # Repeated 401/404 Swagger probes must not leak descriptors.
+                exc.close()
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             return {"ok": False, "url": url, "error": type(exc).__name__,
                     "message": str(exc)[:500], "duration_ms": int((time.monotonic() - started) * 1000)}
@@ -1065,7 +1071,10 @@ class ProjectRuntimeService:
                 # after the total startup deadline is almost exhausted.
                 result = self._http_get(url, timeout=min(2.0, remaining))
                 last = result
-                if result.get("status") and int(result["status"]) < 500:
+                # A 401/403/404 proves that *some* HTTP server answered,
+                # not that the requested Swagger/OpenAPI endpoint is ready.
+                status=result.get("status")
+                if result.get("ok") is True and type(status) is int and 200 <= status < 300:
                     return result
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1105,7 +1114,9 @@ class ProjectRuntimeService:
             )
 
         probe = self.wait_for_http(candidates, timeout=timeout)
-        if not probe.get("ok") and not probe.get("status"):
+        if (probe.get("ok") is not True or
+                not isinstance(probe.get("status"), int) or
+                not 200 <= probe["status"] < 300):
             if started_process and not keep_running:
                 try:
                     self.processes.stop(process_id)
@@ -1127,7 +1138,9 @@ class ProjectRuntimeService:
                 base = visual_url.split("/swagger/")[0].split("/openapi")[0]
                 swagger_index = base.rstrip("/") + "/swagger/index.html"
                 check = self._http_get(swagger_index, timeout=3.0, max_bytes=4096)
-                if check.get("status") and int(check["status"]) < 500:
+                if (check.get("ok") is True and
+                        type(check.get("status")) is int and
+                        200 <= check["status"] < 300):
                     visual_url = swagger_index
             screenshot_path = self._browser_screenshot(visual_url, folder / "swagger.png")
 
