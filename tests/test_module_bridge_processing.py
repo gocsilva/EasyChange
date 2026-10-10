@@ -352,3 +352,37 @@ def test_consumer_lease_key_is_canonical_across_installations(tmp_path):
             "already_acked":[],"unknown":[]}
         self.assertEqual(
             b.process_pending(lambda _:True,ack_batch_size=2)["acknowledged"],2)
+
+    def test_mismatched_inbox_or_ack_recipient_fails_closed(self):
+        import module_bridge
+
+        module_id=module_bridge.CANONICAL_MODULE_ID
+        peer="esp" if module_id!="esp" else "android"
+        candidate=self.bridge([item(77)])
+        handler=Mock(return_value=True)
+        candidate.receive.return_value={
+            "requires_ack":True,"recipient":peer,
+            "messages":[item(77)],"pending":1}
+        with self.assertRaisesRegex(ValueError,"MCP_INBOX_RECIPIENT_MISMATCH"):
+            candidate.process_pending(handler)
+        handler.assert_not_called()
+        candidate.ack.assert_not_called()
+
+        candidate=self.bridge([item(78)])
+        candidate.receive.return_value={
+            "requires_ack":True,"recipient":module_id,
+            "messages":[item(78)],"pending":1}
+        candidate.ack.side_effect=None
+        candidate.ack.return_value={
+            "ok":True,"recipient":peer,"acked":1,
+            "acked_ids":[78],"already_acked":[],"unknown":[]}
+        with self.assertRaisesRegex(RuntimeError,"MCP_ACK_UNCONFIRMED"):
+            candidate.process_pending(lambda _:True)
+        candidate.ack.assert_called_once_with([78])
+
+        candidate.ack.reset_mock()
+        candidate.ack.return_value={
+            "ok":True,"recipient":module_id,"acked":1,
+            "acked_ids":[78],"already_acked":[],"unknown":[]}
+        report=candidate.process_pending(lambda _:True)
+        self.assertEqual(report["acknowledged"],1)
