@@ -83,6 +83,37 @@ def test_valid_session_fields_keep_compatibility_and_roundtrip(tmp_path):
     assert second.data["output_mode"] == "compact"
 
 
+@pytest.mark.parametrize("unsafe_json", (
+    '{"workspace":"demo","line":NaN}',
+    '{"workspace":"demo","line":Infinity}',
+    '{"workspace":"demo","line":-Infinity}',
+    '{"workspace":"demo","line":1e10000}',
+))
+def test_nonfinite_imported_machine_session_fails_closed_without_rewriting(tmp_path, unsafe_json):
+    path = tmp_path / ".easychange" / "session.json"
+    path.parent.mkdir()
+    path.write_text(unsafe_json, encoding="utf-8")
+    session = MachineSession(path, "demo")
+    assert session.data["workspace"] == "demo"
+    assert session.data["line"] == 1
+    assert path.read_text(encoding="utf-8") == unsafe_json
+
+
+@pytest.mark.parametrize("unsafe", (
+    float("nan"), float("inf"), float("-inf")
+))
+def test_nonfinite_session_save_rejects_before_replacing_existing_file(tmp_path, unsafe):
+    path = tmp_path / ".easychange" / "session.json"
+    session = MachineSession(path, "demo")
+    session.save()
+    original = path.read_bytes()
+    session.data["line"] = unsafe
+    with pytest.raises(ValueError):
+        session.save()
+    assert path.read_bytes() == original
+    assert not list(path.parent.glob(".session.json.*.tmp"))
+
+
 def test_nonmatching_workspace_cannot_import_other_workspace_state(tmp_path):
     path = tmp_path / ".easychange" / "session.json"
     path.parent.mkdir()
