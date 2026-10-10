@@ -359,7 +359,14 @@ def attach_hub(token,expected_module):
 
 def detach_hub(token):
     global _runtime_token, _runtime_detached
-    if not isinstance(token,str) or not _runtime_token or not hmac.compare_digest(token,_runtime_token):
+    # A host-spawned module may authenticate through its bootstrap env token
+    # without a later attach_hub(). That exact credential must still be able
+    # to revoke the local bridge; an explicit detach permanently disables
+    # inherited-token fallback until authenticated attach_hub() succeeds.
+    expected=(_runtime_token or
+              ("" if _runtime_detached else
+               os.environ.get("MCP_MODULE_BUS_TOKEN","")))
+    if not isinstance(token,str) or not expected or not hmac.compare_digest(token,expected):
         raise PermissionError("INVALID_DETACH_CREDENTIAL")
     _runtime_token=""
     _runtime_detached=True
