@@ -138,7 +138,7 @@ class MCPBridge:
                             pending.extend(item.values())
                         else:
                             pending.extend(item)
-            payload=json.dumps(body,ensure_ascii=False).encode("utf-8")
+            payload=json.dumps(body,ensure_ascii=False,allow_nan=False).encode("utf-8")
             # The exact UTF-8 byte budget still decides final admission.
             if len(payload)>request_limit:
                 raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
