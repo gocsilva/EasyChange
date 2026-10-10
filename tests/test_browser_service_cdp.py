@@ -454,6 +454,21 @@ def test_cdp_ws_cumulative_fragment_budget_rejects_before_second_payload(monkeyp
     assert ws._recv_text()=="abcdef"
 
 
+def test_cdp_ws_rejects_invalid_utf8_in_text_frames():
+    class Socket:
+        def __init__(self, data):
+            self.data=io.BytesIO(data)
+        def recv(self, count):
+            return self.data.read(count)
+    ws=browser_module._WebSocket.__new__(browser_module._WebSocket)
+    ws.sock=Socket(b"\x81\x02\xff\xfe")
+    with pytest.raises(browser_module.CdpError,
+                       match="CDP_WEBSOCKET_INVALID_UTF8"):
+        ws._recv_text()
+    ws.sock=Socket(b"\x81\x02OK")
+    assert ws._recv_text()=="OK"
+
+
 def test_cdp_ws_oversized_ping_rejected_before_body_read():
     import struct
     class FakeSocket:
