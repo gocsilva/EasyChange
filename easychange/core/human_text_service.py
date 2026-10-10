@@ -253,11 +253,20 @@ class HumanTextService:
         # budget. Reject before creating another very large UTF-8 allocation.
         if len(text) > self.max_bytes:
             raise ValueError("HUMAN_TEXT_TOO_LARGE")
-        raw = text.encode("utf-8")
-        if len(raw) > self.max_bytes:
-            raise ValueError(
-                f"HUMAN_TEXT_TOO_LARGE:{len(raw)}>{self.max_bytes}"
-            )
+        # Each Unicode code point can expand into four UTF-8 bytes. Bound
+        # intermediate allocations before encoding the full input.
+        output=bytearray()
+        try:
+            for offset in range(0,len(text),4096):
+                fragment=text[offset:offset+4096].encode("utf-8")
+                if len(output)+len(fragment)>self.max_bytes:
+                    raise ValueError(
+                        f"HUMAN_TEXT_TOO_LARGE:{len(output)+len(fragment)}>{self.max_bytes}"
+                    )
+                output.extend(fragment)
+        except UnicodeEncodeError as exc:
+            raise ValueError("HUMAN_TEXT_INVALID_UTF8") from exc
+        raw=bytes(output)
 
         # Keep the identity of *our* committed file generation, not a later
         # path occupant installed by another writer between replace() and stat().
