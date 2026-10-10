@@ -415,8 +415,8 @@ class TestHubRedirectBoundary(unittest.TestCase):
         scenarios=(
             ("/v1/tools/call",8_388_608+131_072),
             ("/v1/tools",2_097_152),
-            ("/v1/inbox",1_048_576),
-            ("/v1/inbox/peek",1_048_576),
+            ("/v1/inbox",2_097_152),
+            ("/v1/inbox/peek",2_097_152),
             ("/v1/send",65_536),
             ("/v1/inbox/ack",65_536),
             ("/v1/peers",65_536),
@@ -433,6 +433,26 @@ class TestHubRedirectBoundary(unittest.TestCase):
                                   "open",return_value=healthy):
                     self.assertEqual(client._request(path),{"ok":True})
                 self.assertEqual(reads,[maximum+1])
+
+    def test_full_hundred_message_inbox_fits_bounded_hub_response(self):
+        import io
+        import json
+        from unittest.mock import patch
+
+        client=module_bridge.MCPBridge(token="local-test-token")
+        # The server accepts 100 envelopes carrying <=16 KiB JSON payloads.
+        # Their aggregate size legitimately exceeds the old 1 MiB reader cap.
+        messages=[{"id":i+1,"source":"bmollm","target":"esp",
+                   "topic":"bulk.sample","payload":"X"*16000}
+                  for i in range(100)]
+        wire=json.dumps({"ok":True,"messages":messages},separators=(",",":")).encode()
+        self.assertGreater(len(wire),1_048_576)
+        self.assertLess(len(wire),2_097_152)
+        with patch.object(module_bridge._local_opener,"open",
+                          return_value=io.BytesIO(wire)):
+            decoded=client._request("/v1/inbox/peek")
+        self.assertEqual(len(decoded["messages"]),100)
+        self.assertEqual(decoded["messages"][-1]["id"],100)
 
     def test_hub_response_rejects_non_object_json(self):
         import io
