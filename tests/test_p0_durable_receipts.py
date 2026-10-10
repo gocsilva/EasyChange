@@ -124,6 +124,36 @@ def test_same_sequence_mutation_replays_receipt_without_duplicate_write(tmp_path
 
 
 
+def test_incomplete_done_receipt_is_missing_result_not_running_or_reexecuted(tmp_path, monkeypatch):
+    target=tmp_path / "sample.txt"
+    target.write_text("alpha\\nbeta\\n".replace("\\n", "\n"),encoding="utf-8")
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        operation={"op":"operation","type":"replace_exact",
+                   "path":"sample.txt","old_text":"beta",
+                   "new_text":"BETA","expected_occurrences":1}
+        wire=":j1 "+json.dumps(operation,separators=(",",":"))
+        first=service.execute(":ec QDONEMISSING1 "+wire)
+        assert first.ok is True
+        receipt=service.result_store.get("QDONEMISSING1")
+        assert receipt["state"]=="DONE"
+        receipt.pop("result",None)
+        receipt["result_expired"]=False
+        service.result_store._write("QDONEMISSING1",receipt,run_cleanup=False)
+        def fail_if_reexecuted(*args,**kwargs):
+            raise AssertionError("already executed mutation was replayed")
+        monkeypatch.setattr(service,"_execute_structured",fail_if_reexecuted)
+        again=service.execute(":ec QDONEMISSING1 "+wire)
+        assert again.ok is False
+        assert again.code=="SEQUENCE_RESULT_MISSING"
+        assert again.data["state"]=="DONE"
+        assert again.data["duplicate"] is True
+        assert target.read_text(encoding="utf-8")=="alpha\\nBETA\\n".replace("\\n", "\n")
+        assert service.result_store.get("QDONEMISSING1")["state"]=="DONE"
+    finally:
+        service.close()
+
+
 def test_legacy_done_journal_without_result_cannot_reexecute_mutation(tmp_path, monkeypatch):
     import hashlib
 
