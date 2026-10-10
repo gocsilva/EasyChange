@@ -544,6 +544,50 @@ def test_cdp_ws_oversized_ping_rejected_before_body_read():
     assert ws.sock.buffer.tell()==4
 
 
+@pytest.mark.parametrize("headers,error",(
+    (["Connection: Upgrade"],"CDP_WEBSOCKET_HANDSHAKE_INVALID_HEADERS"),
+    (["Upgrade: websocket"],"CDP_WEBSOCKET_HANDSHAKE_INVALID_HEADERS"),
+    (["Upgrade: websocket","Connection: keep-alive"],
+     "CDP_WEBSOCKET_HANDSHAKE_INVALID_HEADERS"),
+    (["Upgrade: websocket","Connection: Upgrade","Upgrade: websocket"],
+     "CDP_WEBSOCKET_HANDSHAKE_DUPLICATE_HEADER"),
+    (["Upgrade: websocket","Connection: Upgrade",
+      "Sec-WebSocket-Accept: duplicate"],
+     "CDP_WEBSOCKET_HANDSHAKE_DUPLICATE_HEADER"),
+))
+def test_cdp_http_upgrade_rejects_missing_or_duplicate_critical_headers(
+        monkeypatch,headers,error):
+    import hashlib
+
+    fixed=b"\x03"*16
+    key=base64.b64encode(fixed).decode("ascii")
+    accept=base64.b64encode(hashlib.sha1(
+        (key+"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+    ).digest()).decode("ascii")
+    source=(["HTTP/1.1 101 Switching Protocols",*headers,
+             "Sec-WebSocket-Accept: "+accept,"",""])
+    response="\r\n".join(source).encode("ascii")
+
+    class Socket:
+        def __init__(self):
+            self.sent=[]
+            self.read_once=False
+        def sendall(self,payload):
+            self.sent.append(payload)
+        def recv(self,_count):
+            if self.read_once:
+                return b""
+            self.read_once=True
+            return response
+
+    ws=browser_module._WebSocket.__new__(browser_module._WebSocket)
+    ws.host="127.0.0.1";ws.port=9222;ws.path="/devtools/page/1"
+    ws.sock=Socket()
+    monkeypatch.setattr(browser_module.os,"urandom",lambda n:fixed)
+    with pytest.raises(browser_module.CdpError,match=error):
+        ws._handshake()
+
+
 def test_cdp_upgrade_preserves_first_frame_from_same_socket_read(monkeypatch):
     import hashlib
 
