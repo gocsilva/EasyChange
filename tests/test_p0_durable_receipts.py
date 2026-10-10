@@ -253,6 +253,34 @@ def test_optical_recovery_query_rejects_fractional_chunk_identifiers(tmp_path):
         service.close()
 
 
+def test_individual_recovery_chunks_do_not_coerce_bool_or_fractional_index(tmp_path):
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        seq="QINDIVINDEX"
+        service.result_store.mark_running(seq,"a"*64,":state",mutation=False)
+        service.result_store.complete(seq,"a"*64,":state",{
+            "ok":True,"command":"state",
+            "data":{"text":"A"*40000},"sequence":seq,
+        })
+        for kind,code in (
+            ("result_chunk","INVALID_RESULT_CHUNK"),
+            ("result_stream_chunk","INVALID_RESULT_STREAM_CHUNK"),
+        ):
+            for bad in (True,False,0.1,1.9,None,"9"*100000):
+                query={"op":"operation","type":kind,"sequence":seq,
+                       "chunk_index":bad}
+                reply=service._execute_structured(query)
+                assert reply.ok is False
+                assert reply.code==code
+            valid=service._execute_structured({
+                "op":"operation","type":kind,"sequence":seq,
+                "chunk_index":"0",
+            })
+            assert valid.ok is True
+    finally:
+        service.close()
+
+
 def test_chunk_batches_reject_fractional_indexes_but_allow_decimal_strings(tmp_path):
     import pytest
 
