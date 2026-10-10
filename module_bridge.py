@@ -124,22 +124,27 @@ def _release_consumer_lease(lease):
 class MCPBridge:
     def __init__(self,token=None):
         self._implicit_credential=(token is None)
-        # Explicit detach overrides an inherited bootstrap credential.
-        # The host must also rotate its token to revoke pre-existing clients.
-        self.token=(token if token is not None else
-                    ("" if _runtime_detached else
-                     (_runtime_token or os.environ.get("MCP_MODULE_BUS_TOKEN",""))))
+        # Take one consistent snapshot of both credential fields. In
+        # particular, detach clears _runtime_token before setting the flag;
+        # an unlocked reader could resurrect the inherited env token.
+        if token is None:
+            with _runtime_state_lock:
+                token=("" if _runtime_detached else
+                       (_runtime_token or os.environ.get("MCP_MODULE_BUS_TOKEN","")))
+        self.token=token
         self.module=os.environ.get("MCP_MODULE_ID","")
 
     @property
     def connected(self):
         if not self.token:
             return False
-        # Previously instantiated implicit clients must not keep using a
-        # credential after the module has detached or adopted a newer one.
-        if self._implicit_credential and (_runtime_detached or
-                (_runtime_token and not hmac.compare_digest(self.token,_runtime_token))):
-            return False
+        if self._implicit_credential:
+            with _runtime_state_lock:
+                # Implicit clients stop working immediately after a detach or
+                # a newer attach. Explicit tokens are verified by the hub.
+                if (_runtime_detached or
+                        (_runtime_token and not hmac.compare_digest(self.token,_runtime_token))):
+                    return False
         return True
 
     def _request(self,path,body=None,*,timeout=40):
