@@ -227,6 +227,25 @@ def test_ec2_direct_decoder_rejects_invalid_transfer_identity_early():
             decode_result_chunks([json.dumps(forged)])
 
 
+def test_ec2_rejects_non_v2_envelopes_and_never_normalizes_bool_version():
+    import json
+    import pytest
+    from easychange.core.result import Result
+
+    packets=encode_result_chunks(
+        Result(True,"read",{"text":"versioned"},sequence="QVER2026"))
+    assert decode_result_chunks(packets)["sequence"]=="QVER2026"
+    packet=json.loads(packets[0])
+    for invalid in (None, True, False, "2", 1, 3, 2.0, [], {}):
+        altered=dict(packet)
+        if invalid is None:
+            altered.pop("v")
+        else:
+            altered["v"]=invalid
+        with pytest.raises(ValueError,match="invalid optical transfer identity"):
+            decode_result_chunks([json.dumps(altered)])
+
+
 def test_ec2_decoder_requires_real_crc_for_every_fragment():
     import json
     import pytest
