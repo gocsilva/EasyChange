@@ -357,8 +357,13 @@ class MCPBridge:
                 time.sleep(min(0.5,0.025*(2**attempt)))
 
     def receive(self):
-        """Non-destructive read; process and then explicitly call ack(ids)."""
-        return self._request("/v1/inbox/peek")
+        """Non-destructive read with a bounded local mailbox probe.
+
+        process_pending() holds the cross-process consumer lease while this
+        runs. Never pin a standalone module for the generic 40-second RPC
+        timeout merely because the hub is unavailable.
+        """
+        return self._request("/v1/inbox/peek",timeout=8)
 
     def ack(self, ids):
         """Confirm delivery with a bounded retry only for transport failure.
