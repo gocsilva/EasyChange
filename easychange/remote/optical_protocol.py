@@ -31,7 +31,8 @@ def valid_ec2_identity(packet: dict) -> bool:
     seq, digest, crc = packet.get("s"), packet.get("h"), packet.get("c")
     alphabet = "0123456789abcdef"
     return (
-        isinstance(seq, str) and bool(seq) and len(seq) <= 256
+        type(packet.get("v")) is int and packet["v"] == 2
+        and isinstance(seq, str) and bool(seq) and len(seq) <= 256
         and isinstance(digest, str) and len(digest) == 16
         and all(char in alphabet for char in digest)
         and isinstance(crc, str) and len(crc) == 8
