@@ -140,3 +140,21 @@ def test_plain_chunk_size_clamps_short_numeric_values(tmp_path):
     assert store.chunk_meta("QABSENT", chunk_bytes="1024") is None
     assert store.chunks("QABSENT", [0], chunk_bytes="1024") is None
     assert store.chunk("QABSENT", 0, chunk_bytes="1024") is None
+
+
+@pytest.mark.parametrize("index", [-1, 10**9, "9" * 64])
+def test_single_plain_chunk_rejects_impossible_index_before_read(
+    index, tmp_path, monkeypatch,
+):
+    store = DurableResultStore(tmp_path / "results")
+    calls = []
+    def unexpected_read(_sequence):
+        calls.append(True)
+        raise AssertionError("UNNECESSARY_RECEIPT_READ")
+    monkeypatch.setattr(store, "_result_payload", unexpected_read)
+    expected = ("INVALID_RESULT_CHUNK_INDEX"
+                if isinstance(index, str) else "RESULT_CHUNK_OUT_OF_RANGE")
+    category = ValueError if isinstance(index, str) else IndexError
+    with pytest.raises(category, match=expected):
+        store.chunk("QABSENT", index)
+    assert calls == []
