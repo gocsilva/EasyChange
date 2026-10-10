@@ -56,6 +56,19 @@ def test_healthy_external_service_is_preserved_without_even_probing_port(tmp_pat
     assert "fora desta GUI" in gui.message.set.call_args.args[0]
 
 
+def test_ambiguous_port_probe_failure_fails_closed(tmp_path):
+    gui,_settings=_gui(tmp_path,healthy=False)
+    for failure in (TimeoutError("PORT_PROBE_TIMED_OUT"),
+                    PermissionError("SOCKET_DENIED"),
+                    OSError("LOCAL_NETWORK_UNAVAILABLE")):
+        with patch("socket.create_connection",side_effect=failure), \
+             patch("subprocess.Popen") as spawn:
+            gui.start()
+        spawn.assert_not_called()
+        assert gui.process is None
+        assert "Não foi possível confirmar porta local" in gui.message.set.call_args.args[0]
+
+
 def test_unbound_port_allows_normal_package_launch(tmp_path):
     gui,settings=_gui(tmp_path,healthy=False)
     process=Mock()
