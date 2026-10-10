@@ -99,3 +99,35 @@ def test_real_git_grep_with_literal_directory_glob_characters(tmp_path):
         "TOKEN=-n",regex=False,extension=".py",
         path_prefix="src_[x]",case_sensitive=True)
     assert rows==[("src_[x]/target.py","1:TOKEN=-n real")]
+
+
+def test_cold_git_grep_resolves_workspace_root_once_for_many_matches(tmp_path):
+    """Thousands of hits must not repeat slow workspace-root resolution."""
+    from pathlib import Path
+
+    (tmp_path/".git").mkdir()
+    paths=[]
+    for number in range(50):
+        name=f"source_{number:03d}.py"
+        (tmp_path/name).write_text("TOKEN = 1\n",encoding="utf-8")
+        paths.append(name)
+    index=Indexer(tmp_path)
+    stdout="".join(f"{name}:1:TOKEN = 1\n" for name in paths)
+    native=Path.resolve
+    root_calls=[]
+
+    def measured(path,*args,**kwargs):
+        if path==tmp_path:
+            root_calls.append(1)
+        return native(path,*args,**kwargs)
+
+    response=subprocess.CompletedProcess(
+        ["git","grep"],0,stdout,"")
+    with patch.object(Path,"resolve",measured), \
+         patch("easychange.core.indexer.subprocess.run",return_value=response):
+        matches=index._git_search(
+            "TOKEN",regex=False,extension=None,path_prefix=None,
+            case_sensitive=False)
+    assert len(matches)==len(paths)
+    assert len(root_calls)==1
+    assert matches[0]==("source_000.py","1:TOKEN = 1")
