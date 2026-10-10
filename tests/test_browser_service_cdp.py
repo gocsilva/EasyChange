@@ -366,6 +366,20 @@ def test_browser_http_discovery_rejects_spoofed_loopback_before_request(
             BrowserService._http_json(unsafe)
 
 
+@pytest.mark.parametrize("ambiguous",(
+    b'{"webSocketDebuggerUrl":"ws://127.0.0.1:9222/a",'
+    b'"webSocketDebuggerUrl":"ws://127.0.0.1:9222/b"}',
+    b'{"Browser":"Microsoft Edge","version":NaN}',
+    b'{"Browser":"Microsoft Edge","ratio":1e9999}',
+))
+def test_browser_discovery_rejects_ambiguous_target_metadata(
+        ambiguous,monkeypatch):
+    monkeypatch.setattr(browser_module._CDP_HTTP_OPENER,"open",
+                        lambda *a,**k:io.BytesIO(ambiguous))
+    with pytest.raises(ValueError):
+        BrowserService._http_json("http://127.0.0.1:9222/json/version")
+
+
 def test_browser_discovery_bounds_http_body_before_parsing(monkeypatch):
     class Monitored(io.BytesIO):
         def __init__(self,raw):
