@@ -101,8 +101,7 @@ class OpticalAssembler:
                         count<1 or count>MAX_EC2_PACKETS or
                         type(index) is not int or index<0 or index>=count):
                     continue
-                if self.sequence and seq!=self.sequence:continue
-                if self.sequence and count!=self.total:
+                if self.sequence and seq==self.sequence and count!=self.total:
                     continue
                 # Literal-metadata marker must agree across the same EC2
                 # carousel. Reject malformed markers before claiming a slot,
@@ -111,8 +110,6 @@ class OpticalAssembler:
                 if "t" in item and (type(marker) is not int or marker!=0):
                     continue
                 identity=(seq,count,item.get("h"),item.get("c"),item.get("e"),marker)
-                if self.packet_identity is not None and identity!=self.packet_identity:
-                    continue
                 piece=item.get("d")
                 if not isinstance(piece,str) or len(piece)>MAX_EC2_TOKEN_CHARS:
                     continue
@@ -128,6 +125,15 @@ class OpticalAssembler:
                 if (not isinstance(expected_crc,str) or
                         len(expected_crc)!=8 or
                         f"{binascii.crc32(piece_bytes) & 0xffffffff:08x}"!=expected_crc):
+                    continue
+                if self.sequence and seq!=self.sequence:
+                    # A completed receipt may hand off to the next valid
+                    # carousel immediately. Incomplete work stays protected
+                    # against mixing until its idle timeout.
+                    if self.verified_payload is None or index != 0:
+                        continue
+                    self._reset_unverified()
+                if self.packet_identity is not None and identity!=self.packet_identity:
                     continue
                 prev=self.chunks.get(index)
                 if prev is not None and prev!=raw:
