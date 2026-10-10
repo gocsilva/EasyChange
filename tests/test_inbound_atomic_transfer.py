@@ -365,6 +365,8 @@ def test_failed_chunk_atomic_replace_preserves_previous_bytes_and_cleans_temp(tm
     ("raw_bytes",10**12),
     ("compressed_bytes",-1),
     ("version",2),
+    ("version",True),
+    ("version",1.0),
     ("transfer_id","UOTHER999"),
     ("codec","untrusted"),
     ("sha256","invalid"),
