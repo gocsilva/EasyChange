@@ -11,11 +11,26 @@ def item(ident):
 class TestProcessPending(unittest.TestCase):
     def bridge(self,messages):
         b=MCPBridge(token="local-test-credential")
-        b.receive=Mock(return_value={"messages":messages,"pending":len(messages),
+        b.receive=Mock(return_value={"ok":True,"messages":messages,"pending":len(messages),
                                      "requires_ack":True})
         b.ack=Mock(side_effect=lambda ids:{"ok":True,"acked":len(ids),
                             "already_acked":[],"unknown":[]})
         return b
+
+    def test_failed_or_unconfirmed_inbox_header_never_runs_handler(self):
+        for ok in (False,None,"true",0):
+            with self.subTest(ok=ok):
+                bridge=self.bridge([item(801)])
+                response={"messages":[item(801)],"pending":1,"requires_ack":True}
+                if ok is not None:
+                    response["ok"]=ok
+                bridge.receive.return_value=response
+                handler=Mock(return_value=True)
+                with self.assertRaisesRegex(ValueError,
+                                            "MCP_REQUIRES_NONDESTRUCTIVE_INBOX"):
+                    bridge.process_pending(handler)
+                handler.assert_not_called()
+                bridge.ack.assert_not_called()
 
     def test_only_explicit_true_is_success(self):
         for result in (None,False,1,"ok",{}):
