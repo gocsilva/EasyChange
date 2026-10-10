@@ -586,6 +586,41 @@ def test_adaptive_chunk_sizing_reduces_small_payload_chunk_count():
     assert len(adaptive) <= len(fixed)
 
 
+def test_ec2_wide_structural_comparison_uses_bounded_iterator_memory():
+    import tracemalloc
+    from easychange.remote.optical_protocol import _json_equal_with_types
+
+    # Construct inputs before tracing: only the comparison's temporary
+    # allocations count. A pending.extend(zip(lhs,rhs)) copies 25k pairs.
+    left={"items":list(range(25000)), "ok":True}
+    right={"ok":True, "items":list(range(25000))}
+    tracemalloc.start()
+    try:
+        assert _json_equal_with_types(left,right)
+        _current,peak=tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak<750000, "wide EC2 equality allocated a linear pair backlog"
+
+    right["items"][-1]=True  # Boolean True must not alias integer 24999.
+    assert not _json_equal_with_types(left,right)
+    right["items"][-1]=24999
+    assert _json_equal_with_types(left,right)
+
+
+def test_ec2_structural_comparison_handles_cycles_and_mixed_keys():
+    from easychange.remote.optical_protocol import _json_equal_with_types
+
+    a=[]; a.append(a)
+    b=[]; b.append(b)
+    assert _json_equal_with_types(a,b)
+    b.append("extra")
+    assert not _json_equal_with_types(a,b)
+    assert not _json_equal_with_types({1:"one"},{"1":"one"})
+    assert not _json_equal_with_types({"x":[1,2]},{"x":[1,True]})
+    assert _json_equal_with_types({"x":[1,2]},{"x":[1,2]})
+
+
 def test_ec2_does_not_erase_boolean_vs_integer_differences():
     import json
     from easychange.remote.optical_protocol import (
