@@ -131,7 +131,7 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertEqual(detector.detectAndDecodeMulti.call_count,2)
         self.assertEqual(detector.detectAndDecode.call_count,2)
 
-    def test_transient_qr_decoder_exception_allows_next_frame(self):
+    def test_opencv_multi_qr_error_recovers_same_frame_via_single(self):
         import sys
         from types import SimpleNamespace
         from unittest.mock import Mock,patch
@@ -149,9 +149,34 @@ class OpticalReaderTests(unittest.TestCase):
         frame=SimpleNamespace(shape=(480,640,3))
         with patch.dict(sys.modules,{"cv2":cv2_stub}), \
              patch.object(reader._qr_detectors,"detector",None,create=True):
-            self.assertEqual(reader.decode_hdmi_qr(frame),[])
+            self.assertEqual(reader.decode_hdmi_qr(frame),["EC2_VALID"])
             self.assertEqual(reader.decode_hdmi_qr(frame),["EC2_VALID"])
         self.assertEqual(detector.detectAndDecodeMulti.call_count,2)
+        self.assertEqual(detector.detectAndDecode.call_count,2)
+
+    def test_both_opencv_decoders_failing_does_not_poison_next_frame(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import Mock,patch
+        from mcp_adapter import optical_reader as reader
+
+        class InvalidImage(Exception):
+            pass
+        detector=Mock()
+        detector.detectAndDecodeMulti.side_effect=[
+            InvalidImage("MULTI_UNAVAILABLE"),(False,[],None,None)]
+        detector.detectAndDecode.side_effect=[
+            InvalidImage("SINGLE_UNAVAILABLE"),
+            ("EC2_RECOVERED",None,None),
+        ]
+        cv2_stub=SimpleNamespace(error=InvalidImage,QRCodeDetector=lambda:detector)
+        frame=SimpleNamespace(shape=(480,640,3))
+        with patch.dict(sys.modules,{"cv2":cv2_stub}), \
+             patch.object(reader._qr_detectors,"detector",None,create=True):
+            self.assertEqual(reader.decode_hdmi_qr(frame),[])
+            self.assertEqual(reader.decode_hdmi_qr(frame),["EC2_RECOVERED"])
+        self.assertEqual(detector.detectAndDecodeMulti.call_count,2)
+        self.assertEqual(detector.detectAndDecode.call_count,2)
 
     def test_failed_detector_construction_does_not_poison_next_frame(self):
         import sys
