@@ -496,6 +496,36 @@ class TestHubRedirectBoundary(unittest.TestCase):
                         client.call("mcp_core_status",payload=payload)
             request.assert_not_called()
 
+    def test_backpressure_response_socket_is_closed_before_retry(self):
+        import io
+        import json
+        from unittest.mock import Mock,patch
+        from urllib.error import HTTPError
+
+        client=module_bridge.MCPBridge(token="connection-lifetime-test")
+        operations=(
+            (lambda: client.send("mcp","test.busy",{"safe":True}),
+             "MODULE_INBOX_FULL_RETRY_LATER"),
+            (lambda: client.call("mcp_core_status"),
+             "MODULE_TOOL_RPC_BUSY_RETRY_LATER"),
+        )
+        for action,error in operations:
+            with self.subTest(error=error):
+                body=io.BytesIO(json.dumps({
+                    "error":error,"retryable":True,"accepted":False
+                }).encode("utf-8"))
+                busy=HTTPError("http://127.0.0.1:8786/v1/send",429,
+                               "busy",{},body)
+                client._request=Mock(side_effect=[busy,{"ok":True}])
+                def verify_closed_before_backoff(_seconds):
+                    self.assertTrue(body.closed)
+                with patch("module_bridge.time.sleep",
+                           side_effect=verify_closed_before_backoff) as sleep:
+                    self.assertEqual(action(),{"ok":True})
+                self.assertEqual(client._request.call_count,2)
+                sleep.assert_called_once()
+                self.assertTrue(body.closed)
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
