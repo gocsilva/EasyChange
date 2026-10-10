@@ -83,14 +83,19 @@ class DurableResultStore:
     ) -> None:
         self.root = root
         self.max_results = max(16, int(max_results))
-        self.ttl_seconds = max(60.0, float(ttl_seconds))
+        normal_ttl = float(ttl_seconds)
+        active_ttl = float(active_ttl_seconds)
+        # Nonfinite retention can disable cleanup or make expiry ambiguous.
+        if not math.isfinite(normal_ttl) or not math.isfinite(active_ttl):
+            raise ValueError("INVALID_RESULT_RETENTION_TTL")
+        self.ttl_seconds = max(60.0, normal_ttl)
         # RUNNING/APPLIED-but-not-final records are execution truth. Pruning
         # them on the ordinary 30-minute result TTL can make a long build/test
         # or mutation look never-executed after restart and permit a duplicate.
         self.active_ttl_seconds = max(
             self.ttl_seconds,
             60 * 60,
-            float(active_ttl_seconds),
+            active_ttl,
         )
         self._lock = threading.RLock()
         # A separate OS lock protects the read/claim/write transaction when
