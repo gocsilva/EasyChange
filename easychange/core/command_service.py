@@ -4583,6 +4583,10 @@ class CommandService:
             return
         try:
             value = json.loads(self.transaction_path.read_text(encoding="utf-8"))
+            if (not isinstance(value, dict) or
+                    not isinstance(value.get("transaction_id"), str) or
+                    not value["transaction_id"]):
+                raise ValueError("INVALID_ACTIVE_TRANSACTION_HEADER")
             self.transaction_id = value["transaction_id"]
             if value.get("format") == "append-v2":
                 changes: list[Change] = []
@@ -4598,10 +4602,13 @@ class CommandService:
                             try:
                                 item = json.loads(line)
                                 changes.append(Change(**item))
-                            except (json.JSONDecodeError, TypeError):
-                                # A crash can leave only the final append incomplete.
-                                # Never invent a change from a partial record.
-                                break
+                            except (json.JSONDecodeError, TypeError) as exc:
+                                # Only a genuinely torn FINAL append may be
+                                # omitted. A malformed earlier record must not
+                                # silently erase subsequent rollback history.
+                                if not line.endswith("\n") and not stream.read(1):
+                                    break
+                                raise ValueError("ACTIVE_TRANSACTION_LOG_CORRUPT") from exc
                 self.transaction = changes
                 self._transaction_persisted_count = len(changes)
                 self._transaction_storage_v2 = True
@@ -4611,11 +4618,14 @@ class CommandService:
                 self.transaction = [Change(**item) for item in value.get("changes", [])]
                 self._transaction_persisted_count = 0
                 self._transaction_storage_v2 = False
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError) as exc:
             self.transaction_id = None
             self.transaction = None
             self._transaction_persisted_count = 0
             self._transaction_storage_v2 = False
+            # A present but unreadable transaction is NOT an empty transaction.
+            # Preserve the journal and refuse new edits until it is recovered.
+            raise RuntimeError("ACTIVE_TRANSACTION_RECOVERY_FAILED") from exc
 
     def _save_transaction(self) -> None:
         """Persist active transaction in O(new changes), not O(total changes)."""
