@@ -410,6 +410,50 @@ def test_receipt_encoder_streams_byte_exact_json_without_full_dumps(monkeypatch)
     assert zlib.decompress(packed)==expected
 
 
+def test_receipt_unicode_encoder_bounds_temporary_utf8_fragments(monkeypatch):
+    import zlib
+    import easychange.core.result_store as store_module
+
+    # JSONEncoder can emit one very long string. Verify that its bytes are
+    # generated in bounded slices without changing the compressed content.
+    visited=[]
+    class TrackedString(str):
+        def __getitem__(self, item):
+            fragment=super().__getitem__(item)
+            visited.append(len(fragment))
+            return fragment
+
+    class StreamingEncoder:
+        def __init__(self, **kwargs):
+            pass
+        def iterencode(self, value):
+            yield TrackedString("é"*9000)
+
+    with monkeypatch.context() as ctx:
+        ctx.setattr(store_module.json,"JSONEncoder",StreamingEncoder)
+        packed=DurableResultStore._encode({"unused":"value"})
+    assert zlib.decompress(packed)==("é"*9000).encode("utf-8")
+    assert visited and len(visited)>1
+    assert max(visited)<=4096
+
+
+def test_malformed_unicode_or_deep_receipt_never_becomes_unclaimed(tmp_path):
+    import pytest
+    import zlib
+
+    store=DurableResultStore(tmp_path / "receipts")
+    seq="QMALFORMEDUTF8"
+    store.mark_running(seq,"a"*64,":mutation",mutation=True)
+    target=store._path(seq)
+    for raw in (b"\\xff", b"["*1200+b"0"+b"]"*1200):
+        target.write_bytes(zlib.compress(raw))
+        with pytest.raises(RuntimeError,match="RESULT_RECEIPT_UNREADABLE"):
+            store.get(seq)
+        with pytest.raises(RuntimeError,match="RESULT_RECEIPT_UNREADABLE"):
+            store.claim_running(seq,"a"*64,":mutation",mutation=True)
+        assert target.exists()
+
+
 def test_receipt_writer_rejects_shared_dag_expansion_before_compression(monkeypatch):
     import pytest
     import easychange.core.result_store as result_module
