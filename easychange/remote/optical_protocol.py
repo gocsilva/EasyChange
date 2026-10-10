@@ -72,10 +72,38 @@ def _result_value(result: Any) -> dict[str, Any]:
     return value
 
 
+def _json_equal_with_types(left: Any, right: Any) -> bool:
+    """Compare JSON values without Python's True == 1 numeric aliasing.
+
+    Iterate rather than recursively allocating two canonical JSON strings:
+    a large structured primary/result is compared without extra serialization.
+    """
+    pending = [(left, right)]
+    while pending:
+        lhs, rhs = pending.pop()
+        if type(lhs) is not type(rhs):
+            return False
+        if isinstance(lhs, dict):
+            if lhs.keys() != rhs.keys():
+                return False
+            pending.extend((value, rhs[key]) for key, value in lhs.items())
+        elif isinstance(lhs, list):
+            if len(lhs) != len(rhs):
+                return False
+            pending.extend(zip(lhs, rhs))
+        elif lhs != rhs:
+            return False
+    return True
+
+
 def _compact_transport_value(value: dict[str, Any]) -> dict[str, Any]:
     """Remove reversible structured-response duplication without copying payloads."""
     data = value.get("data")
     if not isinstance(data, dict):
+        return value
+    # A caller can legitimately own this field. Never overwrite its value
+    # with a transport-only marker or drop it during expansion.
+    if "transport_compacted" in data:
         return value
     results = data.get("results")
     primary = data.get("primary")
@@ -84,7 +112,7 @@ def _compact_transport_value(value: dict[str, Any]) -> dict[str, Any]:
         and len(results) == 1
         and isinstance(results[0], dict)
         and isinstance(primary, dict)
-        and primary == results[0]
+        and _json_equal_with_types(primary, results[0])
     ):
         return value
     compact = dict(value)
@@ -95,15 +123,19 @@ def _compact_transport_value(value: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def _expand_transport_value(value: dict[str, Any]) -> dict[str, Any]:
+def _expand_transport_value(
+    value: dict[str, Any], *, preserve_literal_marker: bool = False
+) -> dict[str, Any]:
     data = value.get("data")
     if not isinstance(data, dict):
         return value
     primary = data.get("primary")
     results = data.get("results")
     if (
-        isinstance(primary, dict)
-        and primary.get("$ec_ref") == "results[0]"
+        not preserve_literal_marker
+        and data.get("transport_compacted") is True
+        and isinstance(primary, dict)
+        and primary == {"$ec_ref":"results[0]"}
         and isinstance(results, list)
         and len(results) >= 1
         and isinstance(results[0], dict)
@@ -148,18 +180,29 @@ def _transport_components(
     digest = hashlib.sha256(raw).hexdigest()
     crc = f"{binascii.crc32(raw) & 0xffffffff:08x}"
     sequence = str(value.get("sequence") or "-")
-    return value, raw, token, size, total, digest, crc, sequence
+    data = value.get("data")
+    # An uncompactable caller-provided transport_compacted field is ambiguous
+    # to older unmarked decoders. Mark these rare packets as literal metadata.
+    literal_marker = (
+        isinstance(data,dict)
+        and "transport_compacted" in data
+    )
+    return value, raw, token, size, total, digest, crc, sequence, literal_marker
 
 
 def _packet_json(
     *, sequence: str, index: int, total: int, digest: str, crc: str, piece: str,
+    literal_marker: bool = False,
 ) -> str:
-    return json.dumps({
+    packet = {
         "p": PROTOCOL, "v": 2, "s": sequence, "i": index, "n": total,
         "h": digest[:16], "c": crc,
         "x": f"{binascii.crc32(piece.encode('ascii')) & 0xffffffff:08x}",
         "d": piece,
-    }, ensure_ascii=False, separators=(",", ":"))
+    }
+    if literal_marker:
+        packet["t"] = 0
+    return json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
 
 
 def _header_json(
@@ -217,7 +260,7 @@ def encode_result_chunks(
     indexes: list[int] | tuple[int, ...] | None = None,
 ) -> list[str]:
     """Encode only the EC2 packet window/indexes that are actually needed."""
-    _value, _raw, token, size, total, digest, crc, sequence = _transport_components(
+    _value, _raw, token, size, total, digest, crc, sequence, literal_marker = _transport_components(
         result, chunk_chars=chunk_chars
     )
     if indexes is None:
@@ -252,12 +295,13 @@ def encode_result_chunks(
         packets.append(_packet_json(
             sequence=sequence, index=index, total=total,
             digest=digest, crc=crc, piece=piece,
+            literal_marker=literal_marker,
         ))
     return packets
 
 
 def encode_result_header(result: Any, *, chunk_count: int | None = None) -> str:
-    value, raw, _token, _size, total, digest, _crc, _sequence = _transport_components(result)
+    value, raw, _token, _size, total, digest, _crc, _sequence, _literal = _transport_components(result)
     return _header_json(
         value, raw,
         total=total if chunk_count is None else int(chunk_count),
@@ -273,7 +317,7 @@ def encode_result_bundle(
     overflow_packets: int | None = None,
 ) -> tuple[list[str], str]:
     """Encode broadcast packets and EC2H in one serialization/compression pass."""
-    value, raw, token, size, total, digest, crc, sequence = _transport_components(
+    value, raw, token, size, total, digest, crc, sequence, literal_marker = _transport_components(
         result, chunk_chars=chunk_chars
     )
     if max_packets is None:
@@ -290,6 +334,7 @@ def encode_result_bundle(
         packets.append(_packet_json(
             sequence=sequence, index=index, total=total,
             digest=digest, crc=crc, piece=piece,
+            literal_marker=literal_marker,
         ))
     return packets, _header_json(
         value, raw, total=total, digest=digest, broadcast_count=materialized
@@ -325,10 +370,12 @@ def decode_result_chunks(payloads: Collection[str]) -> dict[str, Any]:
             if type(total) is not int or total < 1 or total > MAX_EC2_PACKETS:
                 raise ValueError("invalid optical packet count")
             identity = (chunk.get("s"), total, chunk.get("h"),
-                        chunk.get("c"), chunk.get("e"))
+                        chunk.get("c"), chunk.get("e"), chunk.get("t"))
         elif (chunk.get("s"), chunk.get("n"), chunk.get("h"),
-              chunk.get("c"), chunk.get("e")) != identity:
+              chunk.get("c"), chunk.get("e"), chunk.get("t")) != identity:
             raise ValueError("mixed optical packet set")
+        if "t" in chunk and (type(chunk["t"]) is not int or chunk["t"] != 0):
+            raise ValueError("invalid optical transport marker")
         index = chunk.get("i")
         if type(index) is not int or not 0 <= index < total:
             raise ValueError("invalid optical chunk index")
@@ -387,4 +434,7 @@ def decode_result_chunks(payloads: Collection[str]) -> dict[str, Any]:
     value = decode_ec2_packet_json(raw)
     if not isinstance(value, dict):
         raise ValueError("optical result object required")
-    return _expand_transport_value(value)
+    return _expand_transport_value(
+        value, preserve_literal_marker=first.get("t") == 0 and
+        type(first.get("t")) is int
+    )
