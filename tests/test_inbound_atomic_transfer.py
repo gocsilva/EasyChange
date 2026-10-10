@@ -52,6 +52,52 @@ def test_inbound_lock_context_is_invoked_for_full_transfer_lifecycle(tmp_path):
     assert store.abort(key)["removed"] is False
 
 
+def test_inbound_lock_contention_has_finite_deadline_and_no_partial_write(tmp_path):
+    import errno
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("POSIX fcntl contention; Windows uses msvcrt nonblocking")
+    import fcntl
+
+    store=InboundCommandStore(tmp_path/"inbound")
+    busy=BlockingIOError(errno.EAGAIN,"OTHER_PROCESS_OWNS_STAGING")
+    with patch.object(fcntl,"flock",side_effect=busy) as flock, \
+         patch.object(inbound_module.time,"monotonic",side_effect=[100.0,106.0]), \
+         patch.object(inbound_module.time,"sleep") as sleep:
+        with pytest.raises(InboundTransferError) as exc:
+            store.begin("UTIMELOCK1",raw_bytes=3,compressed_bytes=3,
+                        chunk_count=1,sha256="a"*64)
+    assert exc.value.code=="INBOUND_LOCK_BUSY"
+    assert flock.call_count==1
+    assert flock.call_args.args[1] == fcntl.LOCK_EX | fcntl.LOCK_NB
+    sleep.assert_not_called()
+    # The failed claimant never makes the transfer folder; after the
+    # other owner releases its OS lock, the same process can retry safely.
+    assert not (store.root/"UTIMELOCK1").exists()
+    assert store.begin("UTIMELOCK1",raw_bytes=3,compressed_bytes=3,
+                       chunk_count=1,sha256="a"*64)["duplicate"] is False
+
+
+def test_inbound_lock_contended_retry_does_not_block_thread_forever(tmp_path):
+    import errno
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("POSIX fcntl retry contract")
+    import fcntl
+
+    store=InboundCommandStore(tmp_path/"inbound")
+    busy=BlockingIOError(errno.EAGAIN,"BUSY")
+    with patch.object(fcntl,"flock",side_effect=[busy,busy,None,None]) as flock, \
+         patch.object(inbound_module.time,"monotonic",
+                      side_effect=[100.0,100.1,100.2]), \
+         patch.object(inbound_module.time,"sleep") as sleep:
+        with store._transaction_lock():
+            assert store._process_lock_path.stat().st_size>=1
+    assert flock.call_count==4
+    assert sleep.call_count==2
+    assert all(call.args[0]<=0.05 for call in sleep.call_args_list)
+
+
 def test_inbound_lock_rejects_symlink_without_touching_external_file(tmp_path):
     store=InboundCommandStore(tmp_path / "transfer")
     foreign=tmp_path / "private.txt"
