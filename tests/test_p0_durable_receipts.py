@@ -258,6 +258,49 @@ def test_receipt_writer_rejects_shared_dag_expansion_before_compression(monkeypa
             DurableResultStore._encode({"payload":node})
 
 
+def test_complete_limits_shared_dag_json_before_full_dumps_or_receipt_write(tmp_path, monkeypatch):
+    import pytest
+    import easychange.core.result_store as result_module
+
+    store=DurableResultStore(tmp_path / "receipts")
+    sequence="QCOMPLETEBUDGET1"
+    digest="a"*64
+    store.mark_running(sequence,digest,":read",mutation=False)
+    target=store._path(sequence)
+    original=target.read_bytes()
+    shared={"text":"shared references"}
+    for _ in range(20):
+        shared=[shared,shared]
+    with monkeypatch.context() as ctx:
+        ctx.setattr(result_module,"MAX_DECODED_RECEIPT_BYTES",4096)
+        ctx.setattr(result_module.json,"dumps",
+                    lambda *args,**kwargs: (_ for _ in ()).throw(
+                        AssertionError("FULL_RESULT_DUMPS")))
+        with pytest.raises(
+                ValueError,match="RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE"):
+            store.complete(sequence,digest,":read",
+                           {"ok":True,"data":shared})
+    assert target.read_bytes()==original
+    assert store.get(sequence)["state"]=="RUNNING"
+
+
+def test_complete_incremental_json_preserves_exact_result_hash_and_bytes(tmp_path):
+    import hashlib
+
+    store=DurableResultStore(tmp_path / "results")
+    sequence="QCOMPLETEXACT1"
+    digest="b"*64
+    store.mark_running(sequence,digest,":read",mutation=False)
+    result={"ok":True,"data":{"city":"São Paulo","emoji":"🙂",
+                              "flags":[False,None,True],"values":[1,2,3]}}
+    wire=json.dumps(result,ensure_ascii=False,separators=(",",":")).encode("utf-8")
+    finished=store.complete(sequence,digest,":read",result)
+    assert finished["result_hash"]==hashlib.sha256(wire).hexdigest()
+    assert finished["result_bytes"]==len(wire)
+    assert store.result(sequence)==result
+    assert store.header(sequence)["sha256"]==finished["result_hash"]
+
+
 def test_invalid_chunk_sizes_never_load_durable_result_or_raise_uncaught(tmp_path, monkeypatch):
     service=CommandService(Workspace.open(tmp_path))
     try:
