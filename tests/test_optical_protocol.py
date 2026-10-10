@@ -264,6 +264,64 @@ def test_adaptive_chunk_sizing_reduces_small_payload_chunk_count():
     assert len(adaptive) <= len(fixed)
 
 
+def test_ec2_does_not_erase_boolean_vs_integer_differences():
+    import json
+    from easychange.remote.optical_protocol import (
+        _compact_transport_value, encode_result_chunks, decode_result_chunks,
+    )
+
+    result={
+        "ok":True,"sequence":"QTYPESTRICT1",
+        "data":{"results":[{"value":1,"nested":[False,2]}],
+                "primary":{"value":True,"nested":[0,2]}}
+    }
+    # Python compares True == 1 and False == 0. The wire format must not.
+    assert _compact_transport_value(result) is result
+    packets=encode_result_chunks(result)
+    assert "t" not in json.loads(packets[0])
+    decoded=decode_result_chunks(packets)
+    assert type(decoded["data"]["primary"]["value"]) is bool
+    assert type(decoded["data"]["results"][0]["value"]) is int
+    assert type(decoded["data"]["primary"]["nested"][0]) is bool
+    assert type(decoded["data"]["results"][0]["nested"][0]) is bool
+    assert decoded["data"]["primary"]["nested"][0] is False
+
+
+def test_ec2_caller_owned_transport_markers_are_never_interpreted_as_references():
+    import json
+    from easychange.remote.optical_protocol import (
+        _compact_transport_value, encode_result_chunks, decode_result_chunks,
+        encode_result_bundle,
+    )
+
+    caller={
+        "ok":True,"sequence":"QLITERALREF1",
+        "data":{
+            "results":[{"value":"original result"}],
+            "primary":{"$ec_ref":"results[0]"},
+            "transport_compacted":True,
+        },
+    }
+    assert _compact_transport_value(caller) is caller
+    frames=encode_result_chunks(caller)
+    assert json.loads(frames[0])["t"] == 0
+    assert decode_result_chunks(frames)==caller
+    bundle,header=encode_result_bundle(caller)
+    assert json.loads(bundle[0])["t"] == 0
+    assert decode_result_chunks(bundle)==caller
+    assert json.loads(header)["s"]=="QLITERALREF1"
+
+
+def test_ec2_structural_compaction_handles_cycles_without_spinning():
+    from easychange.remote.optical_protocol import _json_equal_with_types
+    left={}
+    right={}
+    left["self"]=left
+    right["self"]=right
+    assert _json_equal_with_types(left,right)
+    assert not _json_equal_with_types({"1":1},{1:1})
+
+
 def test_structured_primary_duplication_is_compacted_on_wire_and_restored():
     import json
     from easychange.remote.optical_protocol import (
