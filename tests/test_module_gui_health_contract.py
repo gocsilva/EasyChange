@@ -818,3 +818,33 @@ def test_failed_pid_poll_during_health_refresh_is_fail_closed():
     assert gui._readiness_job is None
     assert "Estado do serviço desconhecido: OSError" in gui.message.set.call_args.args[0]
     gui.root.destroy.assert_not_called()
+
+
+def test_rejected_standalone_health_http_response_is_closed():
+    """Redirect and error bodies are not leaked across periodic GUI polls."""
+    from urllib.error import HTTPError
+
+    _source, method, name, port = _source_and_status()
+    for code in (301, 302, 404, 503):
+        response = io.BytesIO(b'{"ok":true}')
+        failure = HTTPError(
+            f"http://127.0.0.1:{port}/health",
+            code, "redirect-or-rejection", {}, response)
+
+        def reject(_url, timeout=None):
+            assert timeout == 0.6
+            raise failure
+
+        namespace = {
+            "json": json,
+            "MODULE_ID": name,
+            "PORT": port,
+            "urlopen": reject,
+            "HTTPError": HTTPError,
+        }
+        exec(compile(ast.Module(body=[method], type_ignores=[]),
+                     "<standalone-gui-http-rejection>", "exec"), namespace)
+        answer = namespace["status"]()
+        assert answer == {
+            "running": False, "service": name, "standalone": True}
+        assert response.closed, f"HTTP {code} response socket not released"
