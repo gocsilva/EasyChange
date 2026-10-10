@@ -4587,16 +4587,21 @@ class CommandService:
             if value.get("format") == "append-v2":
                 changes: list[Change] = []
                 if self.transaction_log_path.exists():
-                    for line in self.transaction_log_path.read_text(encoding="utf-8").splitlines():
-                        if not line.strip():
-                            continue
-                        try:
-                            item = json.loads(line)
-                            changes.append(Change(**item))
-                        except (json.JSONDecodeError, TypeError):
-                            # A crash can leave only the final append incomplete.
-                            # Never invent a change from a partial record.
-                            break
+                    # A large active transaction can contain thousands of
+                    # before/after snapshots. read_text().splitlines()
+                    # materialized two extra copies of the entire journal.
+                    # Stream records in order, retaining only real Changes.
+                    with self.transaction_log_path.open("r", encoding="utf-8") as stream:
+                        for line in stream:
+                            if not line.strip():
+                                continue
+                            try:
+                                item = json.loads(line)
+                                changes.append(Change(**item))
+                            except (json.JSONDecodeError, TypeError):
+                                # A crash can leave only the final append incomplete.
+                                # Never invent a change from a partial record.
+                                break
                 self.transaction = changes
                 self._transaction_persisted_count = len(changes)
                 self._transaction_storage_v2 = True
