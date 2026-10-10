@@ -19,6 +19,7 @@ import json
 import secrets
 import binascii
 import hashlib
+import math
 from dataclasses import dataclass
 
 from .command_parser import CommandParser
@@ -1749,6 +1750,23 @@ class CommandService:
                         )
                 else:
                     parsed_index = None
+                if query_kind in {"result_stream_meta", "result_stream_chunk",
+                                  "result_stream_chunks"}:
+                    raw_ratio = query_item.get("max_ratio")
+                    try:
+                        if (isinstance(raw_ratio, bool) or
+                                (isinstance(raw_ratio, str) and len(raw_ratio) > 32)):
+                            raise ValueError("INVALID_RESULT_STREAM_MAX_RATIO")
+                        parsed_ratio = float(raw_ratio or 0.85)
+                        if not math.isfinite(parsed_ratio):
+                            raise ValueError("INVALID_RESULT_STREAM_MAX_RATIO")
+                    except (ValueError, TypeError, OverflowError):
+                        return Result(
+                            False, query_kind, error="INVALID_RESULT_STREAM_MAX_RATIO",
+                            code="INVALID_RESULT_STREAM_CHUNK",
+                        )
+                else:
+                    parsed_ratio = None
                 if query_kind in {"result_status", "mutation_status"}:
                     data = self.result_store.status(target_sequence)
                 elif query_kind == "result_header":
@@ -1788,7 +1806,7 @@ class CommandService:
                     data = self.result_store.stream_meta(
                         target_sequence,
                         chunk_bytes=int(query_item.get("chunk_bytes") or 2048),
-                        max_ratio=float(query_item.get("max_ratio") or 0.85),
+                        max_ratio=parsed_ratio,
                     )
                 elif query_kind == "result_stream_chunk":
                     try:
@@ -1796,7 +1814,7 @@ class CommandService:
                             target_sequence,
                             parsed_index,
                             chunk_bytes=int(query_item.get("chunk_bytes") or 2048),
-                            max_ratio=float(query_item.get("max_ratio") or 0.85),
+                            max_ratio=parsed_ratio,
                         )
                     except (TypeError, ValueError, IndexError) as exc:
                         return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_STREAM_CHUNK")
@@ -1810,7 +1828,7 @@ class CommandService:
                             raw_indexes,
                             chunk_bytes=int(query_item.get("chunk_bytes") or 2048),
                             max_chunks=8,
-                            max_ratio=float(query_item.get("max_ratio") or 0.85),
+                            max_ratio=parsed_ratio,
                         )
                     except (TypeError, ValueError, IndexError) as exc:
                         return Result(False, query_kind, error=str(exc), code="INVALID_RESULT_STREAM_CHUNK")
