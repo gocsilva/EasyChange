@@ -428,7 +428,11 @@ class DurableResultStore:
         # Order is irrelevant to TTL/receipt safety. A global mtime sort
         # stat()s every receipt and materializes the full directory on each
         # maintenance pass; iterate lazily instead.
-        files = self.root.glob("Q*.json.zlib")
+        # _path() also accepts legitimate non-Q ASCII sequence identifiers
+        # (e.g. direct ResultStore callers). Scan all receipt-shaped names,
+        # then retain the existing strict decoded-sequence/path match below.
+        # Otherwise old non-Q results keep full payloads forever.
+        files = self.root.glob("*.json.zlib")
 
         # Recent retained results need no decode at all. Decode only expired or
         # overflow candidates so large-result cleanup is proportional to data
