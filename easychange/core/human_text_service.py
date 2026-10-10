@@ -372,6 +372,15 @@ class HumanTextService:
                     if start < total:
                         handle.seek(start)
                         raw=handle.read(min(limit,total-start))
+                    # Detect in-place rewrites during a page read, as well as
+                    # atomic replacements after the initial descriptor check.
+                    finished=os.fstat(handle.fileno())
+                    current=self.path.stat()
+                    identity=lambda st:(st.st_dev,st.st_ino,st.st_size,
+                                         st.st_mtime_ns)
+                    if (identity(opened)!=identity(finished) or
+                            identity(finished)!=identity(current)):
+                        raise ValueError("HUMAN_TEXT_FILE_CHANGED_RETRY")
             except FileNotFoundError as exc:
                 raise ValueError("HUMAN_TEXT_FILE_CHANGED_RETRY") from exc
         elif total:
