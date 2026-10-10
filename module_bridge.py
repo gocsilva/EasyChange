@@ -257,7 +257,13 @@ class MCPBridge:
                 if exc.code!=429:
                     raise
                 try:
-                    details=_decode_hub_response(exc.read(2048))
+                    # An admission-rejection proof must be complete: a
+                    # truncated JSON prefix cannot authorize an operation
+                    # replay when trailing bytes were not examined.
+                    rejection=exc.read(2049)
+                    if len(rejection)>2048:
+                        raise exc
+                    details=_decode_hub_response(rejection)
                 except (ValueError,UnicodeError):
                     raise exc
                 finally:
@@ -288,7 +294,13 @@ class MCPBridge:
                 if exc.code!=429:
                     raise
                 try:
-                    details=_decode_hub_response(exc.read(2048))
+                    # An admission-rejection proof must be complete: a
+                    # truncated JSON prefix cannot authorize an operation
+                    # replay when trailing bytes were not examined.
+                    rejection=exc.read(2049)
+                    if len(rejection)>2048:
+                        raise exc
+                    details=_decode_hub_response(rejection)
                 except (ValueError,UnicodeError):
                     raise exc
                 finally:
