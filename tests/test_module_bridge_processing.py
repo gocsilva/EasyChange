@@ -70,6 +70,43 @@ class TestProcessPending(unittest.TestCase):
         with self.assertRaisesRegex(TimeoutError,"ACK_RESPONSE_LOST"):
             b.process_pending(lambda _:True)
 
+    def test_inbox_rejects_forged_source_topic_and_correlation_before_effects(self):
+        invalid=(
+            {"source":None},
+            {"source":[]},
+            {"source":"unknown-module"},
+            {"source":"mcp\nINJECTED"},
+            {"topic":None},
+            {"topic":42},
+            {"topic":"unexpected/topic"},
+            {"topic":"not ascii-☃"},
+            {"topic":"a"*101},
+            {"topic":""},
+            {"correlation_id":[]},
+            {"correlation_id":5},
+            {"correlation_id":"a"*129},
+        )
+        for fields in invalid:
+            with self.subTest(fields=fields):
+                message={**item(941),**fields}
+                bridge=self.bridge([message])
+                callback=Mock(return_value=True)
+                with self.assertRaisesRegex(
+                        ValueError,"INVALID_MCP_INBOX_MESSAGE"):
+                    bridge.process_pending(callback)
+                callback.assert_not_called()
+                bridge.ack.assert_not_called()
+
+    def test_inbox_accepts_canonical_peer_and_safe_topic(self):
+        message={**item(942),"source":"android",
+                 "topic":"camera.capture_ready-1","correlation_id":"c-942"}
+        bridge=self.bridge([message])
+        handler=Mock(return_value=True)
+        result=bridge.process_pending(handler)
+        self.assertEqual(result["acknowledged"],1)
+        handler.assert_called_once_with(message)
+        bridge.ack.assert_called_once_with([942])
+
     def test_bad_message_structure_fails_closed(self):
         b=self.bridge([{"id":"7","topic":"test"}])
         with self.assertRaisesRegex(ValueError,"INVALID_MCP_INBOX_MESSAGE"):
