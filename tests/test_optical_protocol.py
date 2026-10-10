@@ -7,6 +7,34 @@ from easychange.remote.optical_protocol import (
 )
 
 
+def test_invalid_retransmission_index_collection_skips_large_compression():
+    import pytest
+    from unittest.mock import patch
+    import easychange.remote.optical_protocol as optical
+
+    result={"sequence":"QPRECHECK","ok":True,"data":{"text":"x"*100000}}
+    invalid=(
+        (index for index in [0]),
+        "not an index collection",
+        None,
+        list(range(optical.MAX_EC2_PACKETS+1)),
+    )
+    for candidate in invalid:
+        if candidate is None:
+            # Omitting indexes is legitimate and means the full carousel.
+            continue
+        with patch.object(optical,"_encode_raw",
+                          side_effect=AssertionError("UNNECESSARY_COMPRESSION")) as compression:
+            with pytest.raises(ValueError,match="OPTICAL_CHUNK_INDEX_REQUEST_TOO_LARGE"):
+                optical.encode_result_chunks(result,indexes=candidate)
+            compression.assert_not_called()
+
+    valid=optical.encode_result_chunks(
+        {"sequence":"QPRECHECK","ok":True,"data":{"text":"safe"}},
+        indexes=[0])
+    assert len(valid)==1
+
+
 def test_ec2_encoder_rejects_identity_receiver_would_drop(monkeypatch):
     import pytest
     from unittest.mock import patch
