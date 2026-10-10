@@ -3111,8 +3111,12 @@ class CommandService:
             if str(item).strip()
         ]
         if relative_source not in protected:
+            # Never discard an earlier source exclusion to make room for a new
+            # one: old secret files would be reindexed after the next restart.
+            if len(protected) >= 128:
+                raise ValueError("SECRET_SOURCE_PROTECTION_LIMIT")
             protected.append(relative_source)
-            self.state_store.data["sensitive_source_paths"] = protected[-128:]
+            self.state_store.data["sensitive_source_paths"] = protected
             self.state_store.save()
         self.indexer.protect_path(relative_source, scrub=True)
 
