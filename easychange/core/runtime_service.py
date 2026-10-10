@@ -522,10 +522,17 @@ class ProjectRuntimeService:
             raise ValueError("PROFILE_ID_REQUIRED")
         if len(profile_id)>128:
             raise ValueError("PROFILE_ID_TOO_LONG")
+        if type(inherit_env) is not bool:
+            raise ValueError("INVALID_RUNTIME_INHERIT_ENV")
+        if (urls is not None and
+                (type(urls) is not list or len(urls)>128 or
+                 any(type(item) is not str for item in urls))):
+            raise ValueError("INVALID_RUNTIME_URLS")
         run = self._argv(run_argv)
         test = self._argv(test_argv)
         build = self._argv(build_argv)
-        safe_urls = [str(item) for item in (urls or []) if str(item).startswith(("http://", "https://"))][:16]
+        safe_urls = [item for item in (urls or []) if
+                     item.startswith(("http://", "https://"))][:16]
         env_values = self._env_values(env)
         safe_refs = self._env_refs(env_refs)
         safe_allowlist = self._env_allowlist(env_allowlist)
@@ -541,7 +548,7 @@ class ProjectRuntimeService:
                 "configured": True,
                 "env": env_values,
                 "env_refs": safe_refs,
-                "inherit_env": bool(inherit_env),
+                "inherit_env": inherit_env,
                 "env_allowlist": safe_allowlist,
             }
             by_id = {item["id"]: item for item in existing}
