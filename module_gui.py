@@ -217,7 +217,14 @@ class ModuleGUI:
         self._refresh_inflight=False
         self._cancel_readiness()
         process=self.process
-        if process and process.poll() is None:
+        try:
+            running=process is not None and process.poll() is None
+        except (OSError,ValueError) as exc:
+            # An invalid process handle is not proof that it exited. Keep
+            # ownership, so close/restart cannot orphan or duplicate it.
+            self.message.set("Falha ao consultar serviço: "+type(exc).__name__)
+            return False
+        if running:
             try:
                 process.terminate()
                 try:
@@ -227,7 +234,12 @@ class ModuleGUI:
                     # Reap the process after forceful termination as well.
                     process.wait(timeout=2)
             except (OSError,subprocess.TimeoutExpired) as exc:
-                if process.poll() is None:
+                try:
+                    still_running=process.poll() is None
+                except (OSError,ValueError):
+                    # Unknown outcome: never claim release of the owned PID.
+                    still_running=True
+                if still_running:
                     self.message.set("Falha ao encerrar serviço: "+type(exc).__name__)
                     return False
             self.message.set("Serviço iniciado por esta GUI foi encerrado.")
