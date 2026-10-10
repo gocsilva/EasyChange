@@ -5,6 +5,7 @@ import re
 import base64
 from collections import deque
 import hashlib
+import ipaddress
 import json
 import os
 import shutil
@@ -56,6 +57,25 @@ class BrowserBootstrapError(BrowserError):
 
 class CdpError(BrowserError):
     pass
+
+
+def _is_loopback_host(host: str) -> bool:
+    value=str(host or "").casefold()
+    if value=="localhost":
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
+class _NoCDPHttpRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_CDP_HTTP_OPENER=urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),_NoCDPHttpRedirect())
 
 
 class _BoundedProcessCapture:
@@ -111,8 +131,8 @@ class _WebSocket:
         if parsed.scheme not in {"ws", "wss"}:
             raise ValueError("CDP_WEBSOCKET_URL_REQUIRED")
         self.host = parsed.hostname or "127.0.0.1"
-        normalized_host = self.host.casefold()
-        if normalized_host not in {"localhost", "::1"} and not normalized_host.startswith("127."):
+        if (not _is_loopback_host(self.host)
+                or parsed.username is not None or parsed.password is not None):
             raise CdpError("CDP_NON_LOOPBACK_FORBIDDEN")
         self.port = parsed.port or (443 if parsed.scheme == "wss" else 80)
         self.path = parsed.path or "/"
@@ -1065,10 +1085,12 @@ class BrowserService:
     def _http_json(url: str, method: str = "GET", timeout: float = 3.0):
         parsed = urllib.parse.urlparse(url)
         host = (parsed.hostname or "").casefold()
-        if host not in {"localhost", "::1"} and not host.startswith("127."):
+        if (parsed.scheme not in {"http","https"}
+                or not _is_loopback_host(host)
+                or parsed.username is not None or parsed.password is not None):
             raise BrowserError("CDP_NON_LOOPBACK_FORBIDDEN")
         request = urllib.request.Request(url, method=method)
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _CDP_HTTP_OPENER.open(request, timeout=timeout) as response:
             return json.loads(response.read(1024 * 1024).decode("utf-8"))
 
     def _wait_port(self, profile: Path, timeout: float) -> int:
