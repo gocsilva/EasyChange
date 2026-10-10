@@ -3,6 +3,7 @@ from __future__ import annotations
 import codecs
 import hashlib
 import json
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -236,13 +237,45 @@ class HumanTextService:
         if current and (current[0] & 0xC0) == 0x80:
             raise ValueError("HUMAN_TEXT_CURSOR_NOT_UTF8_BOUNDARY")
 
+    @staticmethod
+    def _integer_option(value: Any, *, default: int, error: str) -> int:
+        if value is None:
+            return default
+        if type(value) is int:
+            parsed = value
+        elif isinstance(value, str):
+            token = value.strip()
+            if (not 1 <= len(token) <= 32 or
+                    not token.lstrip("+-").isascii() or
+                    not token.lstrip("+-").isdecimal()):
+                raise ValueError(error)
+            try:
+                parsed = int(token, 10)
+            except ValueError as exc:
+                raise ValueError(error) from exc
+        elif type(value) is float:
+            if (not math.isfinite(value) or not value.is_integer() or
+                    abs(value) > 2**53):
+                raise ValueError(error)
+            parsed = int(value)
+        else:
+            raise ValueError(error)
+        if abs(parsed) > 2**63 - 1:
+            raise ValueError(error)
+        return parsed
+
     def read(self, *, cursor: int = 0, max_bytes: int = 16384) -> dict[str, Any]:
+        # Reject invalid user-controlled cursors before scanning a potentially
+        # large buffer for metadata, and never float-round a huge page index.
+        start = max(0, self._integer_option(
+            cursor, default=0, error="HUMAN_TEXT_INVALID_CURSOR"))
+        requested = self._integer_option(
+            max_bytes, default=16384, error="HUMAN_TEXT_INVALID_PAGE_SIZE")
+        limit = max(512, min(256 * 1024, requested or 16384))
         meta = self.info()
         total = int(meta["bytes"])
-        start = max(0, int(cursor or 0))
         if start > total:
             raise ValueError("HUMAN_TEXT_CURSOR_OUT_OF_RANGE")
-        limit = max(512, min(256 * 1024, int(max_bytes or 16384)))
 
         # A concurrent writer can atomically replace the file after info().
         # Read from one opened generation and compare it with the metadata
