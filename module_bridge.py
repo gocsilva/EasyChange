@@ -458,13 +458,11 @@ class MCPBridge:
                 if (not isinstance(message,dict) or
                         type(message.get("id")) is not int or message["id"]<1):
                     raise ValueError("INVALID_MCP_INBOX_MESSAGE")
-                # A legacy inbox page may omit its recipient header.
-                # An explicitly foreign target must still be refused before
-                # invoking a handler or acknowledging any queued message.
-                if (("target" in message and
-                        message["target"] != CANONICAL_MODULE_ID) or
-                        ("recipient" in page and
-                         message.get("target") != CANONICAL_MODULE_ID)):
+                # Legacy pages may omit the page-level recipient, but each
+                # message must still prove its intended target. Without this
+                # check, a malformed legacy page with no recipient and no
+                # message target could reach a mutating handler and be ACKed.
+                if message.get("target") != CANONICAL_MODULE_ID:
                     raise ValueError("MCP_INBOX_TARGET_MISMATCH")
                 # Treat the hub response as an untrusted transport
                 # envelope until every selected message passes preflight.
