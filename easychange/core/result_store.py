@@ -1299,6 +1299,12 @@ class DurableResultStore:
                      and index.strip().isdecimal())):
             raise ValueError("INVALID_RESULT_CHUNK_INDEX")
         index = int(index)
+        # The single-index endpoint is used for selective EC2 recovery.
+        # Reject clearly impossible offsets before loading a large receipt,
+        # exactly as the multi-index path already does.
+        maximum_index = (MAX_DECODED_RECEIPT_BYTES + 1_048_576) // 256
+        if index < 0 or index > maximum_index:
+            raise IndexError("RESULT_CHUNK_OUT_OF_RANGE")
         size = self._validated_chunk_size(chunk_bytes)
         payload = self._result_payload(sequence)
         if payload is None:
