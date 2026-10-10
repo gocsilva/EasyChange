@@ -332,6 +332,54 @@ def test_candidates_use_chrome_when_edge_is_absent(tmp_path, monkeypatch):
     assert values and Path(values[0]).name.casefold() == "chrome.exe"
 
 
+@pytest.mark.parametrize("unsafe",(
+    "ws://127.attacker.example:9222/devtools/page/1",
+    "ws://127.0.0.1.attacker.example:9222/devtools/page/1",
+    "ws://alice:password@127.0.0.1:9222/devtools/page/1",
+    "ws://8.8.8.8:9222/devtools/page/1",
+))
+def test_browser_websocket_rejects_dns_prefix_spoof_before_connect(
+        unsafe, monkeypatch):
+    def forbidden_socket(*args,**kwargs):
+        raise AssertionError("NETWORK_CONNECT_BEFORE_LOOPBACK_CHECK")
+    monkeypatch.setattr(browser_module.socket,"create_connection",
+                        forbidden_socket)
+    with pytest.raises(browser_module.CdpError,
+                       match="CDP_NON_LOOPBACK_FORBIDDEN"):
+        browser_module._WebSocket(unsafe)
+
+
+@pytest.mark.parametrize("unsafe",(
+    "http://127.attacker.example:9222/json/list",
+    "http://127.0.0.1.attacker.example:9222/json/list",
+    "http://alice:secret@127.0.0.1:9222/json/list",
+    "http://10.0.0.1:9222/json/list",
+))
+def test_browser_http_discovery_rejects_spoofed_loopback_before_request(
+        unsafe, monkeypatch):
+    with monkeypatch.context() as ctx:
+        ctx.setattr(browser_module._CDP_HTTP_OPENER,"open",
+                    lambda *a,**k: (_ for _ in ()).throw(
+                        AssertionError("NETWORK_REQUEST_BEFORE_CHECK")))
+        with pytest.raises(browser_module.BrowserError,
+                           match="CDP_NON_LOOPBACK_FORBIDDEN"):
+            BrowserService._http_json(unsafe)
+
+
+def test_browser_http_discovery_disables_proxies_and_redirects():
+    import urllib.request
+    handlers=browser_module._CDP_HTTP_OPENER.handlers
+    assert not any(isinstance(h,urllib.request.ProxyHandler) and h.proxies
+                   for h in handlers)
+    no_redirect=next(
+        h for h in handlers if isinstance(h,browser_module._NoCDPHttpRedirect))
+    assert no_redirect.redirect_request(None,None,None,None,None,None) is None
+    assert browser_module._is_loopback_host("127.44.5.6")
+    assert browser_module._is_loopback_host("::1")
+    assert browser_module._is_loopback_host("localhost")
+    assert not browser_module._is_loopback_host("127.evil.example")
+
+
 def test_cdp_websocket_rejects_non_loopback_before_network_access():
     with pytest.raises(Exception, match="CDP_NON_LOOPBACK_FORBIDDEN"):
         browser_module._WebSocket(
