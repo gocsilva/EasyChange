@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,10 @@ from .subprocess_utils import hidden_console_kwargs
 SKIP_DIRS = {".git", ".easychange", ".venv", "venv", "node_modules", "bin", "obj", "dist", "build",
              "__pycache__", ".gradle", ".idea", ".vs", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 MAX_INDEX_BYTES = 2 * 1024 * 1024
+# Git may print matches from every tracked/untracked source. Bound what
+# cold discovery materializes even when the process writes many gigabytes.
+MAX_COLD_GIT_BYTES = 8 * 1024 * 1024
+MAX_COLD_GIT_ROWS = 20_000
 # Cold Git-backed discovery already works before the persistent index is warm.
 # Keep background hashing deliberately modest so startup/index refresh does not
 # steal CPU/disk from Qt painting and EC2 QR delivery.
@@ -800,24 +805,41 @@ class Indexer:
             elif ext:
                 argv.append(f":(glob)**/*{ext}")
             rows: list[tuple[str, int, str]] = []
-            try:
-                completed = subprocess.run(
-                    argv, cwd=self.root, text=True, capture_output=True,
-                    timeout=10, check=False, shell=False,
-                    **hidden_console_kwargs(),
-                )
-                # Older Git builds may not support --untracked on grep. Retry
-                # once without it rather than sacrificing the cold fast path.
-                if completed.returncode not in {0, 1} and "--untracked" in argv:
-                    legacy_argv = [value for value in argv if value != "--untracked"]
-                    completed = subprocess.run(
-                        legacy_argv, cwd=self.root, text=True, capture_output=True,
-                        timeout=10, check=False, shell=False,
-                        **hidden_console_kwargs(),
+            truncated = False
+
+            def bounded_git_grep(command: list[str]) -> tuple[int, str, bool]:
+                # capture_output=True buffers arbitrary Git output in RAM.
+                # A temporary file lets Git drain safely; only a fixed prefix
+                # enters Python, and it is removed when this call returns.
+                with tempfile.TemporaryFile(mode="w+b") as output:
+                    result = subprocess.run(
+                        command, cwd=self.root, stdout=output,
+                        stderr=subprocess.DEVNULL, timeout=10, check=False,
+                        shell=False, **hidden_console_kwargs(),
                     )
-                if completed.returncode in {0, 1}:
+                    output.seek(0)
+                    raw = (result.stdout if result.stdout is not None
+                           else output.read(MAX_COLD_GIT_BYTES + 1))
+                    too_large = len(raw) > MAX_COLD_GIT_BYTES
+                    if isinstance(raw, bytes):
+                        text = raw[:MAX_COLD_GIT_BYTES].decode("utf-8", errors="replace")
+                    else:
+                        text = raw[:MAX_COLD_GIT_BYTES]
+                    if too_large:
+                        # A capped prefix may end mid-line. Never claim that
+                        # truncated match as a complete source line.
+                        text = text.rsplit("\n", 1)[0]
+                    return result.returncode, text, too_large
+
+            try:
+                returncode, output_text, truncated = bounded_git_grep(argv)
+                # Older Git builds may not support --untracked on grep.
+                if returncode not in {0, 1} and "--untracked" in argv:
+                    legacy_argv = [value for value in argv if value != "--untracked"]
+                    returncode, output_text, truncated = bounded_git_grep(legacy_argv)
+                if returncode in {0, 1}:
                     trusted_root = self.root.resolve()
-                    for line in (completed.stdout or "").splitlines():
+                    for line in output_text.splitlines():
                         parts = line.split(":", 2)
                         if len(parts) != 3:
                             continue
@@ -844,6 +866,9 @@ class Indexer:
                         except (ValueError, OSError, RuntimeError):
                             continue
                         rows.append((relative, number, parts[2].rstrip()))
+                        if len(rows) >= MAX_COLD_GIT_ROWS:
+                            truncated = True
+                            break
             except (OSError, subprocess.TimeoutExpired):
                 rows = []
 
@@ -962,6 +987,7 @@ class Indexer:
             "files": [item["file"] for item in impact_files[:64]],
             "engine": engine,
             "single_pass": cold_git,
+            "truncated": truncated if cold_git else False,
             "filters": {"extension": ext or None, "path_prefix": prefix or None},
             "index_state": "READY" if self._fully_indexed else "WARMING",
             "duration_ms": round((time.perf_counter() - started) * 1000, 2),
