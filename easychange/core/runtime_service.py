@@ -1155,7 +1155,20 @@ class ProjectRuntimeService:
         # HTTP 200 verifies the endpoint, not the screenshot. This runtime
         # intentionally does not spin up an automated browser; a missing
         # image must never be reported as complete visual evidence.
-        screenshot_captured = screenshot_path is not None
+        screenshot_captured = False
+        if screenshot_path is not None and screenshot_path == folder / "swagger.png":
+            try:
+                # A returned pathname is not visual evidence. Require the
+                # expected regular file and PNG signature; never read the
+                # whole image back into memory just to validate existence.
+                if screenshot_path.is_file() and not screenshot_path.is_symlink():
+                    with screenshot_path.open("rb") as image_stream:
+                        screenshot_captured = (
+                            image_stream.read(8) == b"\x89PNG\r\n\x1a\n")
+            except OSError:
+                pass
+        if not screenshot_captured:
+            screenshot_path = None
         evidence = {
             "created_utc": stamp, "profile": profile, "probe": probe,
             "response_file": _rel(self.workspace.root_path, response_path),
