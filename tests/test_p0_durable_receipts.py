@@ -445,7 +445,7 @@ def test_malformed_unicode_or_deep_receipt_never_becomes_unclaimed(tmp_path):
     seq="QMALFORMEDUTF8"
     store.mark_running(seq,"a"*64,":mutation",mutation=True)
     target=store._path(seq)
-    for raw in (b"\\xff", b"["*1200+b"0"+b"]"*1200):
+    for raw in (b"\xff", b"["*1200+b"0"+b"]"*1200):
         target.write_bytes(zlib.compress(raw))
         with pytest.raises(RuntimeError,match="RESULT_RECEIPT_UNREADABLE"):
             store.get(seq)
