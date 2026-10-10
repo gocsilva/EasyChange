@@ -1054,13 +1054,23 @@ class ProjectRuntimeService:
     def wait_for_http(self, urls: list[str], timeout: float = 35.0) -> dict:
         deadline = time.monotonic() + max(1.0, timeout)
         last = {}
-        while time.monotonic() < deadline:
+        while True:
+            if time.monotonic() >= deadline:
+                break
             for url in urls:
-                result = self._http_get(url, timeout=min(2.0, max(0.5, deadline - time.monotonic())))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                # Do not enforce a 0.5-second *minimum* socket timeout
+                # after the total startup deadline is almost exhausted.
+                result = self._http_get(url, timeout=min(2.0, remaining))
                 last = result
                 if result.get("status") and int(result["status"]) < 500:
                     return result
-            time.sleep(0.35)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.35, remaining))
         return {"ok": False, "error": "HTTP_STARTUP_TIMEOUT", "last": last, "urls": urls}
 
     def swagger_evidence(
