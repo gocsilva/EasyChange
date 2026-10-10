@@ -316,6 +316,22 @@ class DurableResultStore:
         return raw, digest
 
     @staticmethod
+    def _receipt_result_size(value: Any) -> int:
+        """Interpret bounded legacy size metadata without untrusted int()."""
+        if value is None:
+            return 0
+        if type(value) is int:
+            amount = value
+        elif (isinstance(value, str) and 1 <= len(value) <= 8
+              and value.isascii() and value.isdecimal()):
+            amount = int(value)
+        else:
+            raise RuntimeError("RESULT_RECEIPT_UNREADABLE")
+        if not 0 <= amount <= MAX_DECODED_RECEIPT_BYTES:
+            raise RuntimeError("RESULT_RECEIPT_UNREADABLE")
+        return amount
+
+    @staticmethod
     def _terminal_header_base(value: dict[str, Any]) -> dict[str, Any] | None:
         if str(value.get("state") or "").upper() != "DONE":
             return None
@@ -336,7 +352,8 @@ class DurableResultStore:
             "mutation": bool(value.get("mutation")),
             "success": value.get("success"),
             "return_code": value.get("return_code"),
-            "payload_length": int(value.get("result_bytes") or 0),
+            "payload_length": DurableResultStore._receipt_result_size(
+                value.get("result_bytes")),
             "sha256": value.get("result_hash"),
             "result_expired": value.get("result_expired") is True,
             "expired_result_hash": value.get("expired_result_hash"),
@@ -703,7 +720,7 @@ class DurableResultStore:
             cached = self._terminal_header_cache_get(sequence)
         if cached is not None:
             size = self._validated_chunk_size(chunk_bytes)
-            result_bytes = int(cached.get("payload_length") or 0)
+            result_bytes = self._receipt_result_size(cached.get("payload_length"))
             cached["chunk_count"] = (
                 max(1, (result_bytes + size - 1) // size) if result_bytes else 0
             )
@@ -720,7 +737,7 @@ class DurableResultStore:
             if base is not None:
                 self._terminal_header_cache_put(sequence, value)
         result = value.get("result")
-        result_bytes = int(value.get("result_bytes") or 0)
+        result_bytes = self._receipt_result_size(value.get("result_bytes"))
         size = self._validated_chunk_size(chunk_bytes)
         chunk_count = max(1, (result_bytes + size - 1) // size) if result_bytes else 0
         if base is not None:
