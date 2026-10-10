@@ -257,8 +257,16 @@ class MCPBridge:
             else 2_097_152 if path in ("/v1/inbox", "/v1/inbox/peek")
             else 65_536
         )
-        with _local_opener.open(req,timeout=timeout) as response:
-            raw=response.read(max_response+1)
+        try:
+            with _local_opener.open(req,timeout=timeout) as response:
+                raw=response.read(max_response+1)
+        except HTTPError as exc:
+            # Informational GETs have no retry policy or reason to retain a
+            # rejected response. Mutating endpoints keep their 429 response
+            # until the caller verifies the explicit not-executed receipt.
+            if path not in ("/v1/tools/call","/v1/send","/v1/inbox/ack"):
+                exc.close()
+            raise
         if len(raw)>max_response:
             raise ValueError("MCP_HUB_RESPONSE_TOO_LARGE")
         data=_decode_hub_response(raw)
