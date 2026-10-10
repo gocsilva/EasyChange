@@ -383,7 +383,14 @@ class DurableResultStore:
         fd, name = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=self.root)
         temporary = Path(name)
         try:
-            with os.fdopen(fd, "wb") as stream:
+            try:
+                stream = os.fdopen(fd, "wb")
+            except BaseException:
+                # mkstemp() owns the descriptor until fdopen() succeeds.
+                # A wrapper failure must not leak the writable staging fd.
+                os.close(fd)
+                raise
+            with stream:
                 stream.write(self._encode(value))
                 stream.flush()
                 os.fsync(stream.fileno())
