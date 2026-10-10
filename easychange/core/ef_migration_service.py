@@ -444,12 +444,17 @@ class EfMigrationService:
             redact_values=redact,
         )
         self._ensure_ok(execution, "EF_MIGRATIONS_SCRIPT_FAILED")
-        raw = path.read_bytes()
-        start = max(0, min(len(raw), int(cursor or 0)))
+        # EF scripts can be hundreds of MiB. A paginated response must
+        # read at most one page, not allocate the entire generated SQL file.
         limit = max(512, min(1024 * 1024, int(max_bytes or 16384)))
-        chunk = raw[start:start + limit]
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            total_bytes = stream.tell()
+            start = max(0, min(total_bytes, int(cursor or 0)))
+            stream.seek(start)
+            chunk = stream.read(limit)
         next_cursor = start + len(chunk)
-        complete = next_cursor >= len(raw)
+        complete = next_cursor >= total_bytes
         return {
             "script_id": script_id,
             "migration_project": preflight["migration_project"],
@@ -460,8 +465,8 @@ class EfMigrationService:
             "cursor": start,
             "next_cursor": None if complete else next_cursor,
             "returned_bytes": len(chunk),
-            "total_bytes": len(raw),
-            "remaining_bytes": max(0, len(raw) - next_cursor),
+            "total_bytes": total_bytes,
+            "remaining_bytes": max(0, total_bytes - next_cursor),
             "complete": complete,
             "environment": env_meta,
             "secret_values_returned": False,
