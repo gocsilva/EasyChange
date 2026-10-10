@@ -594,6 +594,42 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertEqual(result["payload"]["data"]["text"],content)
         self.assertEqual(len(received),1)
 
+    def test_exact_repeated_qr_avoids_rechecking_accepted_crc(self):
+        import hashlib
+        from unittest.mock import patch
+        from mcp_adapter import optical_reader as reader
+        from easychange.core.result import Result
+
+        payload="".join(hashlib.sha256(str(i).encode()).hexdigest()
+                        for i in range(75))
+        packets=encode_result_chunks(
+            Result(True,"read",{"text":payload},sequence="QREPLAYFAST"),
+            chunk_chars=150)
+        session=OpticalAssembler()
+        initial=session.ingest(packets)
+        self.assertTrue(initial["verified"])
+        previous=session.stored_chars
+        previous_token=session.stored_token_chars
+
+        # The exact same bytes were already verified on admission. A new
+        # packet, including a mutated duplicate, still requires CRC checking.
+        with patch.object(reader.binascii,"crc32",
+                          side_effect=AssertionError("REDUNDANT_CRC")) as crc:
+            repeated=session.ingest(list(reversed(packets)))
+        crc.assert_not_called()
+        self.assertTrue(repeated["verified"])
+        self.assertIs(repeated["payload"],initial["payload"])
+        self.assertEqual(session.stored_chars,previous)
+        self.assertEqual(session.stored_token_chars,previous_token)
+
+        import json
+        changed=json.loads(packets[0])
+        changed["d"]="!"+changed["d"][1:]
+        with patch.object(reader.binascii,"crc32", wraps=reader.binascii.crc32) as crc:
+            session.ingest([json.dumps(changed)])
+        crc.assert_called_once()
+        self.assertTrue(session.ingest([])["verified"])
+
     def test_repeated_complete_carousel_decodes_only_once(self):
         from unittest.mock import patch
         from easychange.core.result import Result
