@@ -198,6 +198,7 @@ class HumanTextService:
                     file_stat = os.fstat(opened.fileno())
                 if (
                     isinstance(value, dict)
+                    and file_stat.st_size <= self.max_bytes
                     and value.get("bytes") is not None
                     and int(value["bytes"]) == file_stat.st_size
                     and value.get("file_mtime_ns") == file_stat.st_mtime_ns
