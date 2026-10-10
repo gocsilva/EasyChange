@@ -126,3 +126,31 @@ def test_local_server_failed_handler_releases_capacity():
             server.process_request_thread("socket",("127.0.0.1",10005))
     assert server._client_slots.acquire(blocking=False)
     server._client_slots.release()
+
+
+def test_unicode_encoder_budget_never_encodes_huge_intermediate_fragment():
+    codepoint_windows=[]
+
+    class ObservedText(str):
+        def encode(self,encoding="utf-8",errors="strict"):
+            codepoint_windows.append(len(self))
+            assert len(self)<=4096
+            return super().encode(encoding,errors)
+
+    class SyntheticEncoder:
+        def __init__(self,**_kwargs):
+            pass
+        def iterencode(self,_value):
+            yield ObservedText("🙂"*5000)
+
+    with patch.object(module_service,"MAX_SERVICE_RESPONSE_BYTES",16400), \
+         patch.object(module_service.json,"JSONEncoder",SyntheticEncoder):
+        with pytest.raises(ValueError,match="MODULE_SERVICE_RESPONSE_TOO_LARGE"):
+            module_service._bounded_service_json({"synthetic":True})
+    assert codepoint_windows==[4096,904]
+
+
+def test_large_unicode_response_keeps_exact_json_wire_format():
+    payload={"text":"á🙂"*2200}
+    encoded=module_service._bounded_service_json(payload)
+    assert json.loads(encoded)==payload
