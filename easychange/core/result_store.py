@@ -1450,6 +1450,8 @@ class DurableResultStore:
         result once per chunk during MCP recovery. The returned batch is bounded
         so its own EC2 response remains reasonably small.
         """
+        if type(compress_payload) is not bool:
+            raise ValueError("INVALID_RESULT_CHUNK_COMPRESSION")
         if not isinstance(indexes, list) or not indexes:
             raise ValueError("RESULT_CHUNK_INDEXES_REQUIRED")
         limit = self._validated_batch_limit(
@@ -1530,6 +1532,10 @@ class DurableResultStore:
         chunk_bytes: int = 640,
         compress_payload: bool = False,
     ) -> dict[str, Any] | None:
+        # Compression controls wire shape and CPU work; "false" is truthy
+        # in Python, so never coerce a nonboolean request before receipt I/O.
+        if type(compress_payload) is not bool:
+            raise ValueError("INVALID_RESULT_CHUNK_COMPRESSION")
         # The single-chunk shortcut must enforce the same bounded integer
         # format as chunks() before decoding the underlying receipt.
         if (type(index) is not int and
