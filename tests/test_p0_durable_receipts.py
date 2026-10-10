@@ -816,6 +816,47 @@ def test_expired_read_receipt_blocks_same_sequence_execution(tmp_path, monkeypat
         service.close()
 
 
+def test_terminal_header_cache_isolates_nested_mutation_receipt(tmp_path):
+    store=DurableResultStore(tmp_path / "results")
+    sequence="QHEADERISOLATION01"
+    source={"state":"VALIDATED","nested":{"review":"approved"}}
+    store.mark_running(sequence,"a"*64,":patch",mutation=True)
+    store.complete(
+        sequence,"a"*64,":patch",
+        {"ok":True,"command":"patch","data":{},"sequence":sequence},
+        mutation_receipt=source)
+    first=store.header(sequence)
+    assert first["mutation_receipt"]["nested"]["review"]=="approved"
+    first["mutation_receipt"]["nested"]["review"]="tampered by caller"
+    source["nested"]["review"]="mutated after publication"
+    next_header=store.header(sequence)
+    assert next_header["mutation_receipt"]["nested"]["review"]=="approved"
+    assert store.get(sequence)["mutation_receipt"]["nested"]["review"]=="approved"
+
+
+def test_terminal_header_cache_skips_oversized_nested_receipt(tmp_path, monkeypatch):
+    import easychange.core.result_store as store_module
+
+    store=DurableResultStore(tmp_path / "results")
+    sequence="QHEADEROVERBUDGET01"
+    store.mark_running(sequence,"b"*64,":patch",mutation=True)
+    # Test a small budget so it is obvious the cache does not retain a
+    # large per-receipt payload even when the underlying receipt is valid.
+    monkeypatch.setattr(store_module,"MAX_CACHED_TERMINAL_HEADER_BYTES",512)
+    evidence="E"*4096
+    store.complete(
+        sequence,"b"*64,":patch",
+        {"ok":True,"command":"patch","data":{},"sequence":sequence},
+        mutation_receipt={"state":"VALIDATED","evidence":evidence})
+    assert sequence not in store._terminal_header_cache
+    first=store.header(sequence)
+    assert first["mutation_receipt"]["evidence"]==evidence
+    assert sequence not in store._terminal_header_cache
+    # Omitting the fast cache may be slower but must never discard the
+    # authoritative result or alter replay/dedup semantics.
+    assert store.get(sequence)["mutation_receipt"]["evidence"]==evidence
+
+
 def test_header_cache_refreshes_after_other_process_replaces_receipt(tmp_path, monkeypatch):
     root=tmp_path / "results"
     first=DurableResultStore(root)
