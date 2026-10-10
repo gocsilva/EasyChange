@@ -430,7 +430,13 @@ def decode_result_chunks(payloads: Collection[str]) -> dict[str, Any]:
         if any(char not in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for char in data_bytes):
             raise ValueError("invalid optical base64url fragment")
         fragment_crc = chunk.get("x")
-        if fragment_crc and f"{binascii.crc32(data_bytes) & 0xffffffff:08x}" != str(fragment_crc):
+        # Every EC2 producer includes an eight-character lowercase CRC.
+        # Missing, truthy non-string, or malformed fields must not bypass the
+        # per-chunk integrity gate in direct decode_result_chunks() callers.
+        if (type(fragment_crc) is not str
+                or len(fragment_crc) != 8
+                or any(ch not in "0123456789abcdef" for ch in fragment_crc)
+                or fragment_crc != f"{binascii.crc32(data_bytes) & 0xffffffff:08x}"):
             raise ValueError(f"optical chunk crc32 mismatch: {index}")
         previous = by_index.get(index)
         if previous is not None:
