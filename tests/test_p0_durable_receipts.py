@@ -274,6 +274,31 @@ def test_chunk_batches_reject_fractional_indexes_but_allow_decimal_strings(tmp_p
             store.stream_chunks(seq,[rejected])
 
 
+def test_stream_chunks_bounds_duplicate_request_and_preserves_retransmission(tmp_path):
+    import pytest
+
+    store=DurableResultStore(tmp_path / "receipts")
+    sequence="QCHUNKBATCH01"
+    store.mark_running(sequence, "a"*64, ":state", mutation=False)
+    store.complete(sequence, "a"*64, ":state", {
+        "ok":True,"command":"state",
+        "data":{"payload":"A"*40000},"sequence":sequence,
+    })
+    assert store.stream_meta(sequence)["eligible"] is True
+
+    # An accidental duplicate retransmission still yields one chunk.
+    result=store.stream_chunks(sequence, ["0"]*256)
+    assert result["returned_indexes"]==[0]
+    assert len(result["chunks"])==1
+    assert result["complete"] is True
+
+    # Never iterate or deduplicate unbounded user-provided index lists.
+    with pytest.raises(ValueError, match="RESULT_STREAM_CHUNK_REQUEST_TOO_LARGE"):
+        store.stream_chunks(sequence, ["0"]*257)
+    with pytest.raises(ValueError, match="RESULT_STREAM_CHUNK_BATCH_LIMIT"):
+        store.stream_chunks(sequence, list(range(17)))
+
+
 def test_terminal_header_cache_preserves_expired_replay_tombstone(tmp_path, monkeypatch):
     import time
 
