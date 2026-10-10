@@ -214,6 +214,31 @@ def test_legacy_done_journal_without_result_cannot_reexecute_mutation(tmp_path, 
         service.close()
 
 
+def test_unpaired_unicode_command_rejected_before_sequence_claim(tmp_path, monkeypatch):
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        sequence="QBADUNICODE1"
+        forbidden_calls=[]
+        def forbidden(*args,**kwargs):
+            forbidden_calls.append(args)
+            raise AssertionError("invalid Unicode command executed")
+        monkeypatch.setattr(service,"_execute_structured",forbidden)
+        for invalid in (chr(0xD800), "prefix"+chr(0xDC00)+"suffix"):
+            response=service.execute(":ec "+sequence+" :noop "+invalid)
+            assert response.ok is False
+            assert response.code=="INVALID_COMMAND_ENCODING"
+            assert response.sequence==sequence
+            assert service.result_store.get(sequence) is None
+            assert forbidden_calls==[]
+        # Bad encoding must not reserve the sequence: a subsequent legitimate
+        # request may claim it rather than being treated as a duplicate.
+        valid=service.execute(":ec "+sequence+" help")
+        assert valid.code!="SEQUENCE_CONFLICT"
+        assert service.result_store.get(sequence) is not None
+    finally:
+        service.close()
+
+
 def test_malformed_legacy_done_result_fails_closed_without_mutation(tmp_path, monkeypatch):
     import hashlib
 
