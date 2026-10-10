@@ -942,16 +942,22 @@ class DurableResultStore:
         if not isinstance(indexes, list) or not indexes:
             raise ValueError("RESULT_CHUNK_INDEXES_REQUIRED")
         limit = max(1, min(16, int(max_chunks)))
+        # An unbounded duplicate request must not do quadratic list searches
+        # before noticing that only 16 distinct chunks can be returned.
+        if len(indexes) > 256:
+            raise ValueError("RESULT_CHUNK_REQUEST_TOO_LARGE")
         unique: list[int] = []
+        seen: set[int] = set()
         for raw_index in indexes:
             if (type(raw_index) is not int and
                     not (isinstance(raw_index, str) and raw_index.strip().isdecimal())):
                 raise ValueError("INVALID_RESULT_CHUNK_INDEX")
             index = int(raw_index)
-            if index not in unique:
+            if index not in seen:
+                seen.add(index)
                 unique.append(index)
-        if len(unique) > limit:
-            raise ValueError(f"RESULT_CHUNK_BATCH_LIMIT:{limit}")
+                if len(unique) > limit:
+                    raise ValueError(f"RESULT_CHUNK_BATCH_LIMIT:{limit}")
 
         payload = self._result_payload(sequence)
         if payload is None:
