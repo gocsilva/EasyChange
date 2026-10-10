@@ -719,7 +719,6 @@ class DurableResultStore:
         with self._lock:
             cached = self._terminal_header_cache_get(sequence)
         if cached is not None:
-            size = self._validated_chunk_size(chunk_bytes)
             result_bytes = self._receipt_result_size(cached.get("payload_length"))
             cached["chunk_count"] = (
                 max(1, (result_bytes + size - 1) // size) if result_bytes else 0
@@ -738,7 +737,6 @@ class DurableResultStore:
                 self._terminal_header_cache_put(sequence, value)
         result = value.get("result")
         result_bytes = self._receipt_result_size(value.get("result_bytes"))
-        size = self._validated_chunk_size(chunk_bytes)
         chunk_count = max(1, (result_bytes + size - 1) // size) if result_bytes else 0
         if base is not None:
             base["chunk_count"] = chunk_count
