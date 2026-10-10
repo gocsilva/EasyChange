@@ -611,9 +611,17 @@ class DurableResultStore:
                 # tombstones and discard rollback/verification evidence.
                 mutation_state = value.get("mutation_state")
                 if (self._active_record(value)
-                        or value.get("mutation") is True
+                        or value.get("mutation") is not False
+                        or value.get("execution_state") != "FINISHED"
                         or value.get("mutation_receipt") is not None
-                        or mutation_state not in (None, "", "NOT_APPLICABLE")):
+                        or mutation_state not in (None, "", "NOT_APPLICABLE")
+                        or not isinstance(value.get("command_hash"),str)
+                        or len(value["command_hash"]) != 64
+                        or any(ch not in "0123456789abcdef"
+                               for ch in value["command_hash"])):
+                    # A legacy DONE receipt with missing mutation/identity
+                    # metadata is uncertain, not a proven read-only result.
+                    # Retain its full replay evidence instead of shrinking it.
                     continue
                 if value.get("result_expired") is True:
                     continue
