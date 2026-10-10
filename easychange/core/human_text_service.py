@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -136,17 +137,33 @@ class HumanTextService:
         ).encode("utf-8")
         self._atomic_write(self.meta_path, payload)
 
+    @staticmethod
+    def _read_metadata(path: Path) -> bytes:
+        # Stale metadata is advisory; unlike the canonical text buffer, it
+        # must never be allowed to block on a FIFO or follow a foreign symlink.
+        if path.is_symlink():
+            raise ValueError("HUMAN_TEXT_METADATA_UNSAFE_PATH")
+        flags=(os.O_RDONLY|getattr(os,"O_BINARY",0)|
+               getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_NONBLOCK",0))
+        fd=os.open(path,flags)
+        try:
+            info=os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("HUMAN_TEXT_METADATA_UNSAFE_TYPE")
+            raw=os.read(fd,MAX_HUMAN_TEXT_METADATA_BYTES+1)
+        finally:
+            os.close(fd)
+        if len(raw)>MAX_HUMAN_TEXT_METADATA_BYTES:
+            raise ValueError("HUMAN_TEXT_METADATA_TOO_LARGE")
+        return raw
+
     def info(self) -> dict[str, Any]:
-        if self.path.exists() and self.meta_path.exists():
+        if self.path.exists() and (self.meta_path.exists() or self.meta_path.is_symlink()):
             try:
                 # The metadata file is tiny in normal operation. A corrupted
                 # or externally replaced file must not allocate unbounded RAM
                 # before the primary text buffer's size guard runs.
-                with self.meta_path.open("rb") as stream:
-                    raw = stream.read(MAX_HUMAN_TEXT_METADATA_BYTES + 1)
-                if len(raw) > MAX_HUMAN_TEXT_METADATA_BYTES:
-                    raise ValueError("HUMAN_TEXT_METADATA_TOO_LARGE")
-                value = json.loads(raw.decode("utf-8"))
+                value = json.loads(self._read_metadata(self.meta_path).decode("utf-8"))
                 file_stat = self.path.stat()
                 if (
                     isinstance(value, dict)
