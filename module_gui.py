@@ -172,6 +172,14 @@ class ModuleGUI:
                 # service that may contest the same port or physical device.
                 self.message.set("Estado do serviço desconhecido: "+type(exc).__name__)
                 return
+            # poll() confirms exit but does not reap a POSIX child. Keep the
+            # old handle if wait() fails; never overwrite uncertain ownership.
+            try:
+                self.process.wait(timeout=0.5)
+            except (OSError,ValueError,subprocess.SubprocessError) as exc:
+                self.message.set("Falha ao recolher serviço anterior: "+type(exc).__name__)
+                return
+            self.process=None
         # Keep the Tk callback nonblocking: /health can stall for 600ms.
         # The fixed-port ownership check below is fail-closed; the regular
         # background refresh reports whether an external listener is healthy.
@@ -266,6 +274,14 @@ class ModuleGUI:
                     return False
             self.message.set("Serviço iniciado por esta GUI foi encerrado.")
         else:
+            if process is not None:
+                try:
+                    # A completed child still needs wait() before the GUI
+                    # forgets its handle; an uncertain reap is not success.
+                    process.wait(timeout=0.5)
+                except (OSError,ValueError,subprocess.SubprocessError) as exc:
+                    self.message.set("Falha ao recolher serviço: "+type(exc).__name__)
+                    return False
             self.message.set("Nenhum serviço próprio ativo. Outros processos preservados.")
         self.process=None
         return True
