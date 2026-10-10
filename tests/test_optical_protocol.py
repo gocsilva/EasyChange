@@ -23,6 +23,24 @@ def test_ec2_encoder_rejects_identity_receiver_would_drop(monkeypatch):
     assert optical.decode_result_chunks(valid)["sequence"]=="Q"*256
 
 
+def test_ec2_generated_qr_fits_real_m_level_byte_capacity():
+    import pytest
+    import easychange.remote.optical_protocol as optical
+
+    # Large but protocol-valid 3 KiB envelopes cannot be displayed by the
+    # Qt QRCode(ERROR_CORRECT_M) renderer; reject before scheduling painting.
+    with pytest.raises(ValueError,match="OPTICAL_QR_CAPACITY_EXCEEDED"):
+        optical._packet_json(
+            sequence="QRENDER",index=0,total=1,
+            digest="b"*64,crc="b"*8,piece="X"*2450)
+    short=optical._packet_json(
+        sequence="QRENDER",index=0,total=1,
+        digest="b"*64,crc="b"*8,piece="X"*180)
+    assert len(short.encode("utf-8")) <= optical.MAX_EC2_QR_RENDER_BYTES
+    result={"sequence":"QREALQR","ok":True,"data":{"text":"ok"}}
+    assert optical.decode_result_chunks(optical.encode_result_chunks(result))["ok"] is True
+
+
 def test_ec2_encoder_never_emits_an_envelope_too_large_for_decoder():
     import pytest
     import easychange.remote.optical_protocol as optical
