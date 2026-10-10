@@ -173,6 +173,20 @@ def test_durable_ec2_header_requires_boolean_finished_true():
     assert valid["f"] is True
 
 
+def test_ec2_direct_decoder_rejects_invalid_transfer_identity_early():
+    import pytest
+
+    original=Result(True,"read",{"text":"valid"},sequence="QIDENTITY02")
+    packets=encode_result_chunks(original)
+    valid=json.loads(packets[0])
+    for field,value in (("h",None),("h",1),("h","g"*16),
+                        ("c",False),("c","g"*8),("s","")):
+        with pytest.raises(ValueError,match="invalid optical transfer identity"):
+            forged=dict(valid)
+            forged[field]=value
+            decode_result_chunks([json.dumps(forged)])
+
+
 def test_ec2_rejects_untrusted_packet_counts_and_invalid_indexes():
     import pytest
     result=Result(True,"read",{"text":"ok"},sequence="QBADCOUNT")
