@@ -47,7 +47,7 @@ class OpticalAssembler:
         # A partial or completed carousel must not own a reusable receiver
         # indefinitely. Expire only when new frames arrive: ingest([]) is
         # allowed to retrieve the last verified receipt without mutation.
-        if (payloads and self.sequence
+        if (payloads and (self.sequence or self.pending_provisional_header)
                 and time.monotonic() - self.updated_at >= MAX_EC2_ASSEMBLY_IDLE_SECONDS):
             self._reset_unverified()
         for raw in payloads:
@@ -77,6 +77,7 @@ class OpticalAssembler:
                         # but do not claim a verified result or a sequence yet.
                         if provisional and valid_header and item.get("s"):
                             self.pending_provisional_header=item
+                            self.updated_at=time.monotonic()
                         continue
                     if (str(item.get("s") or "") == self.sequence
                             and valid_header
