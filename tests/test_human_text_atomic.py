@@ -405,3 +405,21 @@ def test_human_text_regular_file_swap_during_safe_open_is_retryable(tmp_path,mon
     assert service.load()=="new content"
 
 
+
+
+def test_dangling_buffer_symlink_is_not_mistaken_for_an_empty_buffer(tmp_path):
+    service=HumanTextService(tmp_path)
+    missing=tmp_path/"outside"/"not-present.txt"
+    assert not missing.exists()
+    try:
+        service.path.symlink_to(missing)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    assert not service.path.exists()
+    assert service.path.is_symlink()
+    for operation in (service.info,service.load,
+                      lambda: service.read(cursor=0)):
+        with pytest.raises(ValueError,match="HUMAN_TEXT_UNSAFE_BUFFER"):
+            operation()
+    assert not missing.exists()
+
