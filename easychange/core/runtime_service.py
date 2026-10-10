@@ -573,17 +573,33 @@ class ProjectRuntimeService:
         if not settings.exists():
             return []
         try:
-            value = json.loads(settings.read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError):
+            # launchSettings.json is configuration, not an unbounded input
+            # stream. A corrupt generated file must not break all discovery.
+            with settings.open("rb") as stream:
+                raw=stream.read(1_048_577)
+            if len(raw)>1_048_576:
+                return []
+            value=json.loads(raw.decode("utf-8-sig"))
+        except (OSError, ValueError, UnicodeError, RecursionError):
+            return []
+        if not isinstance(value,dict):
+            return []
+        profiles=value.get("profiles")
+        if not isinstance(profiles,dict) or len(profiles)>128:
             return []
         urls = []
-        for profile in (value.get("profiles") or {}).values():
+        for profile in profiles.values():
             if not isinstance(profile, dict):
                 continue
-            for url in str(profile.get("applicationUrl") or "").split(";"):
-                url = url.strip()
+            application=profile.get("applicationUrl")
+            if not isinstance(application,str) or len(application)>4096:
+                continue
+            for url in application.split(";"):
+                url=url.strip()
                 if url.startswith(("http://", "https://")) and url not in urls:
                     urls.append(url.rstrip("/"))
+                    if len(urls)>=16:
+                        return urls
         return urls
 
     @staticmethod
