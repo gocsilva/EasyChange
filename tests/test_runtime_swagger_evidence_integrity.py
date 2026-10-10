@@ -19,7 +19,7 @@ def _service(root: Path):
         "swagger_candidates":["http://127.0.0.1:5051/swagger/index.html"]}
     service.wait_for_http=lambda *_args,**_kw: {
         "ok":True,"status":200,"url":"http://127.0.0.1:5051/swagger/index.html",
-        "content_type":"text/html","body":b"<html>swagger</html>"}
+        "content_type":"text/html","body":b'<html><div id="swagger-ui"></div></html>'}
     return service
 
 
@@ -35,7 +35,7 @@ def test_missing_requested_screenshot_does_not_count_as_complete_evidence(tmp_pa
     assert result["screenshot_captured"] is False
     assert result["screenshot_file"] is None
     response=service.workspace.root_path/result["response_file"]
-    assert response.read_bytes()==b"<html>swagger</html>"
+    assert response.read_bytes()==b'<html><div id="swagger-ui"></div></html>'
     report=service.workspace.root_path/result["report"]
     assert report.is_file()
     metadata=report.parent/"evidence.json"
