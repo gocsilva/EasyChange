@@ -45,3 +45,15 @@ def test_failed_result_key_list_is_bounded_without_full_key_enumeration():
     details=json.loads(compact.split(" READ_ERROR read ",1)[1])
     assert len(details["keys"])==12
     assert len(compact)<500
+
+
+def test_failed_compact_frame_bounds_provider_error_and_marks_truncation():
+    detail="E"*400_000
+    compact=Result(False,"read",{},error=detail,code="PROVIDER_FAILED",
+                   sequence="QERRLIMIT1").render("compact")
+    assert len(compact)<900
+    payload=json.loads(compact.split(" PROVIDER_FAILED read ",1)[1])
+    assert payload["error"]==detail[:512]
+    assert payload["error_truncated"] is True
+    small=Result(False,"read",{},error="not found",code="NOT_FOUND").render("compact")
+    assert "error_truncated" not in small
