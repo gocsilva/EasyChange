@@ -62,6 +62,27 @@ def test_failed_text_replace_preserves_existing_buffer(tmp_path):
     assert not list(service.root.glob(".*.tmp"))
 
 
+def test_human_text_stream_wrapper_error_releases_fd_and_temp(tmp_path):
+    import os
+
+    service=HumanTextService(tmp_path)
+    previous=service.save("before")
+    original_close=os.close
+    closed=[]
+    def tracked_close(fd):
+        closed.append(fd)
+        return original_close(fd)
+    with patch.object(human_module.os,"fdopen",
+                      side_effect=OSError("STREAM_WRAPPER_FAILED")), \
+         patch.object(human_module.os,"close",side_effect=tracked_close):
+        with pytest.raises(OSError,match="STREAM_WRAPPER_FAILED"):
+            service.save("after")
+    assert len(closed)==1
+    assert service.load()=="before"
+    assert service.info()["sha256"]==previous["sha256"]
+    assert not list(service.root.glob(".*.tmp"))
+
+
 def test_human_text_load_rejects_overlong_data_with_bounded_read(tmp_path):
     service=HumanTextService(tmp_path)
     service.path.write_bytes(b"A"*200)
