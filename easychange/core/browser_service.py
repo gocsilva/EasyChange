@@ -135,19 +135,25 @@ class _WebSocket:
         self._events_dropped = 0
         self._reader_error: str | None = None
         self._closed = False
-        self._handshake()
-        # The continuous reader owns recv() after the HTTP upgrade. Keep it
-        # blocking: a short socket timeout can fire in the middle of a large
-        # WebSocket frame (notably Page.captureScreenshot), discard the partial
-        # frame state and desynchronize every subsequent message. close() calls
-        # shutdown(), which wakes the blocking reader without polling.
-        self.sock.settimeout(None)
-        self._reader = threading.Thread(
-            target=self._reader_loop,
-            name="easychange-cdp-reader",
-            daemon=True,
-        )
-        self._reader.start()
+        # Handshake failures and thread-start failures otherwise leak the
+        # accepted loopback socket on every attach/retry attempt.
+        try:
+            self._handshake()
+            # Keep the reader blocking after upgrade: a mid-frame timeout
+            # would discard the frame boundary and desynchronize later data.
+            self.sock.settimeout(None)
+            self._reader = threading.Thread(
+                target=self._reader_loop,
+                name="easychange-cdp-reader",
+                daemon=True,
+            )
+            self._reader.start()
+        except BaseException:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+            raise
 
     def _handshake(self) -> None:
         key = base64.b64encode(os.urandom(16)).decode("ascii")
