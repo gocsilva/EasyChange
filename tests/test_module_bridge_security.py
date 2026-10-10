@@ -870,6 +870,30 @@ class TestHubRedirectBoundary(unittest.TestCase):
                 client.peers()
             opened.assert_not_called()
 
+    def test_standalone_self_test_uses_validated_credentials(self):
+        from unittest.mock import patch
+
+        for raw,expected_standalone in (
+            ("token\ninvalid",True),
+            ("token with spaces",True),
+            ("valid-bridge-token",False),
+            ("",True),
+        ):
+            with self.subTest(raw=repr(raw)), \
+                 patch.dict(module_bridge.os.environ,
+                            {"MCP_MODULE_BUS_TOKEN":raw}), \
+                 patch.object(module_bridge,"_runtime_token",""), \
+                 patch.object(module_bridge,"_runtime_detached",False):
+                self.assertIs(
+                    module_bridge.self_test()["standalone"], expected_standalone)
+
+        # Explicit detach overrides even a well-formed inherited bearer.
+        with patch.dict(module_bridge.os.environ,
+                        {"MCP_MODULE_BUS_TOKEN":"valid-bridge-token"}), \
+             patch.object(module_bridge,"_runtime_token",""), \
+             patch.object(module_bridge,"_runtime_detached",True):
+            self.assertTrue(module_bridge.self_test()["standalone"])
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
