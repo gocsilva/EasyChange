@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import json
+import math
 import threading
 from urllib.error import HTTPError
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -21,12 +22,21 @@ def esp_online():
             body=response.read(2049)
         if len(body)>2048:
             return False
-        status=json.loads(body,object_pairs_hook=_unique_service_fields)
+        status=json.loads(body,object_pairs_hook=_unique_service_fields,
+                          parse_float=_finite_service_json_number,
+                          parse_constant=_finite_service_json_number)
         # The loopback port is not an identity: another service may occupy it.
         return (isinstance(status,dict) and status.get("ok") is True
                 and status.get("id")=="esp")
     except Exception:
         return False
+
+def _finite_service_json_number(token):
+    value=float(token)
+    if not math.isfinite(value):
+        raise ValueError("MODULE_SERVICE_NONFINITE_JSON")
+    return value
+
 
 def _unique_service_fields(pairs):
     fields={}
