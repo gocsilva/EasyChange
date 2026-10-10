@@ -5,7 +5,8 @@ import io
 import subprocess
 from unittest.mock import patch
 
-from easychange.core.ubuntu_service import UbuntuService
+import pytest
+from easychange.core.ubuntu_service import UbuntuService, UbuntuError
 
 
 class FakeWSLProcess:
@@ -67,3 +68,19 @@ def test_synchronous_wsl_timeout_kills_and_reaps_without_losing_bounded_logs(mon
     assert result["stdout"]=="a"*1024
     assert result["stdout_truncated"] is True
     assert result["stderr"]=="timeout\n"
+
+
+def test_failure_to_start_drain_thread_reaps_wsl_child(monkeypatch):
+    service=UbuntuService(None)
+    monkeypatch.setattr(service,"_wsl_argv",
+                        lambda session, argv:["wsl.exe","--exec",*argv])
+    process=FakeWSLProcess(stdout=b"stalled",stderr=b"")
+    with patch("easychange.core.ubuntu_service.subprocess.Popen",
+               return_value=process), \
+         patch("easychange.core.ubuntu_service.threading.Thread.start",
+               side_effect=RuntimeError("THREAD_QUOTA_EXCEEDED")):
+        with pytest.raises(UbuntuError,match="UBUNTU_OUTPUT_PUMP_START_FAILED"):
+            service._run_sync(None,["kubectl","get","pods"],max_bytes=1024)
+    assert process.killed is True
+    assert process.wait_calls==[3]
+    assert process.stdout.closed and process.stderr.closed
