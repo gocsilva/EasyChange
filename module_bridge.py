@@ -37,6 +37,7 @@ _runtime_detached=False
 # HTTP module-service handlers may concurrently attach and detach the hub.
 # Serialize credential transitions so a delayed attach cannot undo a detach.
 _runtime_state_lock=threading.RLock()
+_runtime_state_epoch=0
 CANONICAL_MODULE_ID="easychange"
 def _finite_hub_json_number(token):
     number=float(token)
@@ -591,7 +592,7 @@ def attach_hub(token,expected_module):
     this module. Only then is it installed; arbitrary localhost callers cannot
     claim a module or choose an external URL.
     """
-    global _runtime_token, _runtime_detached
+    global _runtime_token, _runtime_detached, _runtime_state_epoch
     if expected_module != CANONICAL_MODULE_ID:
         # A caller must never install another module's valid hub bearer on
         # this standalone process (cross-module identity confusion).
@@ -603,16 +604,25 @@ def attach_hub(token,expected_module):
             not token.isascii() or
             any(not (char.isalnum() or char in "-_") for char in token)):
         raise ValueError("INVALID_HUB_CREDENTIAL")
+    # The hub may take 40 seconds to respond: never block a revocation on
+    # network I/O. A generation fence rejects a late, superseded attach.
     with _runtime_state_lock:
-        members=MCPBridge(token).peers()
-        if members.get("self")!=expected_module or members.get("ok") is not True:
-            raise PermissionError("HUB_MODULE_IDENTITY_MISMATCH")
+        expected_epoch=_runtime_state_epoch
+    members=MCPBridge(token).peers()
+    if members.get("self")!=expected_module or members.get("ok") is not True:
+        raise PermissionError("HUB_MODULE_IDENTITY_MISMATCH")
+    with _runtime_state_lock:
+        if _runtime_state_epoch!=expected_epoch:
+            if not _runtime_detached and _runtime_token==token:
+                return {"connected":True,"id":expected_module}
+            raise RuntimeError("HUB_ATTACH_SUPERSEDED")
         _runtime_token=token
         _runtime_detached=False
+        _runtime_state_epoch+=1
         return {"connected":True,"id":expected_module}
 
 def detach_hub(token):
-    global _runtime_token, _runtime_detached
+    global _runtime_token, _runtime_detached, _runtime_state_epoch
     # A host-spawned module may authenticate through its bootstrap env token
     # without a later attach_hub(). That exact credential must still be able
     # to revoke the local bridge; an explicit detach permanently disables
@@ -631,6 +641,7 @@ def detach_hub(token):
             raise PermissionError("INVALID_DETACH_CREDENTIAL")
         _runtime_token=""
         _runtime_detached=True
+        _runtime_state_epoch+=1
         return {"connected":False}
 
 def self_test():
