@@ -628,6 +628,8 @@ class Indexer:
         if completed.returncode not in {0, 1}:
             return []
         rows: list[tuple[str, str]] = []
+        # Large cold grep results must not repeatedly resolve the same root.
+        trusted_root = self.root.resolve()
         for line in stdout.splitlines():
             parts = line.split(":", 2)
             if len(parts) != 3:
@@ -652,7 +654,7 @@ class Indexer:
             target = self.root / relative
             try:
                 if (self._has_symlink_component(relative) or
-                    not target.resolve().is_relative_to(self.root.resolve())):
+                    not target.resolve().is_relative_to(trusted_root)):
                     continue
             except (OSError, RuntimeError):
                 continue
