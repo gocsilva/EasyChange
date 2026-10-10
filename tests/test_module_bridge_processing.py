@@ -40,8 +40,41 @@ class TestProcessPending(unittest.TestCase):
         for attempt in bridge._request.call_args_list:
             self.assertEqual(attempt.args,
                              ("/v1/inbox/ack",{"ids":[23]}))
-            self.assertEqual(attempt.kwargs,{"timeout":8})
+            self.assertGreater(attempt.kwargs["timeout"],0)
+            self.assertLessEqual(attempt.kwargs["timeout"],8)
+        self.assertEqual(bridge._request.call_args_list[0].kwargs["timeout"],8)
         pause.assert_called_once_with(0.05)
+
+    def test_ack_retry_uses_remaining_deadline_not_three_full_timeouts(self):
+        from unittest.mock import Mock, patch
+
+        bridge=MCPBridge(token="A"*48)
+        receipt={"ok":True,"recipient":CANONICAL_MODULE_ID,
+                 "acked":0,"already_acked":[23],"unknown":[]}
+        bridge._request=Mock(side_effect=[TimeoutError("ACK_REPLY_LOST"),receipt])
+        # Initial attempt consumes 2 seconds. The next request is allowed
+        # only the remaining 6 seconds of the same total budget.
+        with patch("module_bridge.time.monotonic",
+                   side_effect=[100.0,100.0,102.0,102.0,102.0]), \
+             patch("module_bridge.time.sleep"):
+            self.assertEqual(bridge.ack([23]),receipt)
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in bridge._request.call_args_list],
+            [8.0,6.0])
+
+    def test_ack_budget_expiry_preserves_original_transport_error(self):
+        from unittest.mock import Mock, patch
+
+        bridge=MCPBridge(token="A"*48)
+        bridge._request=Mock(side_effect=TimeoutError("ACK_REPLY_UNCERTAIN"))
+        with patch("module_bridge.time.monotonic",
+                   side_effect=[100.0,100.0,108.1]), \
+             patch("module_bridge.time.sleep") as sleep:
+            with self.assertRaisesRegex(TimeoutError,"ACK_REPLY_UNCERTAIN"):
+                bridge.ack([23])
+        bridge._request.assert_called_once_with(
+            "/v1/inbox/ack",{"ids":[23]},timeout=8.0)
+        sleep.assert_not_called()
 
     def test_failed_or_unconfirmed_inbox_header_never_runs_handler(self):
         for ok in (False,None,"true",0):
