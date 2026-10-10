@@ -21,6 +21,26 @@ MAX_COMPRESSED_RECEIPT_BYTES = 32 * 1024 * 1024
 MAX_DECODED_RECEIPT_BYTES = 64 * 1024 * 1024
 
 
+def _receipt_pairs_unique(pairs):
+    value = {}
+    for key, member in pairs:
+        if key in value:
+            raise ValueError("RESULT_RECEIPT_DUPLICATE_KEY")
+        value[key] = member
+    return value
+
+
+def _receipt_nonfinite_constant(_value):
+    raise ValueError("RESULT_RECEIPT_NONFINITE_NUMBER")
+
+
+def _receipt_finite_float(value):
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("RESULT_RECEIPT_NONFINITE_NUMBER")
+    return number
+
+
 def _find_execution_summary(value: Any, depth: int = 0) -> dict[str, Any] | None:
     if depth > 6:
         return None
@@ -136,7 +156,8 @@ class DurableResultStore:
         # losing replay identity after a mutation has already executed.
         # Level 1 retains the established low-latency compression policy.
         raw = json.dumps(
-            value, ensure_ascii=False, separators=(",", ":")
+            value, ensure_ascii=False, allow_nan=False,
+            separators=(",", ":")
         ).encode("utf-8")
         if len(raw) > MAX_DECODED_RECEIPT_BYTES:
             raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
@@ -170,7 +191,12 @@ class DurableResultStore:
         decoded += decoder.flush(max_decoded + 1 - len(decoded))
         if len(decoded) > max_decoded or not decoder.eof or decoder.unused_data:
             raise ValueError("RESULT_RECEIPT_INVALID_STREAM")
-        value = json.loads(decoded.decode("utf-8"))
+        value = json.loads(
+            decoded.decode("utf-8"),
+            object_pairs_hook=_receipt_pairs_unique,
+            parse_constant=_receipt_nonfinite_constant,
+            parse_float=_receipt_finite_float,
+        )
         if not isinstance(value, dict):
             raise ValueError("RESULT_RECEIPT_NOT_OBJECT")
         return value
