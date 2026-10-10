@@ -676,7 +676,7 @@ class DurableResultStore:
                 raise ValueError("RESULT_SEQUENCE_COMMAND_HASH_MISMATCH")
             if current.get("state") == "DONE":
                 return current
-            success = bool(result.get("ok"))
+            success = result.get("ok") is True
             lifecycle = None
             if isinstance(mutation_receipt, dict):
                 lifecycle = str(
