@@ -22,6 +22,15 @@ MAX_INDEX_BYTES = 2 * 1024 * 1024
 # cold discovery materializes even when the process writes many gigabytes.
 MAX_COLD_GIT_BYTES = 8 * 1024 * 1024
 MAX_COLD_GIT_ROWS = 20_000
+MAX_INDEX_PAGE_ROWS = 100_000
+
+
+def _validate_index_page(offset: int, limit: int) -> None:
+    # SQLite interprets LIMIT -1 as unlimited. Public/bridge index calls must
+    # never turn malformed pagination into a full inventory materialization.
+    if (type(offset) is not int or offset < 0 or offset > 2**63 - 1
+            or type(limit) is not int or not 0 <= limit <= MAX_INDEX_PAGE_ROWS):
+        raise ValueError("INVALID_INDEX_PAGE")
 # Cold Git-backed discovery already works before the persistent index is warm.
 # Keep background hashing deliberately modest so startup/index refresh does not
 # steal CPU/disk from Qt painting and EC2 QR delivery.
@@ -495,6 +504,7 @@ class Indexer:
         return result
 
     def files(self, offset: int = 0, limit: int = 100) -> list[dict]:
+        _validate_index_page(offset, limit)
         if not self._fully_indexed:
             self.refresh()
         with self._connect() as db:
@@ -788,8 +798,9 @@ class Indexer:
         if (type(query) is not str or not query or len(query) > 512
                 or "\x00" in query):
             raise ValueError("INVALID_INDEX_QUERY")
-        # Reject invalid regexes before spawning git-grep or materializing
-        # potentially large SQLite candidate rows. Reuse one compiled object.
+        # Bound paging and reject invalid regexes before Git scans or SQL
+        # candidate materialization; reuse the same compiled regex.
+        _validate_index_page(offset, limit)
         pattern = re.compile(query, 0 if case_sensitive else re.IGNORECASE) if regex else None
         self._sync_protected_paths()
         if not self._fully_indexed:
