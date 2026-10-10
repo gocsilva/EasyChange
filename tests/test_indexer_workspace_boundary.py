@@ -380,3 +380,86 @@ def test_warm_index_removes_legacy_row_reached_via_directory_symlink(tmp_path):
         assert db.execute(
             "SELECT count(*) FROM files WHERE path=?",
             ("source_alias/private.py",)).fetchone()[0]==0
+
+
+def test_file_reader_rechecks_symlink_after_workspace_scan(tmp_path):
+    project=tmp_path/"project"
+    project.mkdir()
+    secret=tmp_path/"secret.py"
+    secret.write_text("def OUTSIDE_SECRET(): pass\n", encoding="utf-8")
+    link=project/"candidate.py"
+    try:
+        link.symlink_to(secret)
+    except (NotImplementedError,OSError):
+        pytest.skip("file symlink unavailable")
+
+    metadata=secret.stat()
+    record=Indexer._read_candidate(
+        (link,"candidate.py",metadata.st_size,metadata.st_mtime_ns),
+        trusted_root=project)
+    assert record[3]==""
+    assert record[4] is None
+    assert record[5]==[]
+
+
+def test_file_reader_rechecks_directory_alias_after_workspace_scan(tmp_path):
+    project=tmp_path/"project"
+    project.mkdir()
+    outside=tmp_path/"outside"
+    outside.mkdir()
+    private=outside/"secret.py"
+    private.write_text("def SECRET(): pass\n", encoding="utf-8")
+    alias=project/"source"
+    try:
+        alias.symlink_to(outside,target_is_directory=True)
+    except (NotImplementedError,OSError):
+        pytest.skip("directory symlink unavailable")
+
+    stat=private.stat()
+    result=Indexer._read_candidate(
+        (alias/"secret.py","source/secret.py",stat.st_size,stat.st_mtime_ns),
+        trusted_root=project)
+    assert result[3]==""
+    assert result[4] is None
+
+
+def test_failed_incremental_read_removes_previous_symbols(tmp_path,monkeypatch):
+    project=tmp_path/"workspace"
+    project.mkdir()
+    file=project/"changing.py"
+    file.write_text("def PREVIOUS_SYMBOL(): pass\n", encoding="utf-8")
+    index=Indexer(project)
+    index.refresh(force=True)
+    assert index.symbols(name="PREVIOUS_SYMBOL")
+
+    # The scan observes the new stat, but the file becomes unreadable before
+    # the background reader runs. The old SQLite row must be retired.
+    file.write_text("def NEW_SYMBOL_WITH_LONGER_NAME(): pass\n",
+                    encoding="utf-8")
+    def failed_read(item, *, trusted_root=None):
+        _path, relative, size, mtime=item
+        return relative,size,mtime,"",None,[]
+    monkeypatch.setattr(Indexer,"_read_candidate",staticmethod(failed_read))
+    index.invalidate()
+    index.refresh(force=True)
+    assert index.symbols(name="PREVIOUS_SYMBOL")==[]
+    with index._connect() as db:
+        assert db.execute(
+            "SELECT count(*) FROM files WHERE path='changing.py'"
+        ).fetchone()[0]==0
+
+
+def test_direct_update_failed_read_deletes_stale_row(tmp_path,monkeypatch):
+    file=tmp_path/"changing.py"
+    file.write_text("def OLD_DIRECT(): pass\n",encoding="utf-8")
+    index=Indexer(tmp_path)
+    index.refresh(force=True)
+    assert index.symbols(name="OLD_DIRECT")
+
+    def skipped(item, *, trusted_root=None):
+        _path, rel, size, mtime=item
+        return rel,size,mtime,"",None,[]
+    monkeypatch.setattr(Indexer,"_read_candidate",staticmethod(skipped))
+    result=index.update_path("changing.py")
+    assert result["removed"] is True
+    assert index.symbols(name="OLD_DIRECT")==[]
