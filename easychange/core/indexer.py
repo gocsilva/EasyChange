@@ -514,7 +514,8 @@ class Indexer:
         if not case_sensitive:
             argv.append("-i")
         argv.append("-E" if regex else "-F")
-        argv += [query, "--"]
+        # -e disambiguates a literal leading hyphen from git grep flags.
+        argv += ["-e", query, "--"]
         prefix = path_prefix.replace("\\", "/").rstrip("/") if path_prefix else ""
         ext = (extension if extension.startswith(".") else "." + extension) if extension else ""
         if prefix and ext:
