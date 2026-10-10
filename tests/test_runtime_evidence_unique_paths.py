@@ -68,8 +68,11 @@ def test_same_second_generic_evidence_keeps_distinct_reports(tmp_path):
 
 def test_forced_evidence_id_collision_cannot_overwrite_existing_run(tmp_path):
     service=_service(tmp_path)
-    with patch("easychange.core.runtime_service.uuid.uuid4",
+    same_second=datetime(2026,10,10,12,34,56,tzinfo=timezone.utc)
+    with patch("easychange.core.runtime_service.datetime") as clock, \
+         patch("easychange.core.runtime_service.uuid.uuid4",
                return_value=SimpleNamespace(hex="same-id")):
+        clock.now.return_value=same_second
         first=service.evidence("single-run")
         first_contents=(tmp_path/first["evidence_json"]).read_bytes()
         with pytest.raises(FileExistsError):
