@@ -195,6 +195,16 @@ class Indexer:
             raise ValueError("INVALID_PROTECTED_INDEX_PATH")
         return value
 
+    def _has_symlink_component(self, relative_path: str) -> bool:
+        # A symlink in a parent can redirect a normal-looking file path into
+        # an excluded directory. Check each component of targeted reads.
+        current=self.root
+        for component in Path(relative_path).parts:
+            current=current/component
+            if current.is_symlink():
+                return True
+        return False
+
     def protect_path(self, relative_path: str, *, scrub: bool = True) -> dict:
         """Exclude a known sensitive workspace file and purge prior indexed content."""
         relative = self._normalize_relative_path(relative_path)
@@ -236,7 +246,8 @@ class Indexer:
             # A symlink within the workspace is also handled by the regular
             # scan, which deliberately excludes links to avoid duplicate or
             # externally remapped source records.
-            if target.is_symlink() or not target.resolve().is_relative_to(self.root.resolve()):
+            if (self._has_symlink_component(relative) or
+                    not target.resolve().is_relative_to(self.root.resolve())):
                 raise ValueError("INVALID_PROTECTED_INDEX_PATH")
         except (OSError, RuntimeError) as exc:
             raise ValueError("INVALID_PROTECTED_INDEX_PATH") from exc
@@ -417,7 +428,7 @@ class Indexer:
                                 any(part in SKIP_DIRS for part in Path(file_path).parts)):
                             continue
                         target = self.root / Path(file_path)
-                        if (target.is_symlink() or
+                        if (self._has_symlink_component(file_path) or
                                 not target.resolve().is_relative_to(trusted_root) or
                                 not target.is_file() or
                                 target.stat().st_size > MAX_INDEX_BYTES):
@@ -565,7 +576,8 @@ class Indexer:
                     continue
             target = self.root / relative
             try:
-                if target.is_symlink() or not target.resolve().is_relative_to(self.root.resolve()):
+                if (self._has_symlink_component(relative) or
+                    not target.resolve().is_relative_to(self.root.resolve())):
                     continue
             except (OSError, RuntimeError):
                 continue
@@ -654,7 +666,7 @@ class Indexer:
         for file_path, _, indexed_size, indexed_mtime in rows:
             target = self.root / Path(file_path)
             try:
-                if (target.is_symlink() or
+                if (self._has_symlink_component(file_path) or
                         not target.resolve().is_relative_to(self.root.resolve())):
                     stale_paths.append(file_path)
                     continue
