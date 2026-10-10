@@ -175,7 +175,11 @@ class InboundCommandStore:
             raise
         try:
             with stream:
-                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                metadata=os.fstat(stream.fileno())
+                if (not stat.S_ISREG(metadata.st_mode)
+                        or metadata.st_nlink!=1):
+                    # A different path must not share our chunk inode:
+                    # it could be an unrelated user's private file.
                     raise InboundTransferError("INBOUND_CHUNK_READ_FAILED")
                 payload=stream.read(cls.MAX_CHUNK_BYTES+1)
         except OSError as exc:
@@ -211,7 +215,9 @@ class InboundCommandStore:
                 os.close(fd)
                 raise
             with stream:
-                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                metadata=os.fstat(stream.fileno())
+                if (not stat.S_ISREG(metadata.st_mode)
+                        or metadata.st_nlink!=1):
                     raise ValueError("INBOUND_META_UNSAFE_TYPE")
                 raw=stream.read(16*1024+1)
             if len(raw) > 16 * 1024:
