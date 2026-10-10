@@ -114,6 +114,15 @@ class OpticalAssembler:
                 piece=item.get("d")
                 if not isinstance(piece,str) or len(piece)>MAX_EC2_TOKEN_CHARS:
                     continue
+                # HDMI burst repeats the same accepted QR many times. An
+                # identical byte-for-byte frame in this exact transfer was
+                # already CRC-checked and is safe to retain without another
+                # base64 scan, UTF-8 copy or CRC calculation.
+                if (self.packet_identity is not None
+                        and identity==self.packet_identity
+                        and self.chunks.get(index)==raw):
+                    self.updated_at=time.monotonic()
+                    continue
                 # Reject corrupted HDMI QR fragments before reserving their
                 # index. A later valid retransmission must remain admissible.
                 try:
