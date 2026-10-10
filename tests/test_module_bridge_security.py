@@ -14,6 +14,7 @@ class TestHubRedirectBoundary(unittest.TestCase):
                      if name!=canonical)
         token="T"*48
         with patch.object(module_bridge,"_runtime_token","previous-token"), \
+             patch.object(module_bridge,"_runtime_detached",False), \
              patch.object(module_bridge.MCPBridge,"peers",
                           side_effect=AssertionError("FOREIGN_IDENTITY_CONTACTED")) as peers:
             with self.assertRaisesRegex(PermissionError,"HUB_MODULE_IDENTITY_MISMATCH"):
@@ -29,18 +30,46 @@ class TestHubRedirectBoundary(unittest.TestCase):
                    if name!=canonical)
         token="T"*48
         with patch.object(module_bridge,"_runtime_token","previous-token"), \
+             patch.object(module_bridge,"_runtime_detached",False), \
              patch.object(module_bridge.MCPBridge,"peers",
                           return_value={"ok":True,"self":wrong}):
             with self.assertRaisesRegex(PermissionError,"HUB_MODULE_IDENTITY_MISMATCH"):
                 module_bridge.attach_hub(token,canonical)
             self.assertEqual(module_bridge._runtime_token,"previous-token")
         with patch.object(module_bridge,"_runtime_token",""), \
+             patch.object(module_bridge,"_runtime_detached",False), \
              patch.object(module_bridge.MCPBridge,"peers",
                           return_value={"ok":True,"self":canonical}):
             connected=module_bridge.attach_hub(token,canonical)
             self.assertEqual(connected,{"connected":True,"id":canonical})
             self.assertEqual(module_bridge._runtime_token,token)
             self.assertEqual(module_bridge.detach_hub(token),{"connected":False})
+
+    def test_detach_never_recovers_inherited_bootstrap_token(self):
+        from unittest.mock import patch
+
+        canonical=module_bridge.CANONICAL_MODULE_ID
+        environment_token="E"*48
+        active_token="A"*48
+        with patch.dict(module_bridge.os.environ,
+                        {"MCP_MODULE_BUS_TOKEN":environment_token}), \
+             patch.object(module_bridge,"_runtime_token",active_token), \
+             patch.object(module_bridge,"_runtime_detached",False), \
+             patch.object(module_bridge.MCPBridge,"peers",
+                          return_value={"ok":True,"self":canonical}):
+            self.assertEqual(module_bridge.MCPBridge().token,active_token)
+            self.assertEqual(module_bridge.detach_hub(active_token),
+                             {"connected":False})
+            self.assertEqual(module_bridge.MCPBridge().token,"")
+            self.assertTrue(module_bridge.self_test()["standalone"])
+            # Explicit token arguments are still available for a fresh
+            # authentication handshake; only implicit env fallback is blocked.
+            self.assertEqual(module_bridge.MCPBridge(token=environment_token).token,
+                             environment_token)
+            new_token="N"*48
+            module_bridge.attach_hub(new_token,canonical)
+            self.assertEqual(module_bridge.MCPBridge().token,new_token)
+            self.assertFalse(module_bridge.self_test()["standalone"])
 
     def test_no_external_proxy_config(self):
         from urllib.request import ProxyHandler
