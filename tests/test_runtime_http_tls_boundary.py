@@ -82,3 +82,22 @@ def test_same_origin_redirect_is_allowed_but_off_origin_is_refused():
         "https://localhost:5051@evil.example/",
     ):
         assert policy.redirect_request(request,None,302,"Found",{},escaped) is None
+
+
+def test_swagger_http_probe_rejects_file_and_embedded_credentials():
+    service=object.__new__(ProjectRuntimeService)
+    forbidden=(
+        "file:///tmp/private.txt",
+        "ftp://example.com/swagger",
+        "data:text/plain,not-http",
+        "https://name:password@example.com/swagger",
+        "http:///swagger",
+        "https://",
+    )
+    with patch("easychange.core.runtime_service.urllib.request.build_opener") as factory:
+        for url in forbidden:
+            result=service._http_get(url)
+            assert result["ok"] is False, url
+            assert result["error"] == "ValueError", url
+            assert "INVALID_HTTP_PROBE_URL" in result["message"], url
+    factory.assert_not_called()
