@@ -660,6 +660,53 @@ def test_racing_sequence_with_different_command_is_conflict(tmp_path, monkeypatc
         service.close()
 
 
+def test_oversized_decoded_result_keeps_original_claim_receipt(tmp_path, monkeypatch):
+    import pytest
+    import easychange.core.result_store as result_module
+
+    store=DurableResultStore(tmp_path / "receipts")
+    sequence="QWRITEBOUND1"
+    digest="a"*64
+    store.mark_running(sequence,digest,":read large",mutation=False)
+    target=store._path(sequence)
+    original=target.read_bytes()
+    with monkeypatch.context() as ctx:
+        ctx.setattr(result_module,"MAX_DECODED_RECEIPT_BYTES",2048)
+        with pytest.raises(ValueError,match="RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE"):
+            store.complete(sequence,digest,":read large",
+                           {"ok":True,"data":{"text":"x"*8000}})
+        assert target.read_bytes()==original
+        assert store.get(sequence)["state"]=="RUNNING"
+        assert store.get(sequence)["result"] is None
+    # A smaller result can still be stored and decoded normally.
+    done=store.complete(sequence,digest,":read large",
+                        {"ok":True,"data":{"text":"small"}})
+    assert done["state"]=="DONE"
+    assert store.get(sequence)["result"]["data"]["text"]=="small"
+
+
+def test_oversized_compressed_result_never_overwrites_claim(tmp_path, monkeypatch):
+    import hashlib
+    import pytest
+    import easychange.core.result_store as result_module
+
+    store=DurableResultStore(tmp_path / "receipts")
+    sequence="QWRITEBOUND2"
+    digest="b"*64
+    store.mark_running(sequence,digest,":read random",mutation=False)
+    target=store._path(sequence)
+    original=target.read_bytes()
+    random_text="".join(hashlib.sha256(str(i).encode()).hexdigest()
+                        for i in range(140))
+    with monkeypatch.context() as ctx:
+        ctx.setattr(result_module,"MAX_COMPRESSED_RECEIPT_BYTES",1024)
+        with pytest.raises(ValueError,match="RESULT_RECEIPT_COMPRESSED_TOO_LARGE"):
+            store.complete(sequence,digest,":read random",
+                           {"ok":True,"data":{"text":random_text}})
+        assert target.read_bytes()==original
+        assert store.get(sequence)["state"]=="RUNNING"
+
+
 def test_compressed_receipt_file_read_is_bounded(tmp_path, monkeypatch):
     import io
     from pathlib import Path
