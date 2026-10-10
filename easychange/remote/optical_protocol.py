@@ -218,6 +218,11 @@ def _transport_components(
     chunk_chars: int | None = None,
 ) -> tuple[dict[str, Any], bytes, str, int, int, str, str, str, bool]:
     value = _result_value(result)
+    # Decoder identity limits are part of the on-wire contract. Reject an
+    # invalid producer sequence before the expensive JSON/zlib QR stages.
+    sequence = str(value.get("sequence") or "-")
+    if not 1 <= len(sequence) <= 256:
+        raise ValueError("OPTICAL_SEQUENCE_TOO_LONG")
     wire_value = _compact_transport_value(value)
     raw, _compressed, token = _encode_raw(wire_value)
     size = adaptive_chunk_chars(len(token)) if chunk_chars is None else int(chunk_chars)
@@ -249,7 +254,12 @@ def _packet_json(
     }
     if literal_marker:
         packet["t"] = 0
-    return json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
+    rendered = json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
+    # A caller may request an enormous chunk_chars value. Even if raw/result
+    # byte budgets pass, the receiver rejects a >64 KiB QR envelope.
+    if len(rendered) > MAX_EC2_PACKET_TEXT_CHARS:
+        raise ValueError("OPTICAL_PACKET_TEXT_TOO_LARGE")
+    return rendered
 
 
 def _header_json(
