@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 
 from .process_service import ProcessService
@@ -186,37 +187,78 @@ class UbuntuService:
 
     def _run_sync(self, session: UbuntuSession, argv: list[str], *, timeout: float = 15.0, max_bytes: int = 65536) -> dict:
         effective = self._wsl_argv(session, argv)
-        started = time.monotonic()
-        try:
-            run_kwargs = {
-                "stdout": subprocess.PIPE,
-                "stderr": subprocess.PIPE,
-                "shell": False,
-                "timeout": max(0.5, min(120.0, float(timeout))),
-                "check": False,
-            }
-            run_kwargs.update(hidden_console_kwargs())
-            completed = subprocess.run(effective, **run_kwargs)
-            stdout = bytes(completed.stdout or b"")
-            stderr = bytes(completed.stderr or b"")
-            returncode = int(completed.returncode)
-            timed_out = False
-        except subprocess.TimeoutExpired as exc:
-            stdout = bytes(exc.stdout or b"")
-            stderr = bytes(exc.stderr or b"")
-            returncode = None
-            timed_out = True
         budget = max(1024, min(1024 * 1024, int(max_bytes or 65536)))
+        deadline = max(0.5, min(120.0, float(timeout)))
+        started = time.monotonic()
+
+        # subprocess.run(PIPE) buffers *all* output before the max_bytes
+        # slice, allowing large kubectl/WSL logs to exhaust the GUI memory.
+        # Drain both pipes concurrently, but retain at most budget bytes
+        # per stream. Count discarded bytes for honest truncation metadata.
+        captured = [bytearray(), bytearray()]
+        counts = [0, 0]
+        failures: list[str] = []
+
+        def drain(stream, index: int) -> None:
+            try:
+                while True:
+                    piece = stream.read(8192)
+                    if not piece:
+                        break
+                    counts[index] += len(piece)
+                    available = budget - len(captured[index])
+                    if available > 0:
+                        captured[index].extend(piece[:available])
+            except OSError as exc:
+                failures.append(type(exc).__name__)
+            finally:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+        proc = subprocess.Popen(
+            effective,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            bufsize=0,
+            **hidden_console_kwargs(),
+        )
+        assert proc.stdout is not None and proc.stderr is not None
+        pumps = [
+            threading.Thread(target=drain, args=(proc.stdout, 0),
+                             daemon=True, name="easychange-wsl-stdout"),
+            threading.Thread(target=drain, args=(proc.stderr, 1),
+                             daemon=True, name="easychange-wsl-stderr"),
+        ]
+        for pump in pumps:
+            pump.start()
+        timed_out = False
+        try:
+            try:
+                returncode = int(proc.wait(timeout=deadline))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                proc.kill()
+                proc.wait(timeout=3)
+                returncode = None
+        finally:
+            for pump in pumps:
+                pump.join(timeout=5)
+        if failures or any(pump.is_alive() for pump in pumps):
+            raise UbuntuError("UBUNTU_OUTPUT_CAPTURE_INCOMPLETE")
         return {
             "argv": [str(item) for item in argv],
             "return_code": returncode,
             "timed_out": timed_out,
-            "stdout": self._decode(stdout[:budget]),
-            "stderr": self._decode(stderr[:budget]),
-            "stdout_bytes": len(stdout),
-            "stderr_bytes": len(stderr),
-            "stdout_truncated": len(stdout) > budget,
-            "stderr_truncated": len(stderr) > budget,
+            "stdout": self._decode(bytes(captured[0])),
+            "stderr": self._decode(bytes(captured[1])),
+            "stdout_bytes": counts[0],
+            "stderr_bytes": counts[1],
+            "stdout_truncated": counts[0] > budget,
+            "stderr_truncated": counts[1] > budget,
             "duration_ms": int((time.monotonic() - started) * 1000),
         }
 
