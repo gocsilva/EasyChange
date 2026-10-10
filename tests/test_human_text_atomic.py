@@ -423,3 +423,28 @@ def test_dangling_buffer_symlink_is_not_mistaken_for_an_empty_buffer(tmp_path):
             operation()
     assert not missing.exists()
 
+
+def test_racing_writer_cannot_publish_old_hash_with_new_file_identity(tmp_path,monkeypatch):
+    writer_a=HumanTextService(tmp_path)
+    writer_b=HumanTextService(tmp_path)
+    real_atomic=writer_a._atomic_write
+    completed=[]
+
+    def interleaved_atomic(path,payload):
+        committed=real_atomic(path,payload)
+        if path==writer_a.path and not completed:
+            completed.append(True)
+            # Writer B commits between A's os.replace() and A's metadata.
+            writer_b.save("BBBB")
+        return committed
+
+    monkeypatch.setattr(writer_a,"_atomic_write",interleaved_atomic)
+    receipt_a=writer_a.save("AAAA")
+    assert receipt_a["sha256"]==hashlib.sha256(b"AAAA").hexdigest()
+    assert receipt_a["file_inode"]!=writer_a.path.stat().st_ino
+    current=writer_a.info()
+    assert writer_a.load()=="BBBB"
+    assert current["sha256"]==hashlib.sha256(b"BBBB").hexdigest()
+    assert current["file_inode"]==writer_a.path.stat().st_ino
+
+
