@@ -125,6 +125,51 @@ def test_runtime_profile_replacement_stays_owner_only_on_posix(tmp_path):
     assert not list(root.glob(".runtime_profiles.json.*.tmp"))
 
 
+def test_writer_keeps_malformed_existing_runtime_profiles_untouched(tmp_path):
+    import pytest
+    root=tmp_path/".easychange"
+    root.mkdir()
+    runtime=object.__new__(ProjectRuntimeService)
+    runtime.workspace=SimpleNamespace(root_path=tmp_path)
+    runtime.config_path=root/"runtime_profiles.json"
+    runtime.resolve_environment=lambda *_a,**_k: (
+        {},{"resolved_env_keys":[],"unresolved_env_refs":[]})
+    cases=(
+        b'{"profiles": [',
+        json.dumps({"profiles":[_valid_row(), {"id":"broken","urls":"bad"}]}).encode(),
+        json.dumps({"profiles":[_valid_row(),_valid_row()]}).encode(),
+        json.dumps({"profiles":{"not":"a list"}}).encode(),
+        b'{"profiles":[]}' + b" " * 1_048_577,
+    )
+    for contents in cases:
+        runtime.config_path.write_bytes(contents)
+        assert runtime._configured_profiles() == (
+            [_read for _read in runtime._configured_profiles()]
+        )  # tolerant discovery remains callable
+        with pytest.raises(ValueError,match="RUNTIME_PROFILE_CONFIG_"):
+            runtime.configure_profile("new",run_argv=["python","--version"])
+        assert runtime.config_path.read_bytes()==contents
+        assert not list(root.glob(".runtime_profiles.json.*.tmp"))
+
+
+def test_writer_rejects_new_profile_id_the_reader_would_ignore(tmp_path):
+    import pytest
+
+    root=tmp_path/".easychange"
+    root.mkdir()
+    runtime=object.__new__(ProjectRuntimeService)
+    runtime.workspace=SimpleNamespace(root_path=tmp_path)
+    runtime.config_path=root/"runtime_profiles.json"
+    runtime.resolve_environment=lambda *_a,**_k: (
+        {},{"resolved_env_keys":[],"unresolved_env_refs":[]})
+    runtime.configure_profile("valid",inherit_env=False)
+    original=runtime.config_path.read_bytes()
+    with pytest.raises(ValueError,match="PROFILE_ID_TOO_LONG"):
+        runtime.configure_profile("x"*129)
+    assert runtime.config_path.read_bytes()==original
+    assert [r["id"] for r in runtime._configured_profiles()]==["valid"]
+
+
 def test_writer_refuses_unreadable_oversized_config_without_replacing_old(
         tmp_path):
     import pytest
