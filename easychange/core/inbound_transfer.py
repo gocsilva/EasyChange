@@ -5,6 +5,7 @@ import base64
 import binascii
 from contextlib import contextmanager
 import hashlib
+import heapq
 import json
 import os
 import re
@@ -235,24 +236,29 @@ class InboundCommandStore:
         return value
 
     def _cleanup_locked(self) -> None:
+        # Only the newest MAX_TRANSFERS directories can survive retention.
+        # Keep a bounded min-heap instead of materializing and sorting every
+        # directory (O(N) memory and O(N log N) for legacy workspaces).
         now = time.time()
+        newest: list[tuple[float, Path]] = []
         try:
-            directories = [
-                path for path in self.root.iterdir()
-                if path.is_dir() and not path.is_symlink()
-            ]
+            for path in self.root.iterdir():
+                try:
+                    if path.is_symlink() or not path.is_dir():
+                        continue
+                    mtime = float(path.stat().st_mtime)
+                except OSError:
+                    continue
+                if now - mtime > self.TTL_SECONDS:
+                    shutil.rmtree(path, ignore_errors=True)
+                    continue
+                heapq.heappush(newest,(mtime,path))
+                if len(newest) > self.MAX_TRANSFERS:
+                    _, expired = heapq.heappop(newest)
+                    shutil.rmtree(expired, ignore_errors=True)
         except OSError:
+            # A disappearing workspace is recoverable; cleanup is advisory.
             return
-        ranked: list[tuple[float, Path]] = []
-        for path in directories:
-            try:
-                ranked.append((float(path.stat().st_mtime), path))
-            except OSError:
-                continue
-        ranked.sort(reverse=True)
-        for index, (mtime, path) in enumerate(ranked):
-            if index >= self.MAX_TRANSFERS or now - mtime > self.TTL_SECONDS:
-                shutil.rmtree(path, ignore_errors=True)
 
     def begin(
         self,
