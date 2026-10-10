@@ -320,6 +320,27 @@ def test_logical_chunks_bounded_duplicates_preserve_retransmission(tmp_path):
         store.chunks(seq, list(range(17)))
 
 
+def test_oversize_decimal_index_is_rejected_without_integer_conversion(tmp_path):
+    import pytest
+
+    store=DurableResultStore(tmp_path / "receipts")
+    seq="QLONGINDEX1"
+    store.mark_running(seq, "a"*64, ":state", mutation=False)
+    store.complete(seq, "a"*64, ":state", {
+        "ok":True,"command":"state",
+        "data":{"text":"A"*40000},"sequence":seq,
+    })
+    assert store.stream_meta(seq)["eligible"] is True
+
+    # Python has a digit conversion threshold for very large decimal strings;
+    # both transport paths must produce their own predictable input error.
+    enormous="9"*100000
+    with pytest.raises(ValueError, match="INVALID_RESULT_STREAM_CHUNK_INDEX"):
+        store.stream_chunks(seq, [enormous])
+    with pytest.raises(ValueError, match="INVALID_RESULT_CHUNK_INDEX"):
+        store.chunks(seq, [enormous])
+
+
 def test_terminal_header_cache_preserves_expired_replay_tombstone(tmp_path, monkeypatch):
     import time
 
