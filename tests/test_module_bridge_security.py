@@ -185,7 +185,7 @@ class TestHubRedirectBoundary(unittest.TestCase):
 
         active="A"*48
         invalid=(None,False,123,b"A"*48,{"token":active},
-                 "é"*48,"Q"*257,"\\ud800")
+                 "é"*48,"Q"*257,chr(0xD800))
         for token in invalid:
             with self.subTest(token_type=type(token).__name__,
                               length=len(token) if hasattr(token,"__len__") else None), \
