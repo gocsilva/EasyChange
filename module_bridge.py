@@ -328,6 +328,10 @@ def attach_hub(token,expected_module):
     claim a module or choose an external URL.
     """
     global _runtime_token
+    if expected_module != CANONICAL_MODULE_ID:
+        # A caller must never install another module's valid hub bearer on
+        # this standalone process (cross-module identity confusion).
+        raise PermissionError("HUB_MODULE_IDENTITY_MISMATCH")
     if not isinstance(token,str) or len(token)<32 or len(token)>200:
         raise ValueError("INVALID_HUB_CREDENTIAL")
     members=MCPBridge(token).peers()
