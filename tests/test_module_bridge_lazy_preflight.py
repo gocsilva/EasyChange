@@ -30,6 +30,17 @@ class ModuleBridgeLazyPreflightTests(unittest.TestCase):
         # A 100k-entry temporary list used to cost ~800kB here.
         self.assertLess(peak,650_000)
 
+    def test_invalid_unicode_is_rejected_without_network_io(self):
+        bridge=MCPBridge(token="test-local-token")
+        payloads=({"tool":"status","arguments":{"text":"\ud800"}},
+                  {"target":"esp","topic":"bad.unicode","payload":"\udfff"})
+        for route,payload in zip(("/v1/tools/call","/v1/send"),payloads):
+            with self.subTest(route=route), patch(
+                    "module_bridge._local_opener.open") as post:
+                with self.assertRaisesRegex(ValueError,"MCP_BUS_INVALID_UNICODE"):
+                    bridge._request(route,payload)
+                post.assert_not_called()
+
     def test_cyclic_payload_fails_without_reaching_http(self):
         bridge=MCPBridge(token="test-local-token")
         cyclic=[]
