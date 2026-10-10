@@ -364,9 +364,19 @@ class MCPBridge:
         # A generic 429 does NOT guarantee the peer rejected an operation.
         # Replay only explicit mailbox-admission backpressure (accepted=False);
         # timeouts and responses with unknown outcomes remain non-retryable.
+        # Mailbox backpressure retries share one six-second budget, not
+        # seven independent six-second timeouts for one logical message.
+        deadline=time.monotonic()+6.0
+        last_busy=None
         for attempt in range(7):
+            remaining=deadline-time.monotonic()
+            if remaining<=0:
+                if last_busy is not None:
+                    raise last_busy
+                raise TimeoutError("MCP_MESSAGE_ADMISSION_DEADLINE")
             try:
-                return self._request("/v1/send",message,timeout=6)
+                return self._request("/v1/send",message,
+                                     timeout=min(6.0,remaining))
             except HTTPError as exc:
                 if exc.code!=429:
                     # Keep rejected requests from retaining HTTP sockets.
@@ -392,7 +402,11 @@ class MCPBridge:
                         details.get("accepted") is not False or
                         details.get("retryable") is not True or attempt==6):
                     raise exc
-                time.sleep(min(0.5,0.025*(2**attempt)))
+                last_busy=exc
+                remaining=deadline-time.monotonic()
+                if remaining<=0:
+                    raise exc
+                time.sleep(min(0.5,0.025*(2**attempt),remaining))
 
     def receive(self):
         """Non-destructive read with a bounded local mailbox probe.
