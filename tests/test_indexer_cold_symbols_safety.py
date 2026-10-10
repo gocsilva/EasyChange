@@ -26,7 +26,10 @@ def test_cold_symbols_reject_parent_and_absolute_file_paths(tmp_path, monkeypatc
                  r"C:\Windows\secret.py", "folder/../external.py"):
         with pytest.raises(ValueError,match="INVALID_PROTECTED_INDEX_PATH"):
             index.symbols(path=path)
-    assert index.count() == 0
+    # Inspect persisted rows without triggering a full index refresh,
+    # which would be unrelated to the cold-path safety contract.
+    with index._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0
 
 
 def test_cold_symbols_skip_symlink_to_external_source(tmp_path, monkeypatch):
@@ -42,7 +45,10 @@ def test_cold_symbols_skip_symlink_to_external_source(tmp_path, monkeypatch):
     with patch.object(Path,"read_text",
                       side_effect=AssertionError("UNBOUNDED_OR_EXTERNAL_READ")):
         assert index.symbols(path="alias.py") == []
-    assert index.count() == 0
+    # Inspect persisted rows without triggering a full index refresh,
+    # which would be unrelated to the cold-path safety contract.
+    with index._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0
 
 
 def test_cold_symbols_preserve_protected_workspace_secrets(tmp_path, monkeypatch):
@@ -55,7 +61,10 @@ def test_cold_symbols_preserve_protected_workspace_secrets(tmp_path, monkeypatch
     with patch.object(Path,"read_text",
                       side_effect=AssertionError("PROTECTED_FILE_READ")):
         assert index.symbols(path="secret.py") == []
-    assert index.count() == 0
+    # Inspect persisted rows without triggering a full index refresh,
+    # which would be unrelated to the cold-path safety contract.
+    with index._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0
 
 
 def test_cold_symbols_skip_large_file_without_reading_it(tmp_path, monkeypatch):
@@ -73,7 +82,10 @@ def test_cold_symbols_skip_large_file_without_reading_it(tmp_path, monkeypatch):
 
     with patch.object(Path,"open",watch):
         assert index.symbols(path="giant.py") == []
-    assert index.count() == 0
+    # Inspect persisted rows without triggering a full index refresh,
+    # which would be unrelated to the cold-path safety contract.
+    with index._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0
 
 
 def test_cold_symbols_keep_small_valid_python_functions(tmp_path, monkeypatch):
