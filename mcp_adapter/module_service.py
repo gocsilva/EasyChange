@@ -71,12 +71,18 @@ class Handler(BaseHTTPRequestHandler):
         if self.path=="/health":
             return self.send(200,{"ok":True,"id":"easychange","standalone":True})
         if self.path=="/status":
-            return self.send(200,module_status(esp_enabled=esp_online()))
+            try:
+                return self.send(200,module_status(esp_enabled=esp_online()))
+            except Exception:
+                return self.send(503,{"error":"MODULE_STATUS_UNAVAILABLE"})
         if self.path=="/peers":
             return self.send(200,{"esp":{"connected":esp_online(),"required_for_mcp":True},
                                   "mcp":{"required_for_standalone":False}})
         if self.path=="/capabilities":
-            return self.send(200,capabilities())
+            try:
+                return self.send(200,capabilities())
+            except Exception:
+                return self.send(503,{"error":"MODULE_CAPABILITIES_UNAVAILABLE"})
         return self.send(404,{"error":"NOT_FOUND"})
     def send(self,status,body):
         try:
