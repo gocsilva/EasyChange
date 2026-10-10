@@ -134,7 +134,7 @@ class HumanTextService:
         }
 
     @staticmethod
-    def _atomic_write(path: Path, payload: bytes) -> None:
+    def _atomic_write(path: Path, payload: bytes) -> os.stat_result:
         # Concurrent GUI and MCP writers must never share a temporary name.
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(
@@ -152,7 +152,9 @@ class HumanTextService:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
+                written_stat=os.fstat(handle.fileno())
             os.replace(temporary, path)
+            return written_stat
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -251,8 +253,9 @@ class HumanTextService:
                 f"HUMAN_TEXT_TOO_LARGE:{len(raw)}>{self.max_bytes}"
             )
 
-        self._atomic_write(self.path, raw)
-        stat = self.path.stat()
+        # Keep the identity of *our* committed file generation, not a later
+        # path occupant installed by another writer between replace() and stat().
+        stat = self._atomic_write(self.path, raw)
 
         meta = {
             "exists": True,
