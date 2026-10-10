@@ -6,6 +6,24 @@ from urllib.error import HTTPError
 import module_bridge
 
 class TestHubRedirectBoundary(unittest.TestCase):
+    def test_deep_hub_json_fails_as_invalid_envelope_without_retry(self):
+        import io
+        from unittest.mock import patch
+
+        client=module_bridge.MCPBridge(token="T"*48)
+        deep=b"["*2000+b"0"+b"]"*2000
+        with patch.object(module_bridge._local_opener,"open",
+                          return_value=io.BytesIO(deep)) as opener:
+            with self.assertRaisesRegex(ValueError,
+                                        "MCP_HUB_JSON_NESTING_LIMIT"):
+                client.peers()
+        opener.assert_called_once()
+        with patch.object(module_bridge.json,"loads",
+                          side_effect=RecursionError("simulated JSON nesting")):
+            with self.assertRaisesRegex(ValueError,
+                                        "MCP_HUB_JSON_NESTING_LIMIT"):
+                module_bridge._decode_hub_response(b"[]")
+
     def test_localhost_alias_resolves_to_fixed_ipv4_hub_without_name_lookup(self):
         import io
         from unittest.mock import patch
