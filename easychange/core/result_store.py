@@ -20,6 +20,7 @@ import zlib
 
 MAX_COMPRESSED_RECEIPT_BYTES = 32 * 1024 * 1024
 MAX_DECODED_RECEIPT_BYTES = 64 * 1024 * 1024
+MAX_CACHED_TERMINAL_HEADER_BYTES = 32 * 1024  # 128 entries => at most 4 MiB
 
 
 def _receipt_pairs_unique(pairs):
@@ -100,8 +101,10 @@ class DurableResultStore:
         self._payload_cache_bytes = 0
         self._payload_cache_max_entries = 32
         self._payload_cache_max_bytes = 16 * 1024 * 1024
+        # Cache an immutable, bounded snapshot instead of borrowed nested
+        # dictionaries from the receipt; callers cannot mutate cached truth.
         self._terminal_header_cache: OrderedDict[
-            str, tuple[dict[str, Any], tuple[int, int, int, int]]
+            str, tuple[bytes, tuple[int, int, int, int]]
         ] = OrderedDict()
         self._terminal_header_cache_max = 128
         self._stream_cache: OrderedDict[str, tuple[float, bytes, str, str, int, tuple[int, int, int, int]]] = OrderedDict()
@@ -319,20 +322,36 @@ class DurableResultStore:
         except OSError:
             self._terminal_header_cache.pop(sequence, None)
             return
-        if sequence in self._terminal_header_cache:
-            self._terminal_header_cache.pop(sequence, None)
+        self._terminal_header_cache.pop(sequence, None)
+        # An entry cap alone does not bound memory when a mutation receipt
+        # contains a large nested summary. Stop JSON encoding before copying
+        # anything that would exceed the per-header byte budget.
+        encoded = bytearray()
+        try:
+            for fragment in json.JSONEncoder(
+                    ensure_ascii=False, allow_nan=False,
+                    separators=(",", ":")).iterencode(base):
+                if len(fragment) > MAX_CACHED_TERMINAL_HEADER_BYTES:
+                    return
+                wire = fragment.encode("utf-8")
+                if len(encoded) + len(wire) > MAX_CACHED_TERMINAL_HEADER_BYTES:
+                    return
+                encoded.extend(wire)
+        except (TypeError, ValueError, RecursionError, UnicodeError):
+            # An unexpected header shape is never a reason to lose the
+            # underlying receipt or fail its terminal write.
+            return
         while len(self._terminal_header_cache) >= self._terminal_header_cache_max:
             self._terminal_header_cache.popitem(last=False)
-        # Completed receipts remain replay tombstones even past the nominal
-        # TTL. Cache by file version; cross-process deletion/replacement still
-        # invalidates the entry without repeatedly decoding aged receipts.
-        self._terminal_header_cache[sequence] = (base, stamp)
+        # File version invalidates cross-process replacement; immutable wire
+        # prevents nested mutable references leaking into the cache.
+        self._terminal_header_cache[sequence] = (bytes(encoded), stamp)
 
     def _terminal_header_cache_get(self, sequence: str) -> dict[str, Any] | None:
         entry = self._terminal_header_cache.get(sequence)
         if entry is None:
             return None
-        base, stamp = entry
+        snapshot, stamp = entry
         try:
             if self._receipt_stamp(self._path(sequence)) != stamp:
                 self._terminal_header_cache.pop(sequence, None)
@@ -341,7 +360,7 @@ class DurableResultStore:
             self._terminal_header_cache.pop(sequence, None)
             return None
         self._terminal_header_cache.move_to_end(sequence)
-        return dict(base)
+        return json.loads(snapshot)
     def _write(self, sequence: str, value: dict[str, Any], *, run_cleanup: bool = True) -> None:
         target = self._path(sequence)
         # Unique temp files avoid writers clobbering each other's staging file.
