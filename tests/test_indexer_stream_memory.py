@@ -88,3 +88,26 @@ def test_refresh_reads_changed_files_in_bounded_batches(tmp_path, monkeypatch):
         assert db.execute(
             "SELECT content FROM files WHERE path=?",("script_001.py",)
         ).fetchone()[0].startswith("def changed():")
+
+
+def test_full_refresh_resolves_trusted_root_only_once(tmp_path):
+    # Boundary checks still resolve every candidate path, but must not
+    # re-resolve the *same* workspace root thousands of times on cold scans.
+    for i in range(25):
+        (tmp_path/f"entry_{i:03d}.py").write_text(
+            f"def method_{i}():\n    return {i}\n",encoding="utf-8")
+    index=Indexer(tmp_path)
+    original_resolve=Path.resolve
+    trusted_root_resolutions=[]
+
+    def counted_resolve(path,*args,**kwargs):
+        if path==tmp_path:
+            trusted_root_resolutions.append(1)
+        return original_resolve(path,*args,**kwargs)
+
+    with patch.object(Path,"resolve",counted_resolve):
+        result=index.refresh(force=True)
+    assert result["indexed"]==25
+    assert len(trusted_root_resolutions)==1
+    with index._connect() as db:
+        assert db.execute("SELECT count(*) FROM files").fetchone()[0]==25
