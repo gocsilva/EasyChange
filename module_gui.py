@@ -173,12 +173,18 @@ class ModuleGUI:
         # Execute the installed package from the repository root; running a
         # nested .py file directly breaks absolute package imports on Python.
         module_entry=SERVICE[:-3].replace("/",".")
+        # Independent GUI services must never inherit a privileged MCP-host
+        # session or shutdown capability from their parent process.
+        child_env=os.environ.copy()
+        for key in ("MCP_MODULE_BUS_TOKEN","MCP_MODULE_BUS_URL",
+                    "MCP_MODULE_ID","MCP_MODULE_GUI_SHUTDOWN_TOKEN"):
+            child_env.pop(key,None)
         try:
             folder.mkdir(exist_ok=True)
             with (folder/(MODULE_ID+"-gui-service.log")).open("ab") as output:
                 self.process=subprocess.Popen([str(python),"-B","-m",module_entry],
                           cwd=ROOT,stdin=subprocess.DEVNULL,stdout=output,
-                          stderr=subprocess.STDOUT,**opts)
+                          stderr=subprocess.STDOUT,env=child_env,**opts)
         except (OSError,ValueError,subprocess.SubprocessError) as exc:
             # A missing/broken interpreter is a service startup failure, not
             # an uncaught Tk callback that makes the GUI appear frozen.
