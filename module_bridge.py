@@ -93,6 +93,10 @@ def _acquire_consumer_lease():
         metadata=os.fstat(fd)
         if not stat.S_ISREG(metadata.st_mode):
             raise RuntimeError("MCP_CONSUMER_LEASE_UNSAFE_TYPE")
+        # A hard-linked predictable lock may alias another resource. A
+        # single inode name is required for the per-module consumer lease.
+        if os.name=="posix" and metadata.st_nlink != 1:
+            raise RuntimeError("MCP_CONSUMER_LEASE_UNSAFE_LINKS")
         if os.name=="posix":
             # The shared temp filename is predictable. A pre-existing file
             # owned by another user or writable by peers must not become the
