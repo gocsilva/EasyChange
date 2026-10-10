@@ -1513,6 +1513,32 @@ def test_terminal_header_cache_isolates_nested_mutation_receipt(tmp_path):
     assert store.get(sequence)["mutation_receipt"]["nested"]["review"]=="approved"
 
 
+def test_header_cache_skips_oversized_nested_metadata_without_encoding(tmp_path, monkeypatch):
+    import easychange.core.result_store as result_module
+
+    store=DurableResultStore(tmp_path / "receipts")
+    sequence="QHEADERPRECHECK01"
+    digest="a"*64
+    store.mark_running(sequence,digest,":patch",mutation=True)
+    store.complete(
+        sequence,digest,":patch",
+        {"ok":True,"command":"patch","data":{},"sequence":sequence},
+        mutation_receipt={"state":"COMMITTED",
+                          "summary":{"nested":{"evidence":"Q"*4096}}})
+    store._terminal_header_cache.clear()
+
+    with monkeypatch.context() as ctx:
+        ctx.setattr(result_module,"MAX_CACHED_TERMINAL_HEADER_BYTES",256)
+        ctx.setattr(result_module.json.JSONEncoder,"iterencode",
+                    lambda *args,**kwargs: (_ for _ in ()).throw(
+                        AssertionError("CACHE_HEADER_ENCODER_RAN")))
+        # Header still comes from the authoritative receipt on cache miss.
+        # Its best-effort cache must not allocate the oversized JSON fragment.
+        header=store.header(sequence)
+        assert header["mutation_receipt"]["summary"]["nested"]["evidence"]=="Q"*4096
+        assert sequence not in store._terminal_header_cache
+
+
 def test_terminal_header_cache_skips_oversized_nested_receipt(tmp_path, monkeypatch):
     import easychange.core.result_store as store_module
 
