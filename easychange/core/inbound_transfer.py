@@ -69,7 +69,11 @@ class InboundCommandStore:
                 os.close(fd)
                 raise
             with handle:
-                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                identity=os.fstat(handle.fileno())
+                if (not stat.S_ISREG(identity.st_mode) or
+                        identity.st_nlink != 1):
+                    # A hard-linked lock could otherwise append a lock byte
+                    # into an unrelated file that shares the same inode.
                     raise InboundTransferError("INBOUND_UNSAFE_LOCK_TYPE")
                 handle.seek(0)
                 if sys.platform == "win32":
