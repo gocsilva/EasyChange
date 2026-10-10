@@ -375,7 +375,9 @@ class MCPBridge:
         payload={"ids":ids}
         for attempt in range(3):
             try:
-                return self._request("/v1/inbox/ack",payload)
+                # ACK is recipient-scoped and idempotent. Keep a stalled
+                # loopback hub from holding the consumer lease for 3 x 40s.
+                return self._request("/v1/inbox/ack",payload,timeout=8)
             except HTTPError as exc:
                 # A real HTTP rejection is not an uncertain transport outcome.
                 # Close its response rather than holding a rejected ACK socket.
