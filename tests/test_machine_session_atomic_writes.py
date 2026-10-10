@@ -106,6 +106,47 @@ def test_session_recovery_when_directory_fsync_is_unsupported(tmp_path,monkeypat
     assert MachineSession(target,"demo").data["line"]==42
 
 
+def test_oversized_saved_session_is_rejected_before_touching_existing_file(tmp_path,monkeypatch):
+    path=tmp_path/".easychange"/"session.json"
+    session=MachineSession(path,"demo")
+    session.save()
+    original=path.read_bytes()
+
+    monkeypatch.setattr(state_module,"MAX_MACHINE_SESSION_BYTES",256)
+    session.data["history"]=["A"*800]
+    with pytest.raises(ValueError,match="MACHINE_SESSION_TOO_LARGE"):
+        session.save()
+    assert path.read_bytes()==original
+    assert not list(path.parent.glob(".session.json.*.tmp"))
+    session.data["history"]=[]
+    session.save()
+    assert MachineSession(path,"demo").data["history"]==[]
+
+
+def test_oversized_untrusted_session_is_not_loaded_into_memory(tmp_path,monkeypatch):
+    path=tmp_path/".easychange"/"session.json"
+    path.parent.mkdir()
+    source=b'{"workspace":"demo","history":"' + b"x"*900 + b'"}'
+    path.write_bytes(source)
+    monkeypatch.setattr(state_module,"MAX_MACHINE_SESSION_BYTES",256)
+    session=MachineSession(path,"demo")
+    assert session.data["history"]==[]
+    assert session.data["workspace"]=="demo"
+    assert path.read_bytes()==source
+
+
+def test_session_bounded_json_preserves_multibyte_unicode(tmp_path,monkeypatch):
+    path=tmp_path/".easychange"/"session.json"
+    session=MachineSession(path,"demo")
+    session.data["current_file"]="arquivo-ação-漢字.cs"
+    session.save()
+    loaded=MachineSession(path,"demo")
+    assert loaded.data["current_file"]=="arquivo-ação-漢字.cs"
+    monkeypatch.setattr(state_module,"MAX_MACHINE_SESSION_BYTES",len(path.read_bytes())-1)
+    with pytest.raises(ValueError,match="MACHINE_SESSION_TOO_LARGE"):
+        session.save()
+
+
 @pytest.mark.parametrize("invalid",("[1,2]","null","false",'"text"'))
 def test_non_object_session_json_does_not_crash_workspace_start(tmp_path,invalid):
     target=tmp_path/".easychange"/"session.json"
