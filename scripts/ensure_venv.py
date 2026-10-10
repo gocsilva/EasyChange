@@ -67,7 +67,11 @@ def dependency_fingerprint(root: Path, install_spec: str = DEFAULT_INSTALL_SPEC)
         relative = path.relative_to(root).as_posix()
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        # Dependency lockfiles may be megabytes long. Their fingerprint is
+        # streamed for a stable digest without materializing each file.
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(128 * 1024), b""):
+                digest.update(block)
         digest.update(b"\0")
     return digest.hexdigest()
 
