@@ -1,6 +1,7 @@
 """Read EC2 optical receipts from HDMI frames; do not infer execution success from HID."""
 from __future__ import annotations
 import binascii
+import itertools
 import threading
 import time
 import zlib
@@ -216,7 +217,18 @@ def decode_hdmi_qr(frame) -> list[str]:
         multi=getattr(detector,"detectAndDecodeMulti",None)
         if callable(multi):
             ok, texts, _points, _rectified=multi(frame)
-            decoded=[value for value in texts if isinstance(value,str) and value] if ok and texts else []
+            decoded=[]
+            if ok and texts is not None and not isinstance(texts,(str,bytes,dict)):
+                try:
+                    # QR detectors normally yield a small sequence. Guard
+                    # against a malformed/streaming backend iterator that
+                    # could otherwise consume a frame polling thread forever.
+                    decoded=[value for value in itertools.islice(texts,32)
+                             if isinstance(value,str) and value]
+                except TypeError:
+                    # An unusable multi-QR response is not proof that the
+                    # single-QR decoder cannot recover this same frame.
+                    decoded=[]
         else:
             decoded=[]
         if not decoded:
