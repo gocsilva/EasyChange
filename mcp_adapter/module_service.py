@@ -134,6 +134,31 @@ class BoundedLocalHTTPServer(ThreadingHTTPServer):
         finally:
             self._client_slots.release()
 
+def _trusted_local_host(handler):
+    """Reject DNS-rebound hostnames on loopback-only standalone services.
+
+    Browser requests to an attacker domain can resolve to 127.0.0.1 without
+    an Origin header on same-origin GETs. A matching Host is required.
+    """
+    server=getattr(handler,"server",None)
+    if server is None:
+        # Unit tests drive uninitialized handlers without a bound server.
+        return True
+    try:
+        port=server.server_address[1]
+        if type(port) is not int or not 1<=port<=65535:
+            return False
+        headers=handler.headers
+        getter=getattr(headers,"get_all",None)
+        hosts=(getter("Host") or []) if callable(getter) else (
+            [headers.get("Host")] if headers.get("Host") is not None else [])
+        return len(hosts)==1 and type(hosts[0]) is str and (
+            hosts[0].strip().lower() in
+            ("127.0.0.1:"+str(port),"localhost:"+str(port)))
+    except (AttributeError,IndexError,KeyError,TypeError):
+        return False
+
+
 class Handler(BaseHTTPRequestHandler):
     def setup(self):
         # Bound idle socket I/O; this does not cap elapsed module work.
@@ -143,6 +168,8 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self,*args):
         pass
     def do_POST(self):
+        if not _trusted_local_host(self):
+            return self.send(403,{"error":"INVALID_HOST"})
         if self.path not in ("/v1/attach","/v1/detach"):
             return self.send(404,{"error":"NOT_FOUND"})
         if "Origin" in self.headers:
@@ -202,6 +229,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(503,{"error":"HUB_UNAVAILABLE"})
 
     def do_GET(self):
+        if not _trusted_local_host(self):
+            return self.send(403,{"error":"INVALID_HOST"})
         if self.path=="/hub":
             try:
                 from module_bridge import MCPBridge
