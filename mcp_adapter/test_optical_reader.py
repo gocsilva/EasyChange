@@ -811,6 +811,40 @@ class OpticalReaderTests(unittest.TestCase):
                 self.assertTrue(verified["verified"])
                 self.assertEqual(verified["payload"]["sequence"],"QIDENTITY01")
 
+    def test_ec2_ingest_rejects_excessive_frames_before_any_json_parse(self):
+        from unittest.mock import patch
+        from mcp_adapter import optical_reader as reader
+
+        assembler=OpticalAssembler()
+        with patch.object(reader,"MAX_EC2_INGEST_FRAME_LIMIT",2), \
+             patch.object(reader,"decode_ec2_packet_json",
+                          side_effect=AssertionError("JSON_WAS_PARSED")) as parse:
+            with self.assertRaisesRegex(ValueError,"EC2_INGEST_FRAME_LIMIT"):
+                assembler.ingest(["{}", "{}", "{}"])
+        parse.assert_not_called()
+        self.assertEqual(assembler.chunks,{})
+        self.assertEqual(assembler.sequence,"")
+
+    def test_ec2_ingest_text_budget_preserves_existing_verified_receipt(self):
+        from unittest.mock import patch
+        from mcp_adapter import optical_reader as reader
+
+        expected={"sequence":"QINGEST2026","ok":True,"data":{"text":"retained"}}
+        packets=encode_result_chunks(expected)
+        assembler=OpticalAssembler()
+        verified=assembler.ingest(packets)
+        self.assertTrue(verified["complete"])
+        self.assertEqual(verified["payload"]["sequence"],"QINGEST2026")
+        with patch.object(reader,"MAX_EC2_INGEST_TEXT_CHARS",4), \
+             patch.object(reader,"decode_ec2_packet_json",
+                          side_effect=AssertionError("JSON_WAS_PARSED")) as parse:
+            with self.assertRaisesRegex(ValueError,"EC2_INGEST_TEXT_LIMIT"):
+                assembler.ingest(packets)
+        parse.assert_not_called()
+        self.assertTrue(assembler.ingest([])["verified"])
+        self.assertEqual(assembler.ingest([])["payload"],verified["payload"])
+        self.assertEqual(assembler.ingest(packets)["payload"],verified["payload"])
+
     def test_untrusted_header_requires_real_boolean_completion(self):
         import json
         from easychange.core.result import Result
