@@ -203,3 +203,49 @@ def test_swagger_evidence_refuses_generic_200_before_writing_files(tmp_path):
     assert outcome["ok"] is False
     assert not service.evidence_root.exists()
     service._browser_screenshot.assert_not_called()
+
+
+def test_swagger_html_validator_rejects_keyword_only_login_and_index_pages():
+    validate=ProjectRuntimeService._swagger_document_valid
+    bad=(
+        b"<html><title>Login required for Swagger UI</title></html>",
+        b"<html><p>Redoc documentation is available after login</p></html>",
+        b"<html><a href='/swagger-ui'>Swagger UI docs</a></html>",
+        b"<html><script src='/analytics.js'></script>"
+        b"<p>SwaggerUIBundle(example) documentation text</p></html>",
+        b"<html><div id='login'>Use swagger-ui-bundle.js later</div></html>",
+    )
+    for sample in bad:
+        assert not validate({"body":sample}),sample
+    good=(
+        b"<html><div id='swagger-ui'></div></html>",
+        b'<html><section class="documentation" id = "swagger-ui"></section></html>',
+        b"<html><script src='/swagger-ui-bundle.js'></script></html>",
+        b'<html><script src="/swagger-ui-bundle.min.js?v=1"></script></html>',
+        b"<html><script>window.onload=function(){SwaggerUIBundle({});}</script></html>",
+        b"<html><redoc spec-url='/openapi.json'></redoc></html>",
+        b"<html><redocly-api-reference></redocly-api-reference></html>",
+    )
+    for sample in good:
+        assert validate({"body":sample}),sample
+
+
+def test_login_keyword_does_not_stop_swagger_candidate_discovery():
+    service=object.__new__(ProjectRuntimeService)
+    candidates=["http://127.0.0.1:5000/login",
+                "http://127.0.0.1:5000/swagger/index.html"]
+    visited=[]
+    response_bodies=[
+        b'<html><title>Login to Swagger UI</title><a href="/swagger-ui">docs</a></html>',
+        b"<html><div id='swagger-ui'></div></html>",
+    ]
+
+    def synthetic_probe(url,*,timeout):
+        visited.append(url)
+        return {"ok":True,"status":200,"url":url,"body":response_bodies[len(visited)-1]}
+
+    service._http_get=synthetic_probe
+    result=service.wait_for_http(candidates,timeout=2,require_swagger=True)
+    assert result["ok"] is True
+    assert result["url"]==candidates[1]
+    assert visited==candidates
