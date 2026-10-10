@@ -199,9 +199,17 @@ class DurableResultStore:
     def _read_compressed(path: Path) -> bytes:
         # read_bytes() allocates the complete file *before* _decode() can
         # reject a corrupt oversized receipt. Bound disk reads at source.
-        with path.open("rb") as stream:
-            raw = stream.read(MAX_COMPRESSED_RECEIPT_BYTES + 1)
-        if len(raw) > MAX_COMPRESSED_RECEIPT_BYTES:
+        # Check the actual opened file, not only a pathname inspected
+        # earlier by get(). On POSIX, O_NOFOLLOW prevents a symlink swap
+        # between the initial identity check and this disk read.
+        flags=(os.O_RDONLY|getattr(os,"O_BINARY",0)|
+               getattr(os,"O_NOFOLLOW",0))
+        fd=os.open(path,flags)
+        with os.fdopen(fd,"rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("RESULT_RECEIPT_UNSAFE_TYPE")
+            raw=stream.read(MAX_COMPRESSED_RECEIPT_BYTES+1)
+        if len(raw)>MAX_COMPRESSED_RECEIPT_BYTES:
             raise ValueError("RESULT_RECEIPT_COMPRESSED_TOO_LARGE")
         return raw
 
