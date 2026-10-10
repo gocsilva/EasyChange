@@ -809,6 +809,25 @@ def test_cdp_websocket_event_buffer_is_fifo_and_bounded():
     assert ws.drain_events(10) == []
 
 
+def test_cdp_terminal_reader_failure_closes_socket_and_unblocks_rpc(monkeypatch):
+    from unittest.mock import Mock
+
+    ws=_bare_async_websocket()
+    ws.sock=Mock()
+    ws._pending_ids.add(7)
+    monkeypatch.setattr(ws,"_recv_text",
+                        lambda: (_ for _ in ()).throw(
+                            browser_module.CdpError("INVALID_FRAME_BOUNDARY")))
+    ws._reader_loop()
+    ws.sock.close.assert_called_once_with()
+    assert "INVALID_FRAME_BOUNDARY" in (ws._reader_error or "")
+    with pytest.raises(browser_module.CdpError,match="CDP_WEBSOCKET_READER_FAILED"):
+        ws.call("Runtime.evaluate",timeout=0.1)
+    # The pending entry in this fixture represents a concurrent waiter; the
+    # reader reports the failure rather than purging an unrelated caller's ID.
+    assert ws._pending_ids=={7}
+
+
 def test_cdp_websocket_reader_collects_event_without_pump(monkeypatch):
     ws = _bare_async_websocket()
     values = iter([
