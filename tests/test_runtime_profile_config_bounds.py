@@ -143,9 +143,8 @@ def test_writer_keeps_malformed_existing_runtime_profiles_untouched(tmp_path):
     )
     for contents in cases:
         runtime.config_path.write_bytes(contents)
-        assert runtime._configured_profiles() == (
-            [_read for _read in runtime._configured_profiles()]
-        )  # tolerant discovery remains callable
+        # Browsing damaged state stays tolerant; writing must fail closed.
+        assert isinstance(runtime._configured_profiles(),list)
         with pytest.raises(ValueError,match="RUNTIME_PROFILE_CONFIG_"):
             runtime.configure_profile("new",run_argv=["python","--version"])
         assert runtime.config_path.read_bytes()==contents
