@@ -217,3 +217,30 @@ def test_update_path_purges_legacy_index_row_in_ignored_directory(tmp_path):
         assert db.execute(
             "SELECT count(*) FROM symbols WHERE path='node_modules/cached.py'"
         ).fetchone()[0]==0
+
+
+def test_warm_search_purges_file_replaced_by_external_symlink(tmp_path):
+    project=tmp_path/"project"
+    project.mkdir()
+    indexed=project/"indexed.py"
+    indexed.write_text("def EARLIER_SYMBOL(): pass\n",encoding="utf-8")
+    index=Indexer(project)
+    index.refresh(force=True)
+    assert index.search("EARLIER_SYMBOL")
+    indexed.unlink()
+    outside=tmp_path/"outside.py"
+    outside.write_text("def OUTSIDE_SYMBOL(): pass\n",encoding="utf-8")
+    try:
+        indexed.symlink_to(outside)
+    except (OSError,NotImplementedError):
+        pytest.skip("symlink unavailable")
+    assert index.search("EARLIER_SYMBOL")==[]
+    with index._connect() as db:
+        assert db.execute(
+            "SELECT count(*) FROM files WHERE path='indexed.py'").fetchone()[0]==0
+        assert db.execute(
+            "SELECT count(*) FROM symbols WHERE path='indexed.py'").fetchone()[0]==0
+    # The external file is never indexed by a subsequent full refresh either.
+    index.invalidate()
+    index.refresh(force=True)
+    assert index.search("OUTSIDE_SYMBOL")==[]
