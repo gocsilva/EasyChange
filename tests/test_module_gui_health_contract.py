@@ -90,6 +90,7 @@ def test_health_refresh_does_not_update_destroyed_gui():
     exec(compile(ast.Module(body=[node],type_ignores=[]),
                  "<standalone-module-class>","exec"),namespace)
     gui=object.__new__(namespace["ModuleGUI"])
+    gui._refresh_generation=0
     gui.root=Mock()
     gui.message=Mock()
     gui.stop=Mock()
@@ -140,6 +141,7 @@ def test_standalone_gui_launches_real_python_package_not_nested_script(tmp_path)
     exec(compile(ast.Module(body=[gui_class],type_ignores=[]),
                  "<standalone-package-start>","exec"),namespace)
     gui=object.__new__(namespace["ModuleGUI"])
+    gui._refresh_generation=0
     gui.process=None
     gui.message=Mock()
     gui.root=Mock()
@@ -186,6 +188,7 @@ def test_module_gui_startup_failures_stay_in_status_instead_of_raising(tmp_path)
     exec(compile(ast.Module(body=[klass],type_ignores=[]),
                  "<gui-service-launch>","exec"),namespace)
     gui=object.__new__(namespace["ModuleGUI"])
+    gui._refresh_generation=0
     gui.process=None
     gui.message=Mock()
     gui.root=Mock()
@@ -223,6 +226,7 @@ def test_repeated_gui_refreshes_are_single_flight(tmp_path):
     exec(compile(ast.Module(body=[klass],type_ignores=[]),
                  "<gui-refresh>","exec"),ns)
     gui=object.__new__(ns["ModuleGUI"])
+    gui._refresh_generation=0
     gui.root=Mock()
     gui.message=Mock()
     gui._closing=False
@@ -266,6 +270,7 @@ def test_failed_health_probe_releases_single_flight_after_tk_update():
     exec(compile(ast.Module(body=[klass],type_ignores=[]),
                  "<gui-health-error>","exec"),ns)
     gui=object.__new__(ns["ModuleGUI"])
+    gui._refresh_generation=0
     gui.root=Mock()
     gui.message=Mock()
     gui.process=None
@@ -292,6 +297,7 @@ def test_owned_process_is_reaped_and_failed_stop_keeps_gui_open():
     exec(compile(ast.Module(body=[klass],type_ignores=[]),
                  "<module-process-stop>","exec"),ns)
     gui=object.__new__(ns["ModuleGUI"])
+    gui._refresh_generation=0
     gui.root=Mock()
     gui.message=Mock()
     gui._closing=False
@@ -336,6 +342,7 @@ def test_owned_service_cold_start_keeps_polling_without_false_stopped_status():
     exec(compile(ast.Module(body=[klass],type_ignores=[]),
                  "<cold-start-poll>","exec"),ns)
     gui=object.__new__(ns["ModuleGUI"])
+    gui._refresh_generation=0
     gui.root=Mock()
     gui.message=Mock()
     gui._closing=False
@@ -395,6 +402,7 @@ def test_readiness_poll_is_single_timer_and_stops_after_ready_or_stop():
     exec(compile(ast.Module(body=[klass],type_ignores=[]),
                  "<bounded-gui-readiness>","exec"),ns)
     gui=object.__new__(ns["ModuleGUI"])
+    gui._refresh_generation=0
     gui.root=FakeTkRoot()
     gui.message=Mock()
     gui.process=Mock()
@@ -424,3 +432,56 @@ def test_readiness_poll_is_single_timer_and_stops_after_ready_or_stop():
     gui.stop()
     assert gui._readiness_job is None
     assert gui.root.pending=={}
+
+
+def test_late_health_probe_or_queued_callback_cannot_revive_stopped_gui():
+    """Two races: worker still running, or worker finished before Tk callback."""
+    from unittest.mock import Mock
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    klass=next(node for node in ast.parse(source).body
+               if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+    workers=[]
+    class DeferredThread:
+        def __init__(self,*,target,daemon):
+            self.target=target
+        def start(self):
+            workers.append(self.target)
+
+    namespace={
+        "threading":type("Threads",(),{"Thread":DeferredThread}),
+        "status":lambda:{"running":True},
+        "tk":type("Tk",(),{"TclError":RuntimeError}),
+    }
+    exec(compile(ast.Module(body=[klass],type_ignores=[]),
+                 "<stale-gui-health>","exec"),namespace)
+    gui=object.__new__(namespace["ModuleGUI"])
+    gui.root=Mock()
+    gui.message=Mock()
+    gui.process=None
+    gui._closing=False
+    gui._refresh_generation=0
+    gui._refresh_inflight=False
+    gui._readiness_job=None
+
+    # Stopping during outstanding I/O: the old generation cannot schedule Tk.
+    gui.refresh()
+    assert len(workers)==1
+    assert gui.stop() is True
+    calls_after_stop=gui.message.set.call_count
+    workers.pop()()
+    assert gui.root.after.call_count==0
+    assert gui.message.set.call_count==calls_after_stop
+
+    # Stopping after I/O but before Tk executes its queued UI callback.
+    gui.refresh()
+    assert len(workers)==1
+    workers.pop()()
+    assert gui.root.after.call_count==1
+    pending=gui.root.after.call_args.args[1]
+    assert gui.stop() is True
+    calls_after_stop=gui.message.set.call_count
+    pending()
+    assert gui.message.set.call_count==calls_after_stop
+    assert gui._refresh_inflight is False
