@@ -18,6 +18,19 @@ _MAX_BLOB_DECOMPRESSED_BYTES = 128 * 1024 * 1024
 _MAX_JOURNAL_RECORD_CHARS = 16 * 1024 * 1024
 
 
+def _bounded_journal_jsonl(value: dict) -> str:
+    """Never append a JSONL line that recovery will reject as oversized."""
+    encoded = []
+    chars = 1  # terminating newline counts toward readline()'s limit
+    writer = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+    for fragment in writer.iterencode(value):
+        chars += len(fragment)
+        if chars > _MAX_JOURNAL_RECORD_CHARS:
+            raise ValueError("JOURNAL_RECORD_TOO_LARGE")
+        encoded.append(fragment)
+    return "".join(encoded) + "\n"
+
+
 @dataclass(slots=True)
 class JournalEntry:
     change_id: str
@@ -229,9 +242,9 @@ class Journal:
     def record(self, command: str, path: str, before: str | None, after: str | None,
                transaction_id: str | None = None, source: str = "command") -> JournalEntry:
         with self._lock:
-            self._counter += 1
+            next_counter = self._counter + 1
             entry = JournalEntry(
-                f"CH{self._counter}",
+                f"CH{next_counter}",
                 self.session_id,
                 datetime.now(timezone.utc).isoformat(),
                 command,
@@ -244,8 +257,12 @@ class Journal:
                 source,
             )
             serialized = self._serialize_entry(entry)
+            line = _bounded_journal_jsonl(serialized)
             with self.path.open("a", encoding="utf-8", newline="\n") as stream:
-                stream.write(json.dumps(serialized, ensure_ascii=False, separators=(",", ":")) + "\n")
+                stream.write(line)
+                stream.flush()
+                os.fsync(stream.fileno())
+            self._counter = next_counter
             self._entries.append(self._compact_from_serialized(serialized))
             self._redo.clear()
             return entry
@@ -304,18 +321,12 @@ class Journal:
                 os.close(fd)
                 raise
             with stream:
-                stream.write(json.dumps(
+                stream.write(_bounded_journal_jsonl(
                     {"type": "meta", "counter": self._counter,
-                     "redo": [self._serialize_entry(entry) for entry in self._redo]},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ) + "\n")
+                     "redo": [self._serialize_entry(entry) for entry in self._redo]}))
                 for entry in self._entries:
-                    stream.write(json.dumps(
-                        self._serialize_entry(entry),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ) + "\n")
+                    stream.write(_bounded_journal_jsonl(
+                        self._serialize_entry(entry)))
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
