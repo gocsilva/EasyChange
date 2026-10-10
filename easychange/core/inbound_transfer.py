@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import errno
 from contextlib import contextmanager
 import hashlib
 import heapq
@@ -76,13 +77,28 @@ class InboundCommandStore:
                     # A hard-linked lock could otherwise append a lock byte
                     # into an unrelated file that shares the same inode.
                     raise InboundTransferError("INBOUND_UNSAFE_LOCK_TYPE")
-                handle.seek(0)
-                if sys.platform == "win32":
-                    import msvcrt
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                # Acquiring a lock must never block the HID command thread
+                # indefinitely. Native Windows LK_LOCK retries for ~10 s and
+                # plain POSIX flock(LOCK_EX) has no deadline at all.
+                deadline=time.monotonic()+5.0
+                while True:
+                    try:
+                        handle.seek(0)
+                        if sys.platform=="win32":
+                            import msvcrt
+                            msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
+                        else:
+                            import fcntl
+                            fcntl.flock(handle.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+                        break
+                    except OSError as exc:
+                        if (exc.errno not in (errno.EACCES,errno.EAGAIN,errno.EDEADLK)
+                                and getattr(exc,"winerror",None) not in (33,36)):
+                            raise InboundTransferError("INBOUND_LOCK_UNAVAILABLE") from exc
+                        remaining=deadline-time.monotonic()
+                        if remaining<=0:
+                            raise InboundTransferError("INBOUND_LOCK_BUSY") from exc
+                        time.sleep(min(0.05,remaining))
                 try:
                     handle.seek(0, os.SEEK_END)
                     if handle.tell() == 0:
@@ -90,8 +106,8 @@ class InboundCommandStore:
                         handle.flush()
                     yield
                 finally:
+                    handle.seek(0)
                     if sys.platform == "win32":
-                        handle.seek(0)
                         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
                     else:
                         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
