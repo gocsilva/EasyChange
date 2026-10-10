@@ -73,7 +73,10 @@ class HumanTextService:
                 stat=os.fstat(handle.fileno())
             # Hash and metadata must refer to one file generation; do not
             # publish old bytes with a replacement file's inode/timestamps.
-            current=self.path.stat()
+            try:
+                current=self.path.stat()
+            except FileNotFoundError as exc:
+                raise ValueError("HUMAN_TEXT_FILE_CHANGED_RETRY") from exc
             signature=lambda s:(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns)
             if signature(opened)!=signature(stat) or signature(stat)!=signature(current):
                 raise ValueError("HUMAN_TEXT_FILE_CHANGED_RETRY")
