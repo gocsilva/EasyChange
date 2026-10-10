@@ -225,6 +225,30 @@ def test_cleanup_retains_completed_mutation_claim_after_result_ttl(tmp_path, mon
     assert read_prior["result"] is None
 
 
+def test_invalid_optical_recovery_indexes_never_decode_existing_receipt(tmp_path, monkeypatch):
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        bad="9"*100000
+
+        def forbidden(*args,**kwargs):
+            raise AssertionError("INVALID_FRAME_INDEX_TRIGGERED_RESULT_DECODE")
+
+        monkeypatch.setattr(service.result_store,"result",forbidden)
+        for name,item in (
+            ("optical_chunk",{"chunk_index":bad}),
+            ("optical_chunks",{"chunk_indexes":[bad]}),
+            ("optical_chunk",{"chunk_index":True}),
+            ("optical_chunks",{"chunk_indexes":[0.9]}),
+            ("optical_chunks",{"chunk_indexes":[]}),
+        ):
+            reply=service._execute_structured({
+                "op":"operation","type":name,"sequence":"QSAFEOPTICAL01",**item})
+            assert reply.ok is False
+            assert reply.code=="INVALID_RESULT_CHUNK"
+    finally:
+        service.close()
+
+
 def test_optical_recovery_query_rejects_fractional_chunk_identifiers(tmp_path):
     service=CommandService(Workspace.open(tmp_path))
     try:
