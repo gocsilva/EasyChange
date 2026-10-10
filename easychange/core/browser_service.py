@@ -391,13 +391,24 @@ class _WebSocket:
             self._next_id += 1
             call_id = self._next_id
             self._pending_ids.add(call_id)
-        payload = json.dumps(
-            {"id": call_id, "method": method, "params": dict(params or {})},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
         try:
-            self._send_frame(payload)
+            # Reserve the call ID before writing, but keep serialization
+            # INSIDE finally: invalid/cyclic arguments must never strand an
+            # entry in _pending_ids. Stream the JSON under the same byte cap
+            # as outgoing WebSocket frames to avoid allocating a huge dump.
+            payload = bytearray()
+            encoder = json.JSONEncoder(
+                ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            request = {"id": call_id, "method": method,
+                       "params": dict(params or {})}
+            for part in encoder.iterencode(request):
+                if len(part) > MAX_CDP_WS_MESSAGE_BYTES:
+                    raise CdpError("CDP_WEBSOCKET_MESSAGE_TOO_LARGE")
+                raw = part.encode("utf-8")
+                if len(payload) + len(raw) > MAX_CDP_WS_MESSAGE_BYTES:
+                    raise CdpError("CDP_WEBSOCKET_MESSAGE_TOO_LARGE")
+                payload.extend(raw)
+            self._send_frame(bytes(payload))
             deadline = time.monotonic() + max(0.1, float(timeout))
             with self._response_ready:
                 while True:
