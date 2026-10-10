@@ -40,7 +40,15 @@ class Result:
             import json
             prefix = f"EC1 {self.sequence} " if self.sequence else ""
             if not self.ok:
-                essential = {"error": self.error, "code": self.code}
+                # Error text can include an entire provider traceback.
+                # Keep the EC1 error frame bounded and expose truncation.
+                message=self.error
+                was_truncated=isinstance(message,str) and len(message)>512
+                if was_truncated:
+                    message=message[:512]
+                essential = {"error": message, "code": self.code}
+                if was_truncated:
+                    essential["error_truncated"]=True
                 if self.data:
                     essential["keys"] = [str(k)[:80] for k in islice(self.data,12)]
                 details = json.dumps(essential, ensure_ascii=False, separators=(",", ":"))
