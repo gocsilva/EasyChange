@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import json
+import threading
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from urllib.request import ProxyHandler, HTTPRedirectHandler, build_opener
 from mcp_adapter.integration import module_status,capabilities
@@ -47,6 +48,35 @@ def _bounded_service_json(value):
             raise ValueError("MODULE_SERVICE_RESPONSE_TOO_LARGE")
         chunks.extend(raw)
     return bytes(chunks)
+
+class BoundedLocalHTTPServer(ThreadingHTTPServer):
+    """Cap live HTTP workers independently of the socket accept backlog."""
+    request_queue_size = 64
+    max_client_threads = 64
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self,*args,**kwargs):
+        self._client_slots=threading.BoundedSemaphore(self.max_client_threads)
+        super().__init__(*args,**kwargs)
+
+    def process_request(self,request,client_address):
+        if not self._client_slots.acquire(blocking=False):
+            # Never allocate a worker for an overloaded local status probe.
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request,client_address)
+        except BaseException:
+            self._client_slots.release()
+            self.shutdown_request(request)
+            raise
+
+    def process_request_thread(self,request,client_address):
+        try:
+            super().process_request_thread(request,client_address)
+        finally:
+            self._client_slots.release()
 
 class Handler(BaseHTTPRequestHandler):
     def setup(self):
@@ -136,7 +166,7 @@ def main(argv=None):
         raise ValueError("INVALID_PORT")
     if args.self_test:
         print(json.dumps(module_status()));return 0
-    with ThreadingHTTPServer(("127.0.0.1",args.port),Handler) as server:
+    with BoundedLocalHTTPServer(("127.0.0.1",args.port),Handler) as server:
         server.serve_forever()
     return 0
 
