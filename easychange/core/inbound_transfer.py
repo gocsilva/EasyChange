@@ -193,14 +193,26 @@ class InboundCommandStore:
 
     def _load_meta_locked(self, transfer_id: str) -> dict[str, Any]:
         path = self._meta_path(transfer_id)
+        if path.is_symlink():
+            raise InboundTransferError("INBOUND_TRANSFER_META_CORRUPT")
         if not path.exists():
             raise InboundTransferError(
                 "INBOUND_TRANSFER_NOT_FOUND",
                 data={"transfer_id": self._transfer_id(transfer_id)},
             )
         try:
-            with path.open("rb") as stream:
-                raw = stream.read(16 * 1024 + 1)
+            flags=(os.O_RDONLY|getattr(os,"O_BINARY",0)|
+                   getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_NONBLOCK",0))
+            fd=os.open(path,flags)
+            try:
+                stream=os.fdopen(fd,"rb")
+            except BaseException:
+                os.close(fd)
+                raise
+            with stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise ValueError("INBOUND_META_UNSAFE_TYPE")
+                raw=stream.read(16*1024+1)
             if len(raw) > 16 * 1024:
                 raise ValueError("INBOUND_META_TOO_LARGE")
             value = json.loads(raw)
