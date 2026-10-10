@@ -62,3 +62,22 @@ def test_control_preserves_size_cap_for_valid_numeric_headers():
     handler.send.assert_called_once_with(
         413,{"error":"PAYLOAD_TOO_LARGE"})
     handler.rfile.read.assert_not_called()
+
+
+@pytest.mark.parametrize("route", ("/v1/attach", "/v1/detach"))
+def test_control_rejects_duplicate_content_length_before_read(route):
+    from email.message import Message
+
+    headers=Message()
+    headers.add_header("Content-Type","application/json")
+    headers.add_header("Content-Length","2")
+    headers.add_header("Content-Length","3")
+    handler=object.__new__(Handler)
+    handler.path=route
+    handler.headers=headers
+    handler.rfile=Mock()
+    handler.send=Mock()
+    handler.do_POST()
+    handler.send.assert_called_once_with(
+        400,{"error":"INVALID_CONTENT_LENGTH"})
+    handler.rfile.read.assert_not_called()
