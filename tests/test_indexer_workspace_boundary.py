@@ -218,6 +218,81 @@ def test_update_path_rechecks_cross_process_exclusion_after_initial_sync(
         second.close()
 
 
+def test_incremental_file_hash_does_not_hold_sqlite_writer_reservation(
+        tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "Secret.py").write_text(
+        "def Hidden(): return 'MUST_NOT_BE_INDEXED'\n", encoding="utf-8"
+    )
+    reader = Indexer(root)
+    protector = Indexer(root)
+    original = reader._read_candidate
+    reached = []
+
+    def protect_during_file_scan(item, *, trusted_root=None):
+        # Another process must still be able to reserve the SQLite writer
+        # while this reader hashes source data outside that transaction.
+        with sqlite3.connect(reader.db_path, timeout=0.1) as concurrent:
+            concurrent.execute("BEGIN IMMEDIATE")
+            concurrent.execute("ROLLBACK")
+        data = original(item, trusted_root=trusted_root)
+        protector.protect_path("secret.py", scrub=False)
+        reached.append(True)
+        return data
+
+    monkeypatch.setattr(reader, "_read_candidate", protect_during_file_scan)
+    try:
+        result = reader.update_path("Secret.py")
+        assert result == {"path": "Secret.py", "ignored": True, "protected": True}
+        assert reached == [True]
+        with reader._connect() as db:
+            assert db.execute(
+                "SELECT path FROM files WHERE path = ?", ("Secret.py",)
+            ).fetchall() == []
+    finally:
+        reader.close()
+        protector.close()
+
+
+def test_incremental_reader_refuses_snapshot_changed_during_hash(
+        tmp_path, monkeypatch):
+    import os
+
+    root = tmp_path / "project"
+    root.mkdir()
+    path = root / "changing.py"
+    path.write_text("def old_symbol(): pass\n", encoding="utf-8")
+    index = Indexer(root)
+    original = index._read_candidate
+
+    def mutate_after_read(item, *, trusted_root=None):
+        result = original(item, trusted_root=trusted_root)
+        previous = path.stat()
+        path.write_text("def new_symbol(): pass\n", encoding="utf-8")
+        os.utime(
+            path,
+            ns=(previous.st_atime_ns, previous.st_mtime_ns + 2_000_000_000),
+        )
+        return result
+
+    monkeypatch.setattr(index, "_read_candidate", mutate_after_read)
+    try:
+        assert index.update_path("changing.py") == {
+            "path": "changing.py", "removed": True
+        }
+        with index._connect() as db:
+            assert db.execute(
+                "SELECT path FROM files WHERE path = ?", ("changing.py",)
+            ).fetchall() == []
+        monkeypatch.setattr(index, "_read_candidate", original)
+        assert index.update_path("changing.py")["updated"] is True
+        assert index.symbols(name="new_symbol")
+        assert index.symbols(name="old_symbol") == []
+    finally:
+        index.close()
+
+
 def test_corrupt_persisted_protection_metadata_fails_closed(tmp_path):
     root=tmp_path/"project"
     root.mkdir()
