@@ -340,6 +340,13 @@ def encode_result_chunks(
     indexes: list[int] | tuple[int, ...] | None = None,
 ) -> list[str]:
     """Encode only the EC2 packet window/indexes that are actually needed."""
+    # Remote retransmission parameters can be invalid even for an otherwise
+    # valid 16 MiB result. Reject malformed index containers before the
+    # expensive JSON/zlib preparation stage.
+    if indexes is not None and (
+            not isinstance(indexes,(list,tuple))
+            or len(indexes)>MAX_EC2_PACKETS):
+        raise ValueError("OPTICAL_CHUNK_INDEX_REQUEST_TOO_LARGE")
     _value, _raw, token, size, total, digest, crc, sequence, literal_marker = _transport_components(
         result, chunk_chars=chunk_chars
     )
@@ -350,8 +357,6 @@ def encode_result_chunks(
         # Index requests may originate from remote optical retransmissions.
         # Bound the raw input and use O(1) deduplication instead of a growing
         # list membership scan (O(n^2) on long sparse windows).
-        if not isinstance(indexes, (list, tuple)) or len(indexes) > MAX_EC2_PACKETS:
-            raise ValueError("OPTICAL_CHUNK_INDEX_REQUEST_TOO_LARGE")
         selected: list[int] = []
         seen: set[int] = set()
         for raw_index in indexes:
