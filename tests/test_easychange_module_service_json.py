@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from mcp_adapter.module_service import Handler
+from mcp_adapter.module_service import Handler, BoundedLocalHTTPServer
 import mcp_adapter.module_service as module_service
 from unittest.mock import patch
 
@@ -73,3 +73,56 @@ def test_socket_deadline_is_set_before_base_http_setup():
         instance.setup()
     instance.request.settimeout.assert_called_once_with(12.0)
     base_setup.assert_called_once_with()
+
+
+def test_local_server_overload_never_spawns_more_workers():
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    server=object.__new__(BoundedLocalHTTPServer)
+    server._client_slots=threading.BoundedSemaphore(1)
+    server.shutdown_request=Mock()
+    with patch.object(ThreadingHTTPServer,"process_request") as dispatch:
+        server.process_request("first",("127.0.0.1",10001))
+        dispatch.assert_called_once_with("first",("127.0.0.1",10001))
+        server.process_request("second",("127.0.0.1",10002))
+        dispatch.assert_called_once()
+    server.shutdown_request.assert_called_once_with("second")
+
+    with patch.object(ThreadingHTTPServer,"process_request_thread") as process:
+        server.process_request_thread("first",("127.0.0.1",10001))
+    process.assert_called_once_with("first",("127.0.0.1",10001))
+    with patch.object(ThreadingHTTPServer,"process_request") as dispatch:
+        server.process_request("third",("127.0.0.1",10003))
+        dispatch.assert_called_once_with("third",("127.0.0.1",10003))
+
+
+def test_local_server_failed_worker_start_returns_slot_and_closes_socket():
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    server=object.__new__(BoundedLocalHTTPServer)
+    server._client_slots=threading.BoundedSemaphore(1)
+    server.shutdown_request=Mock()
+    with patch.object(ThreadingHTTPServer,"process_request",
+                      side_effect=RuntimeError("WORKER_START_FAILED")):
+        with pytest.raises(RuntimeError,match="WORKER_START_FAILED"):
+            server.process_request("socket",("127.0.0.1",10004))
+    server.shutdown_request.assert_called_once_with("socket")
+    assert server._client_slots.acquire(blocking=False)
+    server._client_slots.release()
+
+
+def test_local_server_failed_handler_releases_capacity():
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    server=object.__new__(BoundedLocalHTTPServer)
+    server._client_slots=threading.BoundedSemaphore(1)
+    assert server._client_slots.acquire(blocking=False)
+    with patch.object(ThreadingHTTPServer,"process_request_thread",
+                      side_effect=OSError("BROKEN_PIPE")):
+        with pytest.raises(OSError,match="BROKEN_PIPE"):
+            server.process_request_thread("socket",("127.0.0.1",10005))
+    assert server._client_slots.acquire(blocking=False)
+    server._client_slots.release()
