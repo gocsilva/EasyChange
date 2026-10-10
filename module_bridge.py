@@ -9,6 +9,7 @@ import json
 import itertools
 import math
 import os
+import stat
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request,build_opener,HTTPRedirectHandler,ProxyHandler
@@ -78,16 +79,23 @@ def _acquire_consumer_lease():
     second-inode race. A crashed process releases its file descriptor.
     """
     path=_consumer_lease_path()
+    # The predictable lock path is in the OS temp directory. Never acquire a
+    # lock on a symlink, directory, FIFO or device supplied by another process.
+    # O_NOFOLLOW closes the symlink race on platforms that provide it.
+    if os.path.islink(path):
+        raise RuntimeError("MCP_CONSUMER_LEASE_UNSAFE_PATH")
     flags=os.O_CREAT|os.O_RDWR|getattr(os,"O_BINARY",0)|getattr(os,"O_NOFOLLOW",0)
     try:
         fd=os.open(path,flags,0o600)
     except OSError as exc:
         raise RuntimeError("MCP_CONSUMER_LEASE_UNAVAILABLE") from exc
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimeError("MCP_CONSUMER_LEASE_UNSAFE_TYPE")
         lease=os.fdopen(fd,"r+b",buffering=0)
     except BaseException:
-        # os.open() succeeded, but fdopen() did not assume ownership.
-        # Never leak a live OS descriptor or leave the lease ambiguous.
+        # The opened descriptor still belongs to this scope if fdopen fails
+        # or the opened object is not a regular file.
         os.close(fd)
         raise
     try:
