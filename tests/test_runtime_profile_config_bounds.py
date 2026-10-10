@@ -123,3 +123,47 @@ def test_runtime_profile_replacement_stays_owner_only_on_posix(tmp_path):
     if os.name=="posix":
         assert stat.S_IMODE(runtime.config_path.stat().st_mode)==0o600
     assert not list(root.glob(".runtime_profiles.json.*.tmp"))
+
+
+def test_writer_refuses_unreadable_oversized_config_without_replacing_old(
+        tmp_path):
+    import pytest
+
+    root=tmp_path/".easychange"
+    root.mkdir()
+    runtime=object.__new__(ProjectRuntimeService)
+    runtime.workspace=SimpleNamespace(root_path=tmp_path)
+    runtime.config_path=root/"runtime_profiles.json"
+    runtime.resolve_environment=lambda *_a,**_k: (
+        {},{"resolved_env_keys":[],"unresolved_env_refs":[]})
+    runtime.configure_profile("first",run_argv=["python","--version"])
+    old=runtime.config_path.read_bytes()
+
+    # Simulate merging a large historical profile without first materializing
+    # a large file on disk. Streaming must terminate at the parser's budget.
+    historical={"id":"legacy","env":{"LONG":"L"*1_100_000}}
+    with patch.object(runtime,"_configured_profiles",return_value=[historical]):
+        with pytest.raises(ValueError,match="RUNTIME_PROFILE_CONFIG_TOO_LARGE"):
+            runtime.configure_profile("second",test_argv=["python","-m","pytest"])
+    assert runtime.config_path.read_bytes()==old
+    assert not list(root.glob(".runtime_profiles.json.*.tmp"))
+
+
+def test_writer_refuses_more_profiles_than_reader_would_admit(tmp_path):
+    import pytest
+
+    root=tmp_path/".easychange"
+    root.mkdir()
+    runtime=object.__new__(ProjectRuntimeService)
+    runtime.workspace=SimpleNamespace(root_path=tmp_path)
+    runtime.config_path=root/"runtime_profiles.json"
+    runtime.resolve_environment=lambda *_a,**_k: (
+        {},{"resolved_env_keys":[],"unresolved_env_refs":[]})
+    runtime.configure_profile("first",run_argv=["python","--version"])
+    old=runtime.config_path.read_bytes()
+    existing=[{"id":f"old-{index}"} for index in range(256)]
+    with patch.object(runtime,"_configured_profiles",return_value=existing):
+        with pytest.raises(ValueError,match="RUNTIME_PROFILE_CONFIG_TOO_LARGE"):
+            runtime.configure_profile("new",build_argv=["dotnet","build"])
+    assert runtime.config_path.read_bytes()==old
+    assert not list(root.glob(".runtime_profiles.json.*.tmp"))
