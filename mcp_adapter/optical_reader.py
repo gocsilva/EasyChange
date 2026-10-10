@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 _qr_detectors = threading.local()
 
 from easychange.remote.optical_protocol import (
-    decode_result_chunks, decode_ec2_packet_json, MAX_EC2_PACKETS,
+    decode_result_chunks, decode_ec2_packet_json, valid_ec2_identity, MAX_EC2_PACKETS,
     MAX_EC2_PACKET_TEXT_CHARS, MAX_EC2_TOKEN_CHARS,
 )
 
@@ -90,7 +90,11 @@ class OpticalAssembler:
                             self.header=item
                     continue
                 if tag!="EC2":continue
-                seq=str(item.get("s") or "")
+                # Do not let corrupt transfer metadata occupy the first slot:
+                # a later authentic retransmission must remain admissible.
+                if not valid_ec2_identity(item):
+                    continue
+                seq=item["s"]
                 index=item.get("i"); count=item.get("n")
                 if (not seq or type(count) is not int or
                         count<1 or count>MAX_EC2_PACKETS or
