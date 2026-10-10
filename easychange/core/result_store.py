@@ -117,8 +117,14 @@ class DurableResultStore:
                         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _path(self, sequence: str) -> Path:
-        safe = "".join(ch for ch in sequence.upper() if ch.isalnum() or ch in "_-")
-        if not safe or safe != sequence.upper():
+        # Unicode uppercasing is not injective (e.g. 'Qß' and 'QSS' both
+        # become 'QSS'), which could alias two distinct durable executions
+        # to one receipt. Validate raw ASCII before normalizing the filename.
+        if (not isinstance(sequence,str) or not 1<=len(sequence)<=128
+                or not sequence.isascii()):
+            raise ValueError("INVALID_RESULT_SEQUENCE")
+        safe=sequence.upper()
+        if any(not (ch.isalnum() or ch in "_-") for ch in safe):
             raise ValueError("INVALID_RESULT_SEQUENCE")
         return self.root / f"{safe}.json.zlib"
 
