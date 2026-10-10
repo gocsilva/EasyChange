@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import secrets
 import tempfile
@@ -10,10 +11,21 @@ from pathlib import Path
 MAX_MACHINE_SESSION_BYTES = 16 * 1024 * 1024
 
 
+def _finite_session_number(token: str) -> float:
+    number = float(token)
+    if not math.isfinite(number):
+        raise ValueError("MACHINE_SESSION_NONFINITE_JSON")
+    return number
+
+
+def _reject_session_constant(_token: str):
+    raise ValueError("MACHINE_SESSION_NONFINITE_JSON")
+
+
 def _bounded_session_json(value: dict) -> bytes:
     """Do not create a session file that the bounded loader cannot reopen."""
     output = bytearray()
-    encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+    encoder = json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     for fragment in encoder.iterencode(value):
         if len(fragment) > MAX_MACHINE_SESSION_BYTES - len(output):
             raise ValueError("MACHINE_SESSION_TOO_LARGE")
@@ -40,7 +52,9 @@ class MachineSession:
                     raw = stream.read(MAX_MACHINE_SESSION_BYTES + 1)
                 if len(raw) > MAX_MACHINE_SESSION_BYTES:
                     raise ValueError("MACHINE_SESSION_TOO_LARGE")
-                loaded = json.loads(raw.decode("utf-8"))
+                loaded = json.loads(
+                    raw.decode("utf-8"), parse_constant=_reject_session_constant,
+                    parse_float=_finite_session_number)
                 if isinstance(loaded, dict) and loaded.get("workspace") == workspace:
                     # A valid JSON object is not necessarily a valid session.
                     # Corrupt or externally edited nested fields must not
