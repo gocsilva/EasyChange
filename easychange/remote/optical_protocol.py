@@ -98,6 +98,12 @@ def _json_equal_with_types(left: Any, right: Any) -> bool:
     pending.extend(zip(...)) copies one pair for each element of a wide result
     before the optical byte-budget check, unnecessarily spiking peak memory.
     """
+    def mapping_pairs(source: dict, destination: dict):
+        # Bind the destination to this iterator, not the outer-loop "rhs"
+        # variable (which changes as child scalars are compared).
+        for key, value in source.items():
+            yield value, destination[key]
+
     stack = [(iter(((left, right),)), None)]
     ancestors: set[tuple[int, int]] = set()
     while stack:
@@ -120,7 +126,7 @@ def _json_equal_with_types(left: Any, right: Any) -> bool:
             if pair in ancestors:
                 continue
             ancestors.add(pair)
-            stack.append(((value, rhs[key]) for key, value in lhs.items()), pair)
+            stack.append((mapping_pairs(lhs, rhs), pair))
         elif isinstance(lhs, list):
             if len(lhs) != len(rhs):
                 return False
