@@ -334,3 +334,29 @@ def test_configure_profile_does_not_save_nonlist_url_collections(tmp_path):
         with pytest.raises(ValueError,match="INVALID_RUNTIME_URLS"):
             service.configure_profile("bad",urls=invalid)
         assert service.config_path.read_bytes()==before
+
+
+def test_nonfinite_historical_profile_is_never_silently_rewritten(tmp_path):
+    import pytest
+
+    root=tmp_path/".easychange"
+    root.mkdir()
+    path=root/"runtime_profiles.json"
+    service=object.__new__(ProjectRuntimeService)
+    service.workspace=SimpleNamespace(root_path=tmp_path)
+    service.config_path=path
+    service.resolve_environment=lambda *_a,**_kw: (
+        {},{"resolved_env_keys":[],"unresolved_env_refs":[]})
+
+    for token in ("NaN","Infinity","-Infinity"):
+        original=(
+            '{"profiles":[{"id":"legacy","kind":'+token+'}]}'
+        ).encode("utf-8")
+        path.write_bytes(original)
+        # Discovery fails closed rather than exposing impossible JSON values.
+        assert service._configured_profiles()==[]
+        # A writer must refuse to overwrite an unreadable existing document.
+        with pytest.raises(ValueError,match="RUNTIME_PROFILE_CONFIG_UNREADABLE"):
+            service.configure_profile("new",run_argv=["python","--version"])
+        assert path.read_bytes()==original
+        assert not list(root.glob(".runtime_profiles.json.*.tmp"))
