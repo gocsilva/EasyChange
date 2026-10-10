@@ -84,3 +84,24 @@ def test_failure_to_start_drain_thread_reaps_wsl_child(monkeypatch):
     assert process.killed is True
     assert process.wait_calls==[3]
     assert process.stdout.closed and process.stderr.closed
+
+
+def test_failed_wsl_wait_attempts_reap_before_reporting_error(monkeypatch):
+    service=UbuntuService(None)
+    monkeypatch.setattr(service,"_wsl_argv",
+                        lambda session, argv:["wsl.exe","--exec",*argv])
+    process=FakeWSLProcess(stdout=b"partial",stderr=b"")
+    def wait_failure(timeout=None):
+        process.wait_calls.append(timeout)
+        if len(process.wait_calls)==1:
+            raise OSError("WAIT_INTERRUPTED")
+        return 0
+    monkeypatch.setattr(process,"wait",wait_failure)
+    with patch("easychange.core.ubuntu_service.subprocess.Popen",
+               return_value=process):
+        with pytest.raises(UbuntuError,match="UBUNTU_PROCESS_WAIT_FAILED"):
+            service._run_sync(None,["kubectl","get","pods"],
+                              timeout=2,max_bytes=1024)
+    assert process.killed is True
+    assert process.wait_calls==[2,3]
+    assert process.stdout.closed and process.stderr.closed
