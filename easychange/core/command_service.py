@@ -584,10 +584,25 @@ class CommandService:
                                   code="SEQUENCE_CONFLICT", sequence=sequence)
                 cached = self._ec_result_cache.get(sequence)
                 if previous.get("state") == "DONE" and cached is not None:
-                    replay = Result(**cached.to_dict())
+                    # Cached legacy state can be malformed after an older
+                    # runtime upgrade; never treat a broken DONE record as
+                    # authority to execute or rewrite the same mutation.
+                    try:
+                        replay = Result(**cached.to_dict())
+                        if (type(replay.ok) is not bool
+                                or not isinstance(replay.command,str)
+                                or not isinstance(replay.data,dict)):
+                            raise ValueError("MALFORMED_CACHED_LEGACY_RESULT")
+                    except (AttributeError,TypeError,ValueError,RecursionError):
+                        return Result(
+                            False, "ec",
+                            error="Completed sequence has no replayable result",
+                            code="SEQUENCE_RESULT_MISSING", sequence=sequence,
+                            data={"state":"DONE","duplicate":True},
+                        )
                     replay.sequence = sequence
-                    replay.data = {**(replay.data or {}), "duplicate": True}
-                    receipt = replay.data.get("mutation_receipt") if isinstance(replay.data, dict) else None
+                    replay.data = {**replay.data, "duplicate": True}
+                    receipt = replay.data.get("mutation_receipt")
                     _record, refusal = _claim_durable()
                     if refusal is not None:
                         return refusal
