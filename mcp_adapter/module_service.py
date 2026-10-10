@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import threading
+from urllib.error import HTTPError
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from urllib.request import ProxyHandler, HTTPRedirectHandler, build_opener
 from mcp_adapter.integration import module_status,capabilities
@@ -107,6 +108,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200,detach_hub(token))
         except (ValueError,TypeError,PermissionError) as exc:
             return self.send(403,{"error":type(exc).__name__})
+        except HTTPError as exc:
+            # A reachable MCP rejected the bearer; do not misreport this as
+            # an offline host, which would encourage unsafe retry loops.
+            if exc.code in (401,403):
+                return self.send(403,{"error":"HUB_CREDENTIAL_REJECTED"})
+            return self.send(503,{"error":"HUB_UNAVAILABLE"})
         except (ImportError,OSError,RuntimeError):
             # Do not strand attach callers when MCP is offline or times out.
             # Keep the credential/error internals out of the HTTP response.
