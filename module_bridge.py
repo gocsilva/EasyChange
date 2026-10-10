@@ -415,14 +415,17 @@ class MCPBridge:
                     raise exc
                 time.sleep(min(0.5,0.025*(2**attempt),remaining))
 
-    def receive(self):
-        """Non-destructive read with a bounded local mailbox probe.
+    def receive(self, limit=20):
+        """Non-destructive bounded read; fetch only the consumer's page size.
 
-        process_pending() holds the cross-process consumer lease while this
-        runs. Never pin a standalone module for the generic 40-second RPC
-        timeout merely because the hub is unavailable.
+        The hub accepts ?limit=N and performs fewer deep copies/JSON bytes
+        when a caller is intentionally ACKing one message at a time.
         """
-        return self._request("/v1/inbox/peek",timeout=8)
+        if type(limit) is not int or not 1<=limit<=20:
+            raise ValueError("INVALID_LIMIT")
+        path=("/v1/inbox/peek" if limit==20
+              else "/v1/inbox/peek?limit="+str(limit))
+        return self._request(path,timeout=8)
 
     def ack(self, ids):
         """Confirm delivery with a bounded retry only for transport failure.
@@ -477,7 +480,7 @@ class MCPBridge:
         lease=None
         try:
             lease=_acquire_consumer_lease()
-            page=self.receive()
+            page=(self.receive() if limit==20 else self.receive(limit=limit))
             if (not isinstance(page,dict) or page.get("ok") is not True or
                     page.get("requires_ack") is not True):
                 raise ValueError("MCP_REQUIRES_NONDESTRUCTIVE_INBOX")
