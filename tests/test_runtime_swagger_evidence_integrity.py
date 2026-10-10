@@ -53,3 +53,43 @@ def test_http_only_evidence_can_succeed_when_no_screenshot_requested(tmp_path):
     assert result["screenshot_requested"] is False
     assert result["screenshot_captured"] is False
     assert "error" not in result
+
+
+def test_a_returned_path_without_png_file_is_not_a_screenshot(tmp_path):
+    service=_service(tmp_path/"missing-image")
+    # A buggy browser adapter can return its planned target even if capture
+    # failed before any bytes were written.
+    service._browser_screenshot=lambda _url,target: target
+    result=service.swagger_evidence(
+        process_id="test-no-process",screenshot=True,start_if_needed=False)
+    assert result["ok"] is False
+    assert result["screenshot_captured"] is False
+    assert result["screenshot_file"] is None
+
+
+def test_empty_image_is_not_visual_evidence(tmp_path):
+    service=_service(tmp_path/"empty-image")
+    def empty_capture(_url,target):
+        target.write_bytes(b"")
+        return target
+    service._browser_screenshot=empty_capture
+    result=service.swagger_evidence(
+        process_id="test-no-process",screenshot=True,start_if_needed=False)
+    assert result["ok"] is False
+    assert result["error"]=="SWAGGER_SCREENSHOT_NOT_CAPTURED"
+
+
+def test_existing_png_signature_is_accepted_as_visual_evidence(tmp_path):
+    service=_service(tmp_path/"saved-image")
+    def png_capture(_url,target):
+        target.write_bytes(b"\x89PNG\r\n\x1a\n" + b"synthetic-test-bytes")
+        return target
+    service._browser_screenshot=png_capture
+    result=service.swagger_evidence(
+        process_id="test-no-process",screenshot=True,start_if_needed=False)
+    assert result["ok"] is True
+    assert result["http_verified"] is True
+    assert result["screenshot_requested"] is True
+    assert result["screenshot_captured"] is True
+    assert result["screenshot_file"]
+    assert (service.workspace.root_path/result["screenshot_file"]).is_file()
