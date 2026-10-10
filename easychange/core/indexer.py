@@ -557,6 +557,16 @@ class Indexer:
             rows.append((relative, parts[1] + ":" + parts[2]))
         return rows
 
+    @classmethod
+    def _literal_prefix_filter(cls, prefix: str, path_column: str) -> tuple[str, list[str]]:
+        # Percent, underscore and the escape character in directory names
+        # are literal path bytes, not wildcard operators.
+        normalized=cls._normalize_relative_path(prefix)
+        escaped=(normalized.casefold().replace("!", "!!")
+                 .replace("%", "!%").replace("_", "!_"))
+        return (f"(lower({path_column}) = ? OR lower({path_column}) LIKE ? ESCAPE '!')",
+                [normalized.casefold(), escaped + "/%"])
+
     def _candidate_rows(self, query: str, *, regex: bool, extension: str | None,
                         path_prefix: str | None) -> list[tuple[str, str, int, int]]:
         if self._fts_enabled and not regex and len(query) >= 3:
@@ -566,8 +576,9 @@ class Indexer:
                 clauses.append("f.extension = ?")
                 params.append(extension if extension.startswith(".") else "." + extension)
             if path_prefix:
-                clauses.append("lower(f.path) LIKE ?")
-                params.append(path_prefix.replace("\\", "/").casefold().rstrip("/") + "%")
+                clause, values=self._literal_prefix_filter(path_prefix,"f.path")
+                clauses.append(clause)
+                params.extend(values)
             sql = """SELECT f.path,f.content,f.size,f.mtime_ns
                      FROM files f JOIN files_fts ON files_fts.path=f.path
                      WHERE """ + " AND ".join(clauses)
@@ -583,8 +594,9 @@ class Indexer:
             clauses.append("extension = ?")
             params.append(extension if extension.startswith(".") else "." + extension)
         if path_prefix:
-            clauses.append("lower(path) LIKE ?")
-            params.append(path_prefix.replace("\\", "/").casefold().rstrip("/") + "%")
+            clause, values=self._literal_prefix_filter(path_prefix,"path")
+            clauses.append(clause)
+            params.extend(values)
         if not regex:
             clauses.append("instr(lower(content), ?) > 0")
             params.append(query.casefold())
