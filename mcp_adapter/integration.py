@@ -1,6 +1,7 @@
 """Model-free metadata for EasyChange's physical HID/HDMI MCP plugin."""
 from __future__ import annotations
 from pathlib import Path
+from functools import lru_cache
 import tomllib
 from easychange.core.operation_registry import (
     structured_capabilities, structured_operation_profile,
@@ -9,11 +10,21 @@ from easychange.core.operation_registry import (
 
 ROOT=Path(__file__).resolve().parents[1]
 
-def module_status(*, esp_enabled: bool = False) -> dict:
-    with (ROOT/"pyproject.toml").open("rb") as handle:
+@lru_cache(maxsize=8)
+def _project_version(path: str, modified_ns: int, size: int) -> str:
+    # Polling /status should not parse TOML on every refresh. File metadata
+    # invalidates the small cache for editable-development installs.
+    del modified_ns, size
+    with Path(path).open("rb") as handle:
         project=tomllib.load(handle).get("project",{})
+    return str(project.get("version","unknown"))
+
+def module_status(*, esp_enabled: bool = False) -> dict:
+    manifest=ROOT/"pyproject.toml"
+    metadata=manifest.stat()
+    version=_project_version(str(manifest),metadata.st_mtime_ns,metadata.st_size)
     return {"installed":True,"module_root":str(ROOT),
-            "version":str(project.get("version","unknown")),
+            "version":version,
             "physical_transport":"ESP HID + HDMI EC2",
             "esp_selected":bool(esp_enabled),
             "session_ready":False,
