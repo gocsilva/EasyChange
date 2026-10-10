@@ -1,6 +1,7 @@
 """Read-only EasyChange module bridge, independent of MCP/ESP for standalone GUI."""
 from __future__ import annotations
 import argparse
+import itertools
 import json
 import math
 import threading
@@ -82,7 +83,9 @@ def _validate_service_json_tree(value):
                 # Python's encoder turns 1 and "1" into duplicate JSON names.
                 if any(type(key) is not str for key in item):
                     raise ValueError("INVALID_SERVICE_RESPONSE")
-                children=iter(item.values())
+                # JSON object keys are part of the response byte budget too.
+                # Reject oversized names before JSONEncoder allocates them.
+                children=itertools.chain(item.keys(),item.values())
             else:
                 children=iter(item)
             ancestors.add(identity)
