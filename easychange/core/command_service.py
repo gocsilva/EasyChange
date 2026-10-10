@@ -4714,6 +4714,11 @@ class CommandService:
                     "change_id": change.change_id,
                     "command": change.command,
                 }, ensure_ascii=False, separators=(",", ":")) + "\n")
+            # Only one flush/fsync per save batch, never per line. A successful
+            # mutation must not return while its rollback journal is merely
+            # buffered in user space or the OS page cache.
+            stream.flush()
+            os.fsync(stream.fileno())
         self._transaction_persisted_count = len(self.transaction)
 
     def _clear_transaction(self) -> None:
