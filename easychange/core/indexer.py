@@ -625,15 +625,32 @@ class Indexer:
         # non-Git workspaces pay for one explicit refresh on a miss.
         stale_paths: list[str] = []
         for file_path, _, indexed_size, indexed_mtime in rows:
+            target = self.root / Path(file_path)
             try:
-                stat = (self.root / Path(file_path)).stat()
-            except OSError:
+                if (target.is_symlink() or
+                        not target.resolve().is_relative_to(self.root.resolve())):
+                    stale_paths.append(file_path)
+                    continue
+                stat = target.stat()
+            except (OSError, RuntimeError):
                 stale_paths.append(file_path)
                 continue
             if stat.st_size != indexed_size or stat.st_mtime_ns != indexed_mtime:
                 stale_paths.append(file_path)
         for file_path in stale_paths:
-            self.update_path(file_path)
+            try:
+                self.update_path(file_path)
+            except ValueError as exc:
+                if str(exc) != "INVALID_PROTECTED_INDEX_PATH":
+                    raise
+                # The formerly indexed path may have become a symlink outside
+                # the workspace. Remove stale content instead of following it
+                # or crashing a normal search request.
+                with self._lock, self._connect() as db:
+                    db.execute("DELETE FROM files WHERE path=?", (file_path,))
+                    db.execute("DELETE FROM symbols WHERE path=?", (file_path,))
+                    if self._fts_enabled:
+                        db.execute("DELETE FROM files_fts WHERE path=?", (file_path,))
         if stale_paths:
             rows = self._candidate_rows(query, regex=regex, extension=extension, path_prefix=path_prefix)
         elif not rows:
