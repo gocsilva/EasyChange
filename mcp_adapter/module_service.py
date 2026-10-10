@@ -34,7 +34,26 @@ def _unique_service_fields(pairs):
         fields[name]=value
     return fields
 
+MAX_SERVICE_RESPONSE_BYTES = 2 * 1024 * 1024
+
+def _bounded_service_json(value):
+    """Stream-encode standalone HTTP responses with a strict UTF-8 byte cap."""
+    chunks=bytearray()
+    for piece in json.JSONEncoder(ensure_ascii=False,allow_nan=False).iterencode(value):
+        if len(piece)>MAX_SERVICE_RESPONSE_BYTES:
+            raise ValueError("MODULE_SERVICE_RESPONSE_TOO_LARGE")
+        raw=piece.encode("utf-8")
+        if len(chunks)+len(raw)>MAX_SERVICE_RESPONSE_BYTES:
+            raise ValueError("MODULE_SERVICE_RESPONSE_TOO_LARGE")
+        chunks.extend(raw)
+    return bytes(chunks)
+
 class Handler(BaseHTTPRequestHandler):
+    def setup(self):
+        # Bound idle socket I/O; this does not cap elapsed module work.
+        self.request.settimeout(12.0)
+        super().setup()
+
     def log_message(self,*args):
         pass
     def do_POST(self):
@@ -94,12 +113,13 @@ class Handler(BaseHTTPRequestHandler):
         return self.send(404,{"error":"NOT_FOUND"})
     def send(self,status,body):
         try:
-            raw=json.dumps(body,ensure_ascii=False,allow_nan=False).encode("utf-8")
-        except (TypeError,ValueError,OverflowError,RecursionError):
-            # Match the other standalone module servers: a malformed status
-            # must never emit non-standard JSON or crash an HTTP request.
+            raw=_bounded_service_json(body)
+        except (TypeError,ValueError,OverflowError,RecursionError,UnicodeError) as exc:
             status=502
-            raw=b'{"error":"INVALID_SERVICE_RESPONSE"}'
+            raw=(b'{"error":"MODULE_SERVICE_RESPONSE_TOO_LARGE"}'
+                 if isinstance(exc,ValueError) and
+                    str(exc)=="MODULE_SERVICE_RESPONSE_TOO_LARGE"
+                 else b'{"error":"INVALID_SERVICE_RESPONSE"}')
         self.send_response(status)
         self.send_header("Content-Type","application/json")
         self.send_header("Cache-Control","no-store")
