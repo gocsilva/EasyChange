@@ -284,6 +284,43 @@ def test_complete_limits_shared_dag_json_before_full_dumps_or_receipt_write(tmp_
     assert store.get(sequence)["state"]=="RUNNING"
 
 
+def test_symlinked_durable_receipt_cannot_read_unrelated_file_or_be_reexecuted(tmp_path):
+    import pytest
+
+    store = DurableResultStore(tmp_path / "receipts")
+    sequence = "QSYMLINKSAFE"
+    outside = tmp_path / "unrelated-secret.data"
+    outside.write_bytes(b"PRIVATE_UNRELATED_CONTENT")
+    receipt = store._path(sequence)
+    try:
+        receipt.symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip("filesystem does not permit symlink creation: " + type(exc).__name__)
+
+    with pytest.raises(RuntimeError, match="RESULT_RECEIPT_UNREADABLE"):
+        store.get(sequence)
+    with pytest.raises(RuntimeError, match="RESULT_RECEIPT_UNREADABLE"):
+        store.claim_running(sequence, "a" * 64, ":state", mutation=False)
+    # Cleanup must not follow, decode, overwrite or delete this foreign file.
+    store._cleanup()
+    assert receipt.is_symlink()
+    assert outside.read_bytes() == b"PRIVATE_UNRELATED_CONTENT"
+
+
+def test_dangling_receipt_symlink_is_uncertain_not_an_unseen_sequence(tmp_path):
+    import pytest
+
+    store = DurableResultStore(tmp_path / "receipts")
+    receipt = store._path("QSYMLINKDANGLING")
+    try:
+        receipt.symlink_to(tmp_path / "not-present")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip("filesystem does not permit symlink creation: " + type(exc).__name__)
+    with pytest.raises(RuntimeError, match="RESULT_RECEIPT_UNREADABLE"):
+        store.claim_running("QSYMLINKDANGLING", "a" * 64, ":state", mutation=False)
+    assert receipt.is_symlink()
+
+
 def test_durable_completion_requires_literal_true_for_success(tmp_path):
     store = DurableResultStore(tmp_path / "success-receipts")
     for position, marker in enumerate(("false", "true", 1, -1, [], {}, None, False, 0, True)):
