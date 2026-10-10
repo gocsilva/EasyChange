@@ -402,7 +402,8 @@ class MCPBridge:
         try:
             lease=_acquire_consumer_lease()
             page=self.receive()
-            if not isinstance(page,dict) or page.get("requires_ack") is not True:
+            if (not isinstance(page,dict) or page.get("ok") is not True or
+                    page.get("requires_ack") is not True):
                 raise ValueError("MCP_REQUIRES_NONDESTRUCTIVE_INBOX")
             if ("recipient" in page and
                     page["recipient"]!=CANONICAL_MODULE_ID):
