@@ -131,6 +131,53 @@ def test_untrusted_journal_jsonl_record_must_be_object(tmp_path):
     assert path.read_text(encoding="utf-8")=='[1,2,3]\n'
 
 
+def test_journal_rejects_write_oversize_before_publishing_unreadable_record(tmp_path,monkeypatch):
+    target=tmp_path/".easychange"/"journal.jsonl"
+    journal=Journal(target,"S1")
+    monkeypatch.setattr(journal_module,"_MAX_JOURNAL_RECORD_CHARS",256)
+    with pytest.raises(ValueError,match="JOURNAL_RECORD_TOO_LARGE"):
+        journal.record("A"*400,"sample.txt","before","after")
+    assert journal.count==0
+    assert journal._counter==0
+    assert not target.exists()
+    # An oversized input must not poison the next legitimate edit or restart.
+    saved=journal.record("write","sample.txt","before","after")
+    assert saved.change_id=="CH1"
+    recovered=Journal(target,"S1")
+    assert recovered.count==1
+    assert recovered.get("CH1").after=="after"
+
+
+def test_journal_append_fsync_precedes_in_memory_commit(tmp_path,monkeypatch):
+    target=tmp_path/".easychange"/"journal.jsonl"
+    journal=Journal(target,"S1")
+    original_fsync=journal_module.os.fsync
+    observed=[]
+
+    def tracked(fd):
+        observed.append((fd,journal.count))
+        return original_fsync(fd)
+
+    monkeypatch.setattr(journal_module.os,"fsync",tracked)
+    saved=journal.record("write","sample.txt","before","after")
+    assert saved.change_id=="CH1"
+    assert observed and all(count==0 for _,count in observed)
+    assert Journal(target,"S1").get(saved.change_id).after=="after"
+
+
+def test_journal_rewrite_rejects_oversized_meta_without_damaging_prior_log(tmp_path,monkeypatch):
+    target=tmp_path/".easychange"/"journal.jsonl"
+    journal=Journal(target,"S1")
+    journal.record("write","sample.txt","before","after")
+    prior=target.read_bytes()
+    journal._redo=[journal._entries[0]]
+    monkeypatch.setattr(journal_module,"_MAX_JOURNAL_RECORD_CHARS",80)
+    with pytest.raises(ValueError,match="JOURNAL_RECORD_TOO_LARGE"):
+        journal._rewrite()
+    assert target.read_bytes()==prior
+    assert not list(target.parent.glob(".*.tmp"))
+
+
 def test_journal_restart_still_recovers_small_valid_entry(tmp_path):
     path=tmp_path / ".easychange" / "journal.jsonl"
     first=Journal(path,"S1")
