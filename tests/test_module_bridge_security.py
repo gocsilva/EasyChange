@@ -361,6 +361,28 @@ class TestHubRedirectBoundary(unittest.TestCase):
                         bridge.ack([invalid])
             network.assert_not_called()
 
+    def test_hub_reply_rejects_nonfinite_json_before_use(self):
+        import io
+        from unittest.mock import patch
+
+        bridge=module_bridge.MCPBridge(token="local-test-credential")
+        for number in ("NaN","Infinity","-Infinity","1e100000"):
+            with self.subTest(number=number):
+                response=io.BytesIO(
+                    ('{"ok":true,"self":"'+module_bridge.CANONICAL_MODULE_ID+
+                     '","metrics":{"value":'+number+'}}').encode("ascii"))
+                with patch.object(module_bridge._local_opener,"open",
+                                  return_value=response) as network:
+                    with self.assertRaisesRegex(
+                            ValueError,"MCP_HUB_NONFINITE_JSON"):
+                        bridge.peers()
+                    network.assert_called_once()
+
+        good=io.BytesIO(b'{"ok":true,"metrics":{"value":2.5}}')
+        with patch.object(module_bridge._local_opener,"open",
+                          return_value=good):
+            self.assertEqual(bridge.peers()["metrics"]["value"],2.5)
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
