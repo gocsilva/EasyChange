@@ -454,6 +454,55 @@ class TestHubRedirectBoundary(unittest.TestCase):
         self.assertEqual(len(decoded["messages"]),100)
         self.assertEqual(decoded["messages"][-1]["id"],100)
 
+    def test_inbox_ack_recovers_lost_reply_without_reprocessing_handler(self):
+        from unittest.mock import Mock, patch
+        from urllib.error import URLError
+
+        client=module_bridge.MCPBridge(token="local-test-token")
+        accepted={"ok":True,"recipient":module_bridge.CANONICAL_MODULE_ID,
+                  "acked":0,"acked_ids":[],"already_acked":[17],"unknown":[]}
+        client._request=Mock(side_effect=[
+            TimeoutError("ACK_REPLY_LOST"),accepted])
+        with patch("module_bridge.time.sleep") as sleep:
+            reply=client.ack([17])
+        self.assertEqual(reply,accepted)
+        self.assertEqual(client._request.call_count,2)
+        self.assertEqual(client._request.call_args_list[0],
+                         client._request.call_args_list[1])
+        sleep.assert_called_once_with(0.05)
+
+        client._request=Mock(side_effect=[
+            URLError("CONNECTION_RESET"),URLError("CONNECTION_RESET"),accepted])
+        with patch("module_bridge.time.sleep") as sleep:
+            self.assertEqual(client.ack([17]),accepted)
+        self.assertEqual(client._request.call_count,3)
+        self.assertEqual(sleep.call_count,2)
+
+    def test_inbox_ack_never_retries_http_rejection_or_invalid_receipt(self):
+        import io
+        from unittest.mock import Mock, patch
+        from urllib.error import HTTPError
+
+        client=module_bridge.MCPBridge(token="local-test-token")
+        unauthorized=HTTPError("http://127.0.0.1:8786/v1/inbox/ack",
+                               403,"forbidden",{},
+                               io.BytesIO(b'{"error":"BEARER_REQUIRED"}'))
+        for failure in (unauthorized, ValueError("INVALID_MCP_HUB_RESPONSE")):
+            with self.subTest(failure=type(failure).__name__):
+                client._request=Mock(side_effect=failure)
+                with patch("module_bridge.time.sleep") as sleep:
+                    with self.assertRaises(type(failure)):
+                        client.ack([17])
+                self.assertEqual(client._request.call_count,1)
+                sleep.assert_not_called()
+
+        client._request=Mock(side_effect=TimeoutError("ACK_UNCERTAIN"))
+        with patch("module_bridge.time.sleep") as sleep:
+            with self.assertRaises(TimeoutError):
+                client.ack([17])
+        self.assertEqual(client._request.call_count,3)
+        self.assertEqual(sleep.call_count,2)
+
     def test_hub_response_rejects_non_object_json(self):
         import io
         from unittest.mock import patch
