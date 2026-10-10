@@ -475,6 +475,27 @@ class TestHubRedirectBoundary(unittest.TestCase):
                           return_value=good):
             self.assertEqual(bridge.peers()["metrics"]["value"],2.5)
 
+    def test_outgoing_bridge_rejects_ambiguous_json_keys_before_network(self):
+        from unittest.mock import patch
+
+        client=module_bridge.MCPBridge(token="bridge-test-token")
+        invalid=(
+            {1:"number","1":"text"},
+            {"nested":[{False:"boolean","false":"string"}]},
+            [{"sub":{"name":"ok",None:"null-key"}}],
+        )
+        with patch("module_bridge._local_opener.open") as request:
+            for payload in invalid:
+                with self.subTest(value=repr(payload)):
+                    with self.assertRaisesRegex(ValueError,
+                                                "MCP_BUS_INVALID_JSON_KEY"):
+                        client.send("mcp","test.keys",payload,
+                                    correlation_id="duplicate-key")
+                    with self.assertRaisesRegex(ValueError,
+                                                "MCP_BUS_INVALID_JSON_KEY"):
+                        client.call("mcp_core_status",payload=payload)
+            request.assert_not_called()
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
