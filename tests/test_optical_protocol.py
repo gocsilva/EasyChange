@@ -602,9 +602,9 @@ def test_ec2_wide_structural_comparison_uses_bounded_iterator_memory():
         tracemalloc.stop()
     assert peak<750000, "wide EC2 equality allocated a linear pair backlog"
 
-    right["items"][-1]=True  # Boolean True must not alias integer 24999.
+    right["items"][1]=True  # Python considers True == 1; JSON must not.
     assert not _json_equal_with_types(left,right)
-    right["items"][-1]=24999
+    right["items"][1]=1
     assert _json_equal_with_types(left,right)
 
 
