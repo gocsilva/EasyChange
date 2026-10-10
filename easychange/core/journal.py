@@ -125,7 +125,13 @@ class Journal:
                 prefix=target.name + ".", suffix=".tmp", dir=self.blob_root)
             temporary = Path(name)
             try:
-                with os.fdopen(fd, "wb") as stream:
+                try:
+                    stream = os.fdopen(fd, "wb")
+                except BaseException:
+                    # mkstemp owns the raw descriptor until fdopen succeeds.
+                    os.close(fd)
+                    raise
+                with stream:
                     stream.write(compressed)
                     stream.flush()
                     os.fsync(stream.fileno())
@@ -292,7 +298,12 @@ class Journal:
             prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent)
         temporary = Path(name)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            try:
+                stream = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+            except BaseException:
+                os.close(fd)
+                raise
+            with stream:
                 stream.write(json.dumps(
                     {"type": "meta", "counter": self._counter,
                      "redo": [self._serialize_entry(entry) for entry in self._redo]},
