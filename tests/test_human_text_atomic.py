@@ -311,6 +311,8 @@ def test_human_text_fifo_buffer_is_rejected_without_blocking(tmp_path):
 
 
 def test_human_text_buffer_reader_rejects_hardlinks(tmp_path):
+    import os
+
     service=HumanTextService(tmp_path/"workspace")
     foreign=tmp_path/"external-private.txt"
     foreign.write_text("confidential",encoding="utf-8")
