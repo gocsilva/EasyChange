@@ -28,6 +28,15 @@ class PagedInboxHTTPTests(unittest.TestCase):
     def setUp(self):
         self.bridge=MCPBridge(token="A"*48)
 
+
+    def test_precompiled_inbox_routes_have_exact_canonical_values(self):
+        expected=frozenset("/v1/inbox/peek?limit="+str(n)
+                           for n in range(1,21))
+        self.assertEqual(module_bridge._PEEK_LIMIT_PATHS,expected)
+        self.assertNotIn("/v1/inbox/peek?limit=01",expected)
+        self.assertNotIn("/v1/inbox/peek?limit=0",expected)
+        self.assertNotIn("/v1/inbox/peek?limit=21",expected)
+
     def test_small_inbox_pages_use_real_allowlisted_http_endpoint(self):
         page={"ok":True,"requires_ack":True,"recipient":module_bridge.CANONICAL_MODULE_ID,
               "messages":[],"pending":0}
