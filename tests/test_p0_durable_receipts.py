@@ -214,6 +214,40 @@ def test_legacy_done_journal_without_result_cannot_reexecute_mutation(tmp_path, 
         service.close()
 
 
+def test_malformed_legacy_done_result_fails_closed_without_mutation(tmp_path, monkeypatch):
+    import hashlib
+
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        seq="QBADLEGACY1"
+        operation={"op":"operation","type":"replace_exact",
+                   "path":"missing.txt","old_text":"old","new_text":"new"}
+        canonical=json.dumps(
+            operation,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+        digest=hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        def forbidden(*args,**kwargs):
+            raise AssertionError("malformed finished mutation must not reexecute")
+        monkeypatch.setattr(service,"_execute_structured",forbidden)
+        malformed=(
+            {"ok":True,"command":"operation","data":["not a mapping"]},
+            {"ok":"false","command":"operation","data":{}},
+            {"ok":True,"command":"operation","data":{},"unexpected":1},
+            {"command":"operation","data":{}},
+        )
+        for legacy in malformed:
+            service.state_store.data["ec_results"]={
+                seq:{"sha256":digest,"state":"DONE","mutation":True,
+                     "result":legacy}}
+            answer=service.execute(":ec "+seq+" :j1 "+json.dumps(operation))
+            assert answer.ok is False
+            assert answer.code=="SEQUENCE_RESULT_MISSING"
+            assert answer.sequence==seq
+            assert answer.data=={"state":"DONE","duplicate":True}
+            assert service.result_store.get(seq) is None
+    finally:
+        service.close()
+
+
 def test_legacy_replay_does_not_overwrite_competing_durable_claim(tmp_path, monkeypatch):
     import hashlib
     from easychange.core.result import Result
