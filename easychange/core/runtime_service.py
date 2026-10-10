@@ -1385,12 +1385,23 @@ class ProjectRuntimeService:
             encoding="utf-8",
         )
         screenshot = self._browser_screenshot(html_path.resolve().as_uri(), folder / "evidence.png")
+        # A browser may return its proposed target even when capture failed.
+        # Match the Swagger evidence contract: only a real, bounded, CRC-
+        # verified PNG in this evidence directory counts as a screenshot.
+        screenshot_captured = bool(
+            screenshot is not None
+            and screenshot == folder / "evidence.png"
+            and _is_structurally_valid_png(screenshot)
+        )
+        if not screenshot_captured:
+            screenshot = None
         metadata = self._evidence_metadata(folder)
         return {
             "evidence_dir": _rel(self.workspace.root_path, folder),
             "evidence_json": _rel(self.workspace.root_path, json_path),
             "report": _rel(self.workspace.root_path, report),
             "html_report": _rel(self.workspace.root_path, html_path),
+            "screenshot_captured": screenshot_captured,
             "screenshot_file": _rel(self.workspace.root_path, screenshot) if screenshot else None,
             **metadata,
             "duration_ms": int((time.monotonic() - started_at) * 1000),
