@@ -130,9 +130,17 @@ class Handler(BaseHTTPRequestHandler):
                         or members.get("self")!="easychange"):
                     return self.send(503,{"connected":False,
                                           "error":"MCP_MODULE_IDENTITY_MISMATCH"})
+                catalog=bridge.catalog()
+                peers=members.get("peers")
+                tools=catalog.get("tools") if isinstance(catalog,dict) else None
+                if (not isinstance(catalog,dict) or catalog.get("ok") is not True
+                        or not isinstance(tools,list) or len(tools)>4096
+                        or not isinstance(peers,list)
+                        or any(not isinstance(peer,str) for peer in peers)):
+                    return self.send(503,{"connected":False,
+                                          "error":"MCP_MODULE_CATALOG_INVALID"})
                 return self.send(200,{"connected":True,"identity":members.get("self"),
-                                      "peers":members.get("peers",[]),
-                                      "tools":len(bridge.catalog().get("tools",[]))})
+                                      "peers":peers,"tools":len(tools)})
             except Exception as exc:
                 return self.send(503,{"connected":False,"error":type(exc).__name__})
         if self.path=="/health":
