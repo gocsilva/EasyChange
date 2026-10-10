@@ -28,6 +28,37 @@ def test_ec2_encoder_caps_utf8_json_bytes_before_compression(monkeypatch):
     assert isinstance(token,str)
 
 
+def test_ec2_encoder_refuses_huge_single_token_without_encoding_second_copy(monkeypatch):
+    import pytest
+    from unittest.mock import patch
+    import easychange.remote.optical_protocol as optical
+
+    class UntrustedToken(str):
+        def encode(self,*_args,**_kwargs):
+            raise AssertionError("HUGE_INTERMEDIATE_UTF8_COPY")
+
+    class HugeSingleTokenEncoder:
+        def iterencode(self,_value):
+            yield UntrustedToken("x"*1024)
+
+    monkeypatch.setattr(optical,"MAX_EC2_RESULT_BYTES",64)
+    with patch.object(optical.json,"JSONEncoder",
+                      return_value=HugeSingleTokenEncoder()):
+        with pytest.raises(ValueError,match="OPTICAL_RESULT_TOO_LARGE"):
+            optical._encode_raw({"data":"not-reached"})
+
+
+def test_ec2_long_json_string_preserves_exact_original_utf8_wire_bytes():
+    import easychange.remote.optical_protocol as optical
+
+    value={"data":"çá🧪"*3200,"sequence":"QENCODEWIDE"}
+    expected=json.dumps(value,ensure_ascii=False,separators=(",",":")).encode("utf-8")
+    raw,compressed,token=optical._encode_raw(value)
+    assert raw==expected
+    assert compressed
+    assert token
+
+
 def test_ec2_encoder_checks_compressed_and_base64_budgets(monkeypatch):
     import pytest
     from unittest.mock import patch
