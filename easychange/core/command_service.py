@@ -1781,6 +1781,11 @@ class CommandService:
         operations = payload.get("operations") if operation == "batch" else [payload]
         if not isinstance(operations, list) or not 1 <= len(operations) <= 64:
             return Result(False, "structured", error="OPERATION_COUNT_LIMIT", code="INVALID_STRUCTURED_PAYLOAD")
+        continue_on_error = payload.get("continue_on_error", False)
+        if type(continue_on_error) is not bool:
+            return Result(False, "structured",
+                          error="CONTINUE_ON_ERROR_BOOLEAN_REQUIRED",
+                          code="INVALID_STRUCTURED_PAYLOAD")
 
         # Transport timing is a tiny control-plane operation. It bypasses
         # project/index work just like durable result recovery and is persisted
@@ -2219,7 +2224,6 @@ class CommandService:
         mutation_types = STRUCTURED_MUTATION_TYPES
         kinds = [str(item.get("type") or "").casefold() if isinstance(item, dict) else "" for item in operations]
         transactional = any(kind in mutation_types for kind in kinds)
-        continue_on_error = bool(payload.get("continue_on_error", False))
         if continue_on_error and (transactional or not all(kind in STRUCTURED_CONTINUE_SAFE_TYPES for kind in kinds)):
             return Result(False, "structured", error="CONTINUE_ON_ERROR_REQUIRES_SAFE_READ_BATCH",
                           code="INVALID_STRUCTURED_PAYLOAD")
