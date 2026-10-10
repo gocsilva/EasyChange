@@ -48,6 +48,31 @@ class HumanTextService:
             "complete": True,
         }
 
+    @staticmethod
+    def _open_regular_buffer(path: Path):
+        """Open only the regular, unaliased buffer file without FIFO blocking.
+
+        Validate the descriptor as well as the pathname: POSIX O_NOFOLLOW
+        and lstat protect against a symlink swap, while same-inode checking
+        closes the gap on platforms without O_NOFOLLOW.
+        """
+        if path.is_symlink():
+            raise ValueError("HUMAN_TEXT_UNSAFE_BUFFER")
+        flags=(os.O_RDONLY|getattr(os,"O_BINARY",0)|
+               getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_NONBLOCK",0))
+        fd=os.open(path,flags)
+        try:
+            opened=os.fstat(fd)
+            pathname=path.lstat()
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
+                    or not stat.S_ISREG(pathname.st_mode) or pathname.st_nlink!=1
+                    or (opened.st_dev,opened.st_ino)!=(pathname.st_dev,pathname.st_ino)):
+                raise ValueError("HUMAN_TEXT_UNSAFE_BUFFER")
+            return os.fdopen(fd,"rb")
+        except BaseException:
+            os.close(fd)
+            raise
+
     def _scan_info(self) -> dict[str, Any]:
         if not self.path.exists():
             return self._empty_info()
@@ -59,7 +84,7 @@ class HumanTextService:
         saw_data = False
         last_byte = b""
         try:
-            with self.path.open("rb") as handle:
+            with self._open_regular_buffer(self.path) as handle:
                 opened=os.fstat(handle.fileno())
                 if opened.st_size>self.max_bytes:
                     raise ValueError("HUMAN_TEXT_EXCEEDS_CONFIGURED_LIMIT")
@@ -197,7 +222,7 @@ class HumanTextService:
             return ""
         # A size check followed by read_text() is vulnerable to a writer
         # atomically replacing the file between those two operations.
-        with self.path.open("rb") as handle:
+        with self._open_regular_buffer(self.path) as handle:
             raw = handle.read(self.max_bytes + 1)
         if len(raw) > self.max_bytes:
             raise ValueError("HUMAN_TEXT_EXCEEDS_CONFIGURED_LIMIT")
@@ -248,7 +273,7 @@ class HumanTextService:
     def _validate_cursor_boundary(path: Path, cursor: int, total: int) -> None:
         if cursor <= 0 or cursor >= total:
             return
-        with path.open("rb") as handle:
+        with HumanTextService._open_regular_buffer(path) as handle:
             handle.seek(cursor)
             current = handle.read(1)
         if current and (current[0] & 0xC0) == 0x80:
@@ -300,7 +325,7 @@ class HumanTextService:
         raw=b""
         if meta.get("exists"):
             try:
-                with self.path.open("rb") as handle:
+                with self._open_regular_buffer(self.path) as handle:
                     opened=os.fstat(handle.fileno())
                     if (opened.st_size != total or
                             opened.st_ino != meta.get("file_inode") or
