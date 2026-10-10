@@ -183,15 +183,27 @@ class OpticalAssembler:
                 "expected":self.total or None,"header":self.header}
 
 def decode_hdmi_qr(frame) -> list[str]:
-    """Use image pixels as the sole observational source; never access REMOTE_PC filesystem."""
+    """Decode observed pixels only; a stale/invalid capture is not a QR result."""
+    # HDMI capture resets can temporarily deliver None or a zero-sized frame.
+    # Do not instantiate OpenCV's detector or crash the EC2 polling loop.
+    shape=getattr(frame,"shape",None)
+    if (not isinstance(shape,tuple) or len(shape) not in (2,3)
+            or type(shape[0]) is not int or type(shape[1]) is not int
+            or shape[0]<1 or shape[1]<1):
+        return []
     import cv2
     detector=getattr(_qr_detectors,"detector",None)
     if detector is None:
         detector=cv2.QRCodeDetector()
         _qr_detectors.detector=detector
-    ok, texts, _points, _rectified=detector.detectAndDecodeMulti(frame)
-    decoded=[value for value in texts if value] if ok and texts else []
-    if not decoded:
-        single,_points,_rectified=detector.detectAndDecode(frame)
-        if single:decoded=[single]
-    return decoded
+    try:
+        ok, texts, _points, _rectified=detector.detectAndDecodeMulti(frame)
+        decoded=[value for value in texts if isinstance(value,str) and value] if ok and texts else []
+        if not decoded:
+            single,_points,_rectified=detector.detectAndDecode(frame)
+            if isinstance(single,str) and single:decoded=[single]
+        return decoded
+    except cv2.error:
+        # A transient invalid image or interrupted capture cannot imply
+        # success and must not prevent the following frame from being read.
+        return []
