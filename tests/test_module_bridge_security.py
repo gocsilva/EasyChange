@@ -630,6 +630,45 @@ class TestHubRedirectBoundary(unittest.TestCase):
                 sleep.assert_called_once()
                 self.assertTrue(body.closed)
 
+    def test_json_encoder_limits_unicode_fragment_memory(self):
+        import io
+        import json
+        from unittest.mock import patch
+
+        sizes=[]
+        class Tracked(str):
+            def __getitem__(self, key):
+                return Tracked(super().__getitem__(key))
+            def encode(self, encoding="utf-8", errors="strict"):
+                sizes.append(len(self))
+                if len(self)>4096:
+                    raise AssertionError("UTF8_ENCODE_UNBOUNDED_FRAGMENT")
+                return super().encode(encoding, errors)
+        class StubEncoder:
+            def __init__(self,*args,**kwargs):
+                pass
+            def iterencode(self,_):
+                yield Tracked("界"*9000)
+
+        bridge=module_bridge.MCPBridge(token="local-test-token")
+        with patch.object(module_bridge.json,"JSONEncoder",StubEncoder), \
+             patch.object(module_bridge._local_opener,"open",
+                          side_effect=AssertionError("NETWORK_BEFORE_BYTE_BUDGET")) as opener:
+            with self.assertRaisesRegex(ValueError,"MCP_BUS_REQUEST_TOO_LARGE"):
+                bridge._request("/v1/send",{"payload":"placeholder"})
+            opener.assert_not_called()
+        self.assertGreater(len(sizes),1)
+        self.assertLessEqual(max(sizes),4096)
+
+        data={"topic":"status.ok","payload":{"message":"界"*1000}}
+        with patch.object(module_bridge._local_opener,"open",
+                          return_value=io.BytesIO(b'{"ok":true}')) as opener:
+            self.assertEqual(bridge._request("/v1/send",data),{"ok":True})
+        request=opener.call_args.args[0]
+        self.assertEqual(json.loads(request.data),data)
+        self.assertEqual(request.data,json.dumps(
+            data,ensure_ascii=False,allow_nan=False).encode("utf-8"))
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
