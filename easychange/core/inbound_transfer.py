@@ -89,7 +89,13 @@ class InboundCommandStore:
 
     @classmethod
     def _transfer_id(cls, value: str) -> str:
-        transfer_id = str(value or "").upper()
+        # Normalize only after confirming the original identifier is ASCII:
+        # Unicode uppercasing can expand characters (e.g. ß -> SS), aliasing
+        # an unrelated inbound transfer's directory and its staged chunks.
+        if (not isinstance(value,str) or not 8<=len(value)<=64
+                or not value.isascii()):
+            raise InboundTransferError("INVALID_INBOUND_TRANSFER_ID")
+        transfer_id=value.upper()
         if not cls._TRANSFER_RE.fullmatch(transfer_id):
             raise InboundTransferError("INVALID_INBOUND_TRANSFER_ID")
         return transfer_id
