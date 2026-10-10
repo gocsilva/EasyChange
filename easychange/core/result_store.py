@@ -576,8 +576,13 @@ class DurableResultStore:
         serialized_hash = hashlib.sha256(serialized).hexdigest()
         execution_summary = _find_execution_summary(result)
         with self._claim_lock():
-            current = self.get(sequence) or {}
-            if current and current.get("command_hash") != command_hash:
+            current = self.get(sequence)
+            if current is None:
+                # A caller must first win claim_running(). Otherwise a
+                # misplaced completion could forge a terminal result without
+                # ever reserving the sequence against concurrent execution.
+                raise RuntimeError("RESULT_SEQUENCE_NOT_CLAIMED")
+            if current.get("command_hash") != command_hash:
                 raise ValueError("RESULT_SEQUENCE_COMMAND_HASH_MISMATCH")
             if current.get("state") == "DONE":
                 # Duplicate delivery must never rewrite the terminal receipt,
