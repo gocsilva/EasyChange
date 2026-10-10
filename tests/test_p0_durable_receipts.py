@@ -564,6 +564,39 @@ def test_complete_limits_shared_dag_json_before_full_dumps_or_receipt_write(tmp_
     assert store.get(sequence)["state"]=="RUNNING"
 
 
+def test_cached_receipt_is_invalidated_if_hardlink_alias_appears(tmp_path):
+    import os
+    import pytest
+
+    if os.name != "posix":
+        pytest.skip("Requires POSIX receipt inode link counts")
+    store = DurableResultStore(tmp_path / "results")
+    seq = "QRECEIPTHARDLINK1"
+    result = {"ok": True, "command": "state", "sequence": seq,
+              "data": {"text": "original"}}
+    store.mark_running(seq, "a"*64, ":state", mutation=False)
+    store.complete(seq, "a"*64, ":state", result)
+    assert store.header(seq)["success"] is True
+    assert store.result(seq) == result
+
+    path = store._path(seq)
+    alias = tmp_path / "same-inode-alias"
+    os.link(path, alias)
+    assert path.stat().st_nlink == 2
+    # Both header and result caches must fail closed even though inode,
+    # content and mtime were unchanged by making the second hard link.
+    with pytest.raises(RuntimeError, match="RESULT_RECEIPT_UNREADABLE"):
+        store.header(seq)
+    with pytest.raises(RuntimeError, match="RESULT_RECEIPT_UNREADABLE"):
+        store.result(seq)
+    with pytest.raises(RuntimeError, match="RESULT_RECEIPT_UNREADABLE"):
+        store.claim_running(seq, "a"*64, ":state", mutation=False)
+
+    alias.unlink()
+    assert store.header(seq)["success"] is True
+    assert store.result(seq) == result
+
+
 def test_cached_receipt_is_invalidated_when_replaced_by_symlink_to_same_inode(tmp_path):
     import pytest
 
