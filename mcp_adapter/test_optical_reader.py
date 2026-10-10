@@ -285,6 +285,31 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertTrue(replay["verified"])
         self.assertEqual(replay["payload"]["data"]["text"],data)
 
+    def test_full_qr_carousel_decodes_from_existing_view_without_list_copy(self):
+        from unittest.mock import patch
+        import hashlib
+        import mcp_adapter.optical_reader as reader
+
+        content="".join(hashlib.sha256(str(i).encode()).hexdigest()
+                        for i in range(100))
+        packets=encode_result_chunks(
+            {"sequence":"QVIEW2026","ok":True,"data":{"text":content}},
+            chunk_chars=120)
+        self.assertGreater(len(packets),3)
+        assembler=OpticalAssembler()
+        original=reader.decode_result_chunks
+        received=[]
+        def capture(chunk_collection):
+            received.append(chunk_collection)
+            self.assertIsInstance(chunk_collection,type({}.values()))
+            self.assertNotIsInstance(chunk_collection,list)
+            return original(chunk_collection)
+        with patch.object(reader,"decode_result_chunks",side_effect=capture):
+            result=assembler.ingest(packets)
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["payload"]["data"]["text"],content)
+        self.assertEqual(len(received),1)
+
     def test_repeated_complete_carousel_decodes_only_once(self):
         from unittest.mock import patch
         from easychange.core.result import Result
