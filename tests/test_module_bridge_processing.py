@@ -335,16 +335,19 @@ def test_consumer_lease_key_is_canonical_across_installations(tmp_path):
                 b.ack.return_value={
                     "ok":True,"acked":2,"already_acked":[],"unknown":[],
                     "acked_ids":confirmed}
-                if confirmed is None:
-                    # An explicit JSON null is treated as an old hub receipt;
-                    # preserve compatibility with legacy responses.
-                    self.assertEqual(
-                        b.process_pending(lambda _:True,ack_batch_size=2)[
-                            "acknowledged"],2)
-                    continue
+                # A field explicitly set to null is malformed, unlike
+                # a genuinely absent field from a backward-compatible hub.
                 with self.assertRaisesRegex(RuntimeError,"MCP_ACK_UNCONFIRMED"):
                     b.process_pending(lambda _:True,ack_batch_size=2)
                 b.ack.assert_called_once_with([41,42])
+        old_hub=self.bridge([item(41),item(42)])
+        old_hub.ack.side_effect=None
+        old_hub.ack.return_value={
+            "ok":True,"acked":2,"already_acked":[],"unknown":[]}
+        self.assertEqual(
+            old_hub.process_pending(lambda _:True,ack_batch_size=2)[
+                "acknowledged"],2)
+
         b=self.bridge([item(41),item(42)])
         b.ack.side_effect=None
         b.ack.return_value={
