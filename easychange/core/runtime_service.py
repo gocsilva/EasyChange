@@ -617,15 +617,29 @@ class ProjectRuntimeService:
         if not package.exists():
             return []
         try:
-            value = json.loads(package.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            with package.open("rb") as stream:
+                raw=stream.read(1_048_577)
+            if len(raw)>1_048_576:
+                return []
+            value=json.loads(raw.decode("utf-8"))
+        except (OSError, ValueError, UnicodeError, RecursionError):
             return []
-        scripts = value.get("scripts") or {}
-        run_script = "dev" if "dev" in scripts else "start" if "start" in scripts else None
+        if not isinstance(value,dict):
+            return []
+        scripts=value.get("scripts")
+        if not isinstance(scripts,dict):
+            scripts={}
+        # Strings and arrays can contain a word like "dev" without defining
+        # an npm script. A valid script is a nonblank command string.
+        available={
+            key for key in ("dev","start","test")
+            if isinstance(scripts.get(key),str) and scripts[key].strip()
+        }
+        run_script="dev" if "dev" in available else "start" if "start" in available else None
         return [{
             "id": "node:package.json", "ecosystem": "node", "kind": "node-app", "project": "package.json",
             "runnable": bool(run_script), "run_argv": ["npm", "run", run_script] if run_script else None,
-            "test_argv": ["npm", "test", "--", "--run"] if "test" in scripts else None,
+            "test_argv": ["npm", "test", "--", "--run"] if "test" in available else None,
             "urls": [], "swagger_candidates": [],
         }]
 
