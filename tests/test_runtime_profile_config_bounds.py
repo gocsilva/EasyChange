@@ -142,6 +142,8 @@ def test_writer_keeps_malformed_existing_runtime_profiles_untouched(tmp_path):
         # discovery are never permission to overwrite the source file.
         b'{"profiles":[],"profiles":[{"id":"hidden"}]}',
         b'{"profiles":[{"id":"sample","env":{"PLAIN":"a","PLAIN":"b"}}]}',
+        json.dumps({"profiles":[],"future_schema":{"must":"survive"}}).encode(),
+        json.dumps({"profiles":[{**_valid_row(),"future_extension":{"keep":True}}]}).encode(),
         json.dumps({"profiles":[{**_valid_row(),"urls":["http://localhost:5000",7]}]}).encode(),
         json.dumps({"profiles":[{**_valid_row(),"urls":["http://localhost:5000"]*17}]}).encode(),
         json.dumps({"profiles":{"not":"a list"}}).encode(),
