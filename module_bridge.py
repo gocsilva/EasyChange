@@ -57,9 +57,15 @@ def _hub_unique_fields(pairs):
 def _decode_hub_response(raw):
     # Ambiguous accepted/retryable fields must never authorize replay of a
     # potentially mutating call, even when received from a local TCP port.
-    return json.loads(raw,parse_constant=_finite_hub_json_number,
-                      parse_float=_finite_hub_json_number,
-                      object_pairs_hook=_hub_unique_fields)
+    try:
+        return json.loads(raw,parse_constant=_finite_hub_json_number,
+                          parse_float=_finite_hub_json_number,
+                          object_pairs_hook=_hub_unique_fields)
+    except RecursionError as exc:
+        # A kilobyte-sized malformed local reply can nest more than Python's
+        # JSON parser permits. Reject it as an invalid envelope, never let
+        # parser recursion be mistaken for a retriable transport failure.
+        raise ValueError("MCP_HUB_JSON_NESTING_LIMIT") from exc
 
 # Single consumer in this module process, including multiple MCPBridge objects.
 _processing_lock=threading.Lock()
