@@ -1158,6 +1158,39 @@ def test_cleanup_never_compacts_non_q_mutating_execution(tmp_path):
     assert receipt.get("result_expired") is not True
 
 
+def test_cleanup_keeps_legacy_mutation_evidence_without_boolean_flag(tmp_path):
+    import os
+    import time
+
+    store=DurableResultStore(tmp_path/"legacy-receipts",ttl_seconds=60)
+    for sequence,fields in (
+        ("LEGACYSTATE1",{"mutation_state":"APPLIED"}),
+        ("LEGACYRECEIPT1",{"mutation_state":"NOT_APPLICABLE",
+                           "mutation_receipt":{"state":"ROLLED_BACK"}}),
+    ):
+        store.mark_running(sequence,"a"*64,":operation",mutation=False)
+        store.complete(
+            sequence,"a"*64,":operation",
+            {"ok":True,"command":"operation",
+             "data":{"audit":"retained"},"sequence":sequence})
+        value=store.get(sequence)
+        value.pop("mutation",None)
+        value.update(fields)
+        store._write(sequence,value,run_cleanup=False)
+        path=store._path(sequence)
+        wire=path.read_bytes()
+        expired=time.time()-store.ttl_seconds-120
+        os.utime(path,(expired,expired))
+
+        store._cleanup()
+        assert path.read_bytes()==wire
+        restored=store.get(sequence)
+        assert restored["result"] is not None
+        assert restored.get("result_expired") is not True
+        assert store.claim_running(
+            sequence,"a"*64,":operation",mutation=True)[1] is False
+
+
 def test_cleanup_compacts_expired_read_result_but_keeps_replay_tombstone(tmp_path):
     import hashlib
     import os
