@@ -1927,6 +1927,38 @@ def test_compressed_receipt_file_read_is_bounded(tmp_path, monkeypatch):
     assert target.read_bytes() == b"X" * 30
 
 
+def test_opened_receipt_must_match_unfollowed_path_inode(tmp_path, monkeypatch):
+    import os
+    import pytest
+    import easychange.core.result_store as result_module
+
+    store=DurableResultStore(tmp_path / "results")
+    sequence="QWRONGINODE01"
+    store.mark_running(sequence,"a"*64,":job",mutation=True)
+    receipt=store._path(sequence)
+    foreign=tmp_path / "foreign-but-valid-receipt.bin"
+    foreign.write_bytes(receipt.read_bytes())
+    a=receipt.lstat()
+    b=foreign.lstat()
+    if (a.st_dev,a.st_ino)==(b.st_dev,b.st_ino):
+        pytest.skip("Filesystem does not expose distinct inode identities")
+    genuine_open=os.open
+
+    def swapped_descriptor(candidate, flags, *args, **kwargs):
+        if os.fspath(candidate)==os.fspath(receipt):
+            # Model another process substituting the descriptor between the
+            # pathname precheck and receipt read. Bytes even decode as a
+            # valid record, but the file is not the authorized path inode.
+            return genuine_open(foreign, flags, *args, **kwargs)
+        return genuine_open(candidate, flags, *args, **kwargs)
+
+    monkeypatch.setattr(result_module.os,"open",swapped_descriptor)
+    with pytest.raises(RuntimeError,match="RESULT_RECEIPT_UNREADABLE"):
+        store.get(sequence)
+    assert receipt.is_file()
+    assert foreign.read_bytes()==receipt.read_bytes()
+
+
 def test_receipt_path_symlink_swap_fails_closed_at_open(tmp_path, monkeypatch):
     import os
     import pytest
