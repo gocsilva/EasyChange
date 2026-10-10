@@ -148,8 +148,15 @@ class ModuleGUI:
             self.message.set("Não foi possível iniciar verificação de saúde.")
 
     def start(self):
-        if self.process and self.process.poll() is None:
-            return self.refresh()
+        if self.process is not None:
+            try:
+                if self.process.poll() is None:
+                    return self.refresh()
+            except (OSError,ValueError) as exc:
+                # Unknown PID state must never authorize a second standalone
+                # service that may contest the same port or physical device.
+                self.message.set("Estado do serviço desconhecido: "+type(exc).__name__)
+                return
         # Keep the Tk callback nonblocking: /health can stall for 600ms.
         # The fixed-port ownership check below is fail-closed; the regular
         # background refresh reports whether an external listener is healthy.
