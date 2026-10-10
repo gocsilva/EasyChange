@@ -7,6 +7,37 @@ from easychange.remote.optical_protocol import (
 )
 
 
+def test_ec2_encoder_rejects_identity_receiver_would_drop(monkeypatch):
+    import pytest
+    from unittest.mock import patch
+    import easychange.remote.optical_protocol as optical
+
+    candidate={"sequence":"Q"*257,"ok":True,"data":{"text":"hello"}}
+    with patch.object(optical,"_encode_raw",
+                      side_effect=AssertionError("COMPRESSION_SHOULD_NOT_RUN")) as compressed:
+        with pytest.raises(ValueError,match="OPTICAL_SEQUENCE_TOO_LONG"):
+            optical.encode_result_chunks(candidate)
+    compressed.assert_not_called()
+    allowed={"sequence":"Q"*256,"ok":True,"data":{"text":"small"}}
+    valid=optical.encode_result_chunks(allowed)
+    assert optical.decode_result_chunks(valid)["sequence"]=="Q"*256
+
+
+def test_ec2_encoder_never_emits_an_envelope_too_large_for_decoder():
+    import pytest
+    import easychange.remote.optical_protocol as optical
+
+    with pytest.raises(ValueError,match="OPTICAL_PACKET_TEXT_TOO_LARGE"):
+        optical._packet_json(
+            sequence="QCAP",index=0,total=1,
+            digest="a"*64,crc="a"*8,
+            piece="A"*optical.MAX_EC2_PACKET_TEXT_CHARS)
+    actual=optical._packet_json(
+        sequence="QCAP",index=0,total=1,
+        digest="a"*64,crc="a"*8,piece="A"*180)
+    assert len(actual)<=optical.MAX_EC2_PACKET_TEXT_CHARS
+
+
 def test_ec2_encoder_caps_utf8_json_bytes_before_compression(monkeypatch):
     import pytest
     from unittest.mock import patch
