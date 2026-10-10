@@ -5,6 +5,7 @@ import binascii
 import copy
 import hashlib
 import json
+import math
 import zlib
 from collections.abc import Collection
 from typing import Any
@@ -21,6 +22,36 @@ MAX_EC2_PACKET_SET_CHARS = 64 * 1024 * 1024
 MAX_EC2_TOKEN_CHARS = 16 * 1024 * 1024
 MAX_EC2_COMPRESSED_BYTES = 12 * 1024 * 1024
 MAX_EC2_RESULT_BYTES = 16 * 1024 * 1024
+
+
+def _unique_optical_json_fields(pairs):
+    fields={}
+    for key,value in pairs:
+        if key in fields:
+            raise ValueError("duplicate optical packet JSON field")
+        fields[key]=value
+    return fields
+
+
+def _optical_float(value):
+    number=float(value)
+    if not math.isfinite(number):
+        raise ValueError("nonfinite optical packet number")
+    return number
+
+
+def _optical_constant(_value):
+    raise ValueError("nonfinite optical packet number")
+
+
+def decode_ec2_packet_json(raw):
+    """Parse untrusted QR envelopes without accepting ambiguous JSON fields."""
+    try:
+        return json.loads(
+            raw,object_pairs_hook=_unique_optical_json_fields,
+            parse_constant=_optical_constant,parse_float=_optical_float)
+    except (ValueError,RecursionError,UnicodeError) as exc:
+        raise ValueError("invalid optical packet JSON") from exc
 
 
 def _result_value(result: Any) -> dict[str, Any]:
@@ -285,10 +316,7 @@ def decode_result_chunks(payloads: Collection[str]) -> dict[str, Any]:
         packet_text_chars += len(raw_packet)
         if packet_text_chars > MAX_EC2_PACKET_SET_CHARS:
             raise ValueError("optical packet set too large")
-        try:
-            chunk = json.loads(raw_packet)
-        except (json.JSONDecodeError, RecursionError) as exc:
-            raise ValueError("invalid optical packet JSON") from exc
+        chunk = decode_ec2_packet_json(raw_packet)
         if not isinstance(chunk, dict) or chunk.get("p") != PROTOCOL:
             continue
         if first is None:
