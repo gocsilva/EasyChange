@@ -473,3 +473,27 @@ def test_racing_writer_cannot_publish_old_hash_with_new_file_identity(tmp_path,m
     assert current["file_inode"]==writer_a.path.stat().st_ino
 
 
+
+
+def test_metadata_descriptor_must_match_path_inode_before_read(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    service=HumanTextService(tmp_path/"workspace")
+    saved=service.save("canonical buffer content")
+    other=tmp_path/"other-metadata"
+    other.write_text('{"sha256":"foreign"}',encoding="utf-8")
+    actual_lstat=Path.lstat
+    def swapped_identity(path,*args,**kwargs):
+        if path==service.meta_path:
+            # Simulate an adversarial inode swap immediately after os.open.
+            return actual_lstat(other)
+        return actual_lstat(path,*args,**kwargs)
+
+    monkeypatch.setattr(Path,"lstat",swapped_identity)
+    with pytest.raises(ValueError,match="HUMAN_TEXT_METADATA_FILE_CHANGED_RETRY"):
+        service._read_metadata(service.meta_path)
+    # Metadata is advisory. Its failure must not suppress access to the
+    # canonical regular buffer, which is rescanned with a safe file handle.
+    refreshed=service.info()
+    assert refreshed["sha256"]==saved["sha256"]
+    assert refreshed["bytes"]==len("canonical buffer content".encode("utf-8"))
