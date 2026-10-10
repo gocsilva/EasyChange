@@ -7,6 +7,54 @@ from easychange.core.result_store import DurableResultStore
 from easychange.core.workspace import Workspace
 
 
+def test_nested_receipt_map_preflight_blocks_encoder_before_large_allocation(monkeypatch):
+    import pytest
+    import easychange.core.result_store as store_module
+
+    payloads=(
+        {"result":{"data":{"message":"X"*257}}},
+        {"result":[{"data":{1:"ambiguous"}}]},
+    )
+    # Non-string nested keys should also be rejected deterministically
+    # rather than silently converted into a colliding JSON key.
+    with monkeypatch.context() as patcher:
+        patcher.setattr(store_module,"MAX_DECODED_RECEIPT_BYTES",256)
+        patcher.setattr(store_module.json.JSONEncoder,"iterencode",
+                        lambda *a,**k: (_ for _ in ()).throw(
+                            AssertionError("JSON_ENCODER_RAN")))
+        for payload in payloads:
+            for encode in (DurableResultStore._encode,
+                           DurableResultStore._encode_result_json):
+                with pytest.raises(ValueError):
+                    encode(payload)
+
+
+def test_nested_receipt_map_cycle_rejected_without_encoder(monkeypatch):
+    import pytest
+    import easychange.core.result_store as store_module
+
+    node={}
+    node["inner"]={"loop":[node]}
+    with monkeypatch.context() as patcher:
+        patcher.setattr(store_module.json.JSONEncoder,"iterencode",
+                        lambda *a,**k: (_ for _ in ()).throw(
+                            AssertionError("CYCLIC_JSON_ENCODER_RAN")))
+        for encode in (DurableResultStore._encode,
+                       DurableResultStore._encode_result_json):
+            with pytest.raises(ValueError,match="Circular reference detected"):
+                encode(node)
+
+
+def test_nested_receipt_map_shared_subtree_remains_valid():
+    import zlib
+
+    shared={"safe":"small"}
+    payload={"left":shared,"right":[shared,shared]}
+    compressed=DurableResultStore._encode(payload)
+    assert json.loads(zlib.decompress(compressed))==payload
+    assert json.loads(DurableResultStore._encode_result_json(payload))==payload
+
+
 def test_mutation_receipt_is_definitive_and_auditable(tmp_path):
     target = tmp_path / "sample.txt"
     target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
