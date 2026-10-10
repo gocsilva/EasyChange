@@ -25,6 +25,12 @@ def decode_command(packet: str, max_raw_bytes: int = 262144) -> tuple[str, dict]
     parts = str(packet).split(" ", 3)
     if len(parts) != 4 or parts[0].casefold() != ":z1":
         raise ValueError("INVALID_EC1_Z1_PACKET")
+    # Header values are untrusted HID text. Limit decimal and CRC fields
+    # before int() parses them: enormous numeric strings can consume CPU
+    # even when the decoded command budget is only a few hundred KiB.
+    if (not 1 <= len(parts[1]) <= 12 or len(parts[2]) != 8
+            or any(ch not in "0123456789abcdefABCDEF" for ch in parts[2])):
+        raise ValueError("INVALID_EC1_Z1_HEADER")
     try:
         expected_size = int(parts[1])
         expected_crc = int(parts[2], 16)
