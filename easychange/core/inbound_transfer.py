@@ -124,7 +124,12 @@ class InboundCommandStore:
         return transfer_id
 
     def _dir(self, transfer_id: str) -> Path:
-        return self.root / self._transfer_id(transfer_id)
+        directory=self.root / self._transfer_id(transfer_id)
+        # Never follow an injected transfer-directory symlink to another
+        # workspace while reading, writing or aborting staged commands.
+        if directory.is_symlink():
+            raise InboundTransferError("INBOUND_UNSAFE_TRANSFER_DIRECTORY")
+        return directory
 
     @staticmethod
     def _atomic_write(path: Path, payload: bytes) -> None:
