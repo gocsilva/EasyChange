@@ -18,6 +18,11 @@ from easychange.remote.optical_protocol import (
 
 MAX_EC2_ASSEMBLY_TEXT_CHARS = 48 * 1024 * 1024
 MAX_EC2_ASSEMBLY_IDLE_SECONDS = 120.0
+# A single HDMI poll yields at most 32 decoded symbols. Keep separately
+# bounded bulk ingest() calls from spending unbounded time on ignored frames.
+# Larger transfers remain supported across successive bounded poll batches.
+MAX_EC2_INGEST_FRAME_LIMIT = 4096
+MAX_EC2_INGEST_TEXT_CHARS = 8 * 1024 * 1024
 
 @dataclass
 class OpticalAssembler:
@@ -45,6 +50,16 @@ class OpticalAssembler:
         self.updated_at=time.monotonic()
 
     def ingest(self, payloads: list[str]) -> dict:
+        # Preflight before touching the active session. Even ignored invalid
+        # frames cost JSON parsing and can starve a real HDMI QR transfer.
+        if len(payloads) > MAX_EC2_INGEST_FRAME_LIMIT:
+            raise ValueError("EC2_INGEST_FRAME_LIMIT")
+        text_chars = 0
+        for candidate in payloads:
+            if isinstance(candidate, str):
+                text_chars += len(candidate)
+                if text_chars > MAX_EC2_INGEST_TEXT_CHARS:
+                    raise ValueError("EC2_INGEST_TEXT_LIMIT")
         # A partial or completed carousel must not own a reusable receiver
         # indefinitely. Expire only when new frames arrive: ingest([]) is
         # allowed to retrieve the last verified receipt without mutation.
