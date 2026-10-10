@@ -180,6 +180,29 @@ class TestHubRedirectBoundary(unittest.TestCase):
             self.assertEqual(module_bridge._runtime_token,token)
             self.assertEqual(module_bridge.detach_hub(token),{"connected":False})
 
+    def test_detach_rejects_nonascii_or_oversized_bearer_without_state_change(self):
+        from unittest.mock import patch
+
+        active="A"*48
+        invalid=(None,False,123,b"A"*48,{"token":active},
+                 "é"*48,"Q"*257,"\\ud800")
+        for token in invalid:
+            with self.subTest(token_type=type(token).__name__,
+                              length=len(token) if hasattr(token,"__len__") else None), \
+                 patch.object(module_bridge,"_runtime_token",active), \
+                 patch.object(module_bridge,"_runtime_detached",False), \
+                 patch.dict(module_bridge.os.environ,{"MCP_MODULE_BUS_TOKEN":"E"*48}):
+                with self.assertRaisesRegex(
+                        PermissionError,"INVALID_DETACH_CREDENTIAL"):
+                    module_bridge.detach_hub(token)
+                self.assertEqual(module_bridge._runtime_token,active)
+                self.assertFalse(module_bridge._runtime_detached)
+        with patch.object(module_bridge,"_runtime_token",active), \
+             patch.object(module_bridge,"_runtime_detached",False):
+            self.assertEqual(module_bridge.detach_hub(active),
+                             {"connected":False})
+            self.assertTrue(module_bridge._runtime_detached)
+
     def test_detach_never_recovers_inherited_bootstrap_token(self):
         from unittest.mock import patch
 
