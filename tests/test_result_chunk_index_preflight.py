@@ -158,3 +158,30 @@ def test_single_plain_chunk_rejects_impossible_index_before_read(
     with pytest.raises(category, match=expected):
         store.chunk("QABSENT", index)
     assert calls == []
+
+
+@pytest.mark.parametrize("invalid", [
+    True, False, None, float("nan"), float("inf"),
+    "9" * 2048, "not-a-size",
+])
+def test_header_chunk_size_rejects_input_before_cache_or_receipt_read(
+    invalid, tmp_path, monkeypatch,
+):
+    store = DurableResultStore(tmp_path / "results")
+    touches = []
+
+    def forbidden(*args, **kwargs):
+        touches.append(True)
+        raise AssertionError("HEADER_IO_BEFORE_CHUNK_SIZE_VALIDATION")
+
+    monkeypatch.setattr(store, "_terminal_header_cache_get", forbidden)
+    monkeypatch.setattr(store, "get", forbidden)
+    with pytest.raises(ValueError, match="INVALID_RESULT_CHUNK_BYTES"):
+        store.header("QINVALIDHEADER", chunk_bytes=invalid)
+    assert touches == []
+
+
+def test_header_chunk_size_short_numeric_input_preserves_absent_receipt(tmp_path):
+    store = DurableResultStore(tmp_path / "results")
+    assert store.header("QABSENTHEADER", chunk_bytes="512") is None
+    assert store.header("QABSENTHEADER", chunk_bytes="999999") is None
