@@ -12,6 +12,31 @@ import easychange.core.human_text_service as human_module
 from easychange.core.human_text_service import HumanTextService
 
 
+def test_cached_metadata_cannot_bypass_a_lowered_size_limit(tmp_path, monkeypatch):
+    # A prior instance may have legitimately saved a larger buffer. When the
+    # workspace limit is later lowered, a matching inode/mtime cache cannot
+    # make that now-oversized buffer appear valid.
+    monkeypatch.setenv("EASYCHANGE_MAX_HUMAN_TEXT_BYTES", "2097152")
+    writer=HumanTextService(tmp_path)
+    payload="x" * (1024 * 1024 + 19)
+    saved=writer.save(payload)
+    assert writer.info()["sha256"]==saved["sha256"]
+
+    monkeypatch.setenv("EASYCHANGE_MAX_HUMAN_TEXT_BYTES", "1048576")
+    reader=HumanTextService(tmp_path)
+    assert reader.max_bytes==1024 * 1024
+    with pytest.raises(ValueError, match="HUMAN_TEXT_EXCEEDS_CONFIGURED_LIMIT"):
+        reader.info()
+    with pytest.raises(ValueError, match="HUMAN_TEXT_EXCEEDS_CONFIGURED_LIMIT"):
+        reader.read(cursor=0, max_bytes=512)
+    assert reader.path.read_bytes()==payload.encode("utf-8")
+
+    # Raising the limit again restores access without rewriting the file.
+    monkeypatch.setenv("EASYCHANGE_MAX_HUMAN_TEXT_BYTES", "2097152")
+    restored=HumanTextService(tmp_path)
+    assert restored.info()["sha256"]==saved["sha256"]
+
+
 def test_same_size_external_file_replacement_invalidates_cached_metadata(tmp_path):
     service=HumanTextService(tmp_path)
     original=service.save("AAAA")
