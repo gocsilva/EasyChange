@@ -7,6 +7,46 @@ from easychange.remote.optical_protocol import (
 )
 
 
+def test_ec2_encoder_caps_utf8_json_bytes_before_compression(monkeypatch):
+    import pytest
+    from unittest.mock import patch
+    import easychange.remote.optical_protocol as optical
+
+    monkeypatch.setattr(optical,"MAX_EC2_RESULT_BYTES",180)
+    # UTF-8 multibyte characters are larger than their Python char count.
+    oversized={"data":"é"*150}
+    with patch.object(optical.zlib,"compress",
+                      side_effect=AssertionError("ENCODED_TOO_LATE")) as compressed:
+        with pytest.raises(ValueError,match="OPTICAL_RESULT_TOO_LARGE"):
+            optical._encode_raw(oversized)
+    compressed.assert_not_called()
+
+    valid={"data":"ready"}
+    raw, zipped, token=optical._encode_raw(valid)
+    assert json.loads(raw)==valid
+    assert zipped
+    assert isinstance(token,str)
+
+
+def test_ec2_encoder_checks_compressed_and_base64_budgets(monkeypatch):
+    import pytest
+    from unittest.mock import patch
+    import easychange.remote.optical_protocol as optical
+
+    value={"data":"small and valid"}
+    monkeypatch.setattr(optical,"MAX_EC2_COMPRESSED_BYTES",1)
+    with patch.object(optical.base64,"urlsafe_b64encode",
+                      side_effect=AssertionError("BASE64_TOO_EARLY")) as encoded:
+        with pytest.raises(ValueError,match="OPTICAL_COMPRESSED_RESULT_TOO_LARGE"):
+            optical._encode_raw(value)
+    encoded.assert_not_called()
+
+    monkeypatch.setattr(optical,"MAX_EC2_COMPRESSED_BYTES",12*1024*1024)
+    monkeypatch.setattr(optical,"MAX_EC2_TOKEN_CHARS",1)
+    with pytest.raises(ValueError,match="OPTICAL_RESULT_TOKEN_TOO_LARGE"):
+        optical._encode_raw(value)
+
+
 def test_ec2_round_trip_large_read_payload():
     result = Result(True, "read", {
         "path": "src/Foo.cs",
