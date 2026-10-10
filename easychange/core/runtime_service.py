@@ -356,15 +356,30 @@ class ProjectRuntimeService:
         if not self.config_path.exists():
             return []
         try:
-            value = json.loads(self.config_path.read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError):
+            with self.config_path.open("rb") as stream:
+                raw=stream.read(1_048_577)
+            if len(raw)>1_048_576:
+                return []
+            value=json.loads(raw.decode("utf-8-sig"))
+        except (OSError, ValueError, UnicodeError, RecursionError):
             return []
         rows = value.get("profiles") if isinstance(value, dict) else None
-        if not isinstance(rows, list):
+        if not isinstance(rows, list) or len(rows)>256:
             return []
         output = []
         for row in rows:
-            if not isinstance(row, dict) or not str(row.get("id") or "").strip():
+            if (not isinstance(row, dict) or
+                    type(row.get("id")) is not str or
+                    not 1<=len(row["id"].strip())<=128):
+                continue
+            raw_urls=row.get("urls",[])
+            raw_swagger=row.get("swagger_candidates",[])
+            inherit_env=row.get("inherit_env",True)
+            # A string is an iterable of characters, not a URL collection;
+            # a dict can hide executable-looking URLs in arbitrary keys.
+            if (type(raw_urls) is not list or len(raw_urls)>128 or
+                    type(raw_swagger) is not list or len(raw_swagger)>128 or
+                    type(inherit_env) is not bool):
                 continue
             try:
                 run_argv = self._argv(row.get("run_argv"))
@@ -384,12 +399,12 @@ class ProjectRuntimeService:
                 "run_argv": run_argv,
                 "test_argv": test_argv,
                 "build_argv": build_argv,
-                "urls": [str(item) for item in (row.get("urls") or []) if str(item).startswith(("http://", "https://"))][:16],
-                "swagger_candidates": [str(item) for item in (row.get("swagger_candidates") or []) if str(item).startswith(("http://", "https://"))][:32],
+                "urls": [item for item in raw_urls if type(item) is str and item.startswith(("http://", "https://"))][:16],
+                "swagger_candidates": [item for item in raw_swagger if type(item) is str and item.startswith(("http://", "https://"))][:32],
                 "configured": True,
                 "env": env_values,
                 "env_refs": env_refs,
-                "inherit_env": bool(row.get("inherit_env", True)),
+                "inherit_env": inherit_env,
                 "env_allowlist": env_allowlist,
             }
             try:
