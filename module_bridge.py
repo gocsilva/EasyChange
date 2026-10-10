@@ -158,7 +158,11 @@ class MCPBridge:
         # Misconfigured inherited credentials must behave as disconnected,
         # rather than raising while constructing an HTTP Authorization header.
         if (type(self.token) is not str or not self.token or
-                len(self.token)>256 or not self.token.isascii()):
+                len(self.token)>256 or not self.token.isascii() or
+                any(ord(char)<=32 or ord(char)==127 for char in self.token)):
+            # A token that passes ASCII-only validation can still contain
+            # spaces, CR or LF and fail during Authorization construction.
+            # Treat malformed credentials as disconnected before network I/O.
             return False
         if self._implicit_credential:
             with _runtime_state_lock:
