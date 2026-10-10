@@ -2,10 +2,10 @@
 from __future__ import annotations
 import unittest
 from unittest.mock import Mock
-from module_bridge import MCPBridge
+from module_bridge import MCPBridge,CANONICAL_MODULE_ID
 
 def item(ident):
-    return {"id":ident,"source":"mcp","target":"unit","topic":"unit.test",
+    return {"id":ident,"source":"mcp","target":CANONICAL_MODULE_ID,"topic":"unit.test",
             "payload":{"number":ident},"correlation_id":"cid","created_at":0}
 
 class TestProcessPending(unittest.TestCase):
@@ -290,6 +290,34 @@ class TestProcessPending(unittest.TestCase):
         self.assertEqual(result["deferred_id"],7)
         self.assertEqual(result["acknowledged"],0)
         b.ack.assert_not_called()
+
+    def test_inbox_target_must_match_page_recipient_before_handler(self):
+        bridge=self.bridge([item(21)])
+        handler=Mock(return_value=True)
+        wrong=next(name for name in ("esp","android","bmollm","easychange")
+                   if name!=CANONICAL_MODULE_ID)
+        for invalid in ({"id":21,"target":wrong},
+                        {"id":21},
+                        {"id":21,"target":None}):
+            with self.subTest(message=invalid):
+                message={**item(21),**invalid}
+                if "target" not in invalid:
+                    message.pop("target")
+                bridge.receive.return_value={
+                    "recipient":CANONICAL_MODULE_ID,
+                    "requires_ack":True,"messages":[message],"pending":1}
+                with self.assertRaisesRegex(ValueError,
+                                            "MCP_INBOX_TARGET_MISMATCH"):
+                    bridge.process_pending(handler)
+        handler.assert_not_called()
+        bridge.ack.assert_not_called()
+
+        # The canonical page and message identity proceed normally.
+        bridge.receive.return_value={
+            "recipient":CANONICAL_MODULE_ID,"requires_ack":True,
+            "messages":[item(21)],"pending":1}
+        self.assertEqual(bridge.process_pending(handler)["acknowledged"],1)
+        handler.assert_called_once()
 
     def test_standalone_without_hub_cannot_consume(self):
         b=MCPBridge(token="")
