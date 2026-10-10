@@ -49,3 +49,40 @@ def test_streaming_encoder_accepts_small_record_under_small_limits(monkeypatch):
     value={"ok":True,"message":"small"}
     encoded=DurableResultStore._encode(value)
     assert DurableResultStore._decode(encoded)==value
+
+
+def test_receipt_encode_preflight_rejects_large_string_before_json_encoder(monkeypatch):
+    monkeypatch.setattr(receipt_module,"MAX_DECODED_RECEIPT_BYTES",96)
+    value={"nested":{"text":"A"*200}}
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            receipt_module.json.JSONEncoder,"iterencode",
+            lambda *_a,**_k: (_ for _ in ()).throw(
+                AssertionError("UNBOUNDED_JSON_STRING_EXPANSION")))
+        for encoder in (DurableResultStore._encode,
+                        DurableResultStore._encode_result_json):
+            with pytest.raises(
+                    ValueError,match="RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE"):
+                encoder(value)
+
+
+def test_receipt_preflight_preserves_shared_subtree_without_false_cycle(monkeypatch):
+    shared={"text":"same shared payload"}
+    value={"first":shared,"second":shared}
+    encoded=DurableResultStore._encode(value)
+    assert DurableResultStore._decode(encoded)==value
+    assert json.loads(DurableResultStore._encode_result_json(value))==value
+
+
+def test_receipt_preflight_rejects_actual_cycles_without_encoder(monkeypatch):
+    cyclic={}
+    cyclic["self"]=cyclic
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            receipt_module.json.JSONEncoder,"iterencode",
+            lambda *_a,**_k: (_ for _ in ()).throw(
+                AssertionError("CYCLE_REACHED_JSON_ENCODER")))
+        for encoder in (DurableResultStore._encode,
+                        DurableResultStore._encode_result_json):
+            with pytest.raises(ValueError,match="Circular reference detected"):
+                encoder(cyclic)
