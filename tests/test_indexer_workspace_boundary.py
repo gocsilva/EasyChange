@@ -525,7 +525,9 @@ def test_failed_incremental_read_removes_previous_symbols(tmp_path,monkeypatch):
         return relative,size,mtime,"",None,[]
     monkeypatch.setattr(Indexer,"_read_candidate",staticmethod(failed_read))
     index.invalidate()
-    index.refresh(force=True)
+    report=index.refresh(force=True)
+    # A failed or unsafe candidate must not be counted as a successful index.
+    assert report["indexed"]==0
     assert index.symbols(name="PREVIOUS_SYMBOL")==[]
     with index._connect() as db:
         assert db.execute(
