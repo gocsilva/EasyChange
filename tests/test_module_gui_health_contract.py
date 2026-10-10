@@ -628,3 +628,60 @@ def test_standalone_child_cannot_inherit_mcp_host_capabilities(tmp_path):
                 assert os.environ[secret]==privileged[secret]
         assert child["MODULE_STANDALONE_TEST_CONFIG"]=="allowed"
     assert gui.process is not None
+
+
+def test_new_process_start_recovers_health_slot_from_old_stalled_probe(tmp_path):
+    """A stale HTTP request cannot suppress readiness of the newly started PID."""
+    import os
+    import subprocess
+    import sys
+    from unittest.mock import Mock, patch
+
+    src=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    tree=ast.parse(src)
+    constants={target.id:node.value.value for node in tree.body
+               if isinstance(node,ast.Assign) and isinstance(node.value,ast.Constant)
+               for target in node.targets if isinstance(target,ast.Name)}
+    klass=next(node for node in tree.body
+               if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+    workers=[]
+    class DeferredThread:
+        def __init__(self,*,target,daemon):
+            self.target=target
+        def start(self):
+            workers.append(self.target)
+
+    ns={"ROOT":tmp_path,"SERVICE":constants["SERVICE"],
+        "MODULE_ID":constants["MODULE_ID"],
+        "status":lambda:{"running":True},
+        "threading":type("Threads",(),{"Thread":DeferredThread}),
+        "tk":type("Tk",(),{"TclError":RuntimeError}),
+        "os":os,"sys":sys,"subprocess":subprocess}
+    exec(compile(ast.Module(body=[klass],type_ignores=[]),
+                 "<new-child-readiness>","exec"),ns)
+    gui=object.__new__(ns["ModuleGUI"])
+    gui.root=Mock()
+    gui.message=Mock()
+    gui.process=None
+    gui._closing=False
+    gui._refresh_inflight=False
+    gui._refresh_generation=0
+    gui._readiness_job=None
+
+    gui.refresh()
+    stale=workers.pop()
+    with patch("socket.create_connection",side_effect=ConnectionRefusedError), \
+         patch("subprocess.Popen",return_value=Mock()):
+        gui.start()
+    assert gui._refresh_generation==1
+    assert gui._refresh_inflight is False
+    gui.refresh()
+    current=workers.pop()
+    stale()
+    assert gui._refresh_inflight is True
+    current()
+    assert gui._refresh_inflight is True
+    gui.root.after.call_args.args[1]()
+    assert gui._refresh_inflight is False
+    assert gui.message.set.call_args.args[0]=="Serviço ativo"
