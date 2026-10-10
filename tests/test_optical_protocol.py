@@ -586,6 +586,20 @@ def test_adaptive_chunk_sizing_reduces_small_payload_chunk_count():
     assert len(adaptive) <= len(fixed)
 
 
+def test_ec2_mapping_iterator_binds_each_rhs_across_nested_fields():
+    from easychange.remote.optical_protocol import _json_equal_with_types
+
+    left={"first":1,"second":{"left":2,"right":3},
+          "third":[{"id":10,"active":True},{"id":11,"active":False}]}
+    right={"third":[{"active":True,"id":10},{"active":False,"id":11}],
+           "first":1,"second":{"right":3,"left":2}}
+    # Every resumed dictionary iterator must retain its *own* destination.
+    # Reusing the outer-loop rhs variable crashes after the first scalar.
+    assert _json_equal_with_types(left,right)
+    right["second"]["left"]=True
+    assert not _json_equal_with_types(left,right)
+
+
 def test_ec2_wide_structural_comparison_uses_bounded_iterator_memory():
     import tracemalloc
     from easychange.remote.optical_protocol import _json_equal_with_types
