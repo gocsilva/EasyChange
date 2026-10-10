@@ -4,6 +4,7 @@ import binascii
 import json
 import threading
 import time
+import zlib
 from dataclasses import dataclass, field
 
 # OpenCV's detector is reusable across frames, but should not be shared
@@ -31,22 +32,25 @@ class OpticalAssembler:
     pending_provisional_header: dict = field(default_factory=dict)
     updated_at: float = field(default_factory=time.monotonic)
 
+    def _reset_unverified(self):
+        self.sequence=""
+        self.chunks.clear()
+        self.total=0
+        self.stored_chars=0
+        self.stored_token_chars=0
+        self.packet_identity=None
+        self.verified_payload=None
+        self.header={}
+        self.pending_provisional_header={}
+        self.updated_at=time.monotonic()
+
     def ingest(self, payloads: list[str]) -> dict:
         # A partial or completed carousel must not own a reusable receiver
         # indefinitely. Expire only when new frames arrive: ingest([]) is
         # allowed to retrieve the last verified receipt without mutation.
         if (payloads and self.sequence
                 and time.monotonic() - self.updated_at >= MAX_EC2_ASSEMBLY_IDLE_SECONDS):
-            self.sequence=""
-            self.chunks.clear()
-            self.total=0
-            self.stored_chars=0
-            self.stored_token_chars=0
-            self.packet_identity=None
-            self.verified_payload=None
-            self.header={}
-            self.pending_provisional_header={}
-            self.updated_at=time.monotonic()
+            self._reset_unverified()
         for raw in payloads:
             try:
                 if (not isinstance(raw,str) or
@@ -142,7 +146,16 @@ class OpticalAssembler:
             # In HDMI burst mode the same complete carousel is observed many
             # times. Decode and validate the identical verified payload once.
             if self.verified_payload is None:
-                self.verified_payload=decode_result_chunks(list(self.chunks.values()))
+                try:
+                    self.verified_payload=decode_result_chunks(list(self.chunks.values()))
+                except (ValueError, TypeError, KeyError, RecursionError, zlib.error):
+                    # Every index was occupied, yet the assembled result was
+                    # not authentic. Do not let a CRC-consistent but corrupted
+                    # carousel block a later valid retransmission forever.
+                    # Preserve the integrity failure for callers and discard
+                    # only this unverified session.
+                    self._reset_unverified()
+                    raise
             if self.header:
                 digest=str(self.header.get("h") or "")
                 # EC2H d=1 advertises the original durable receipt digest,
