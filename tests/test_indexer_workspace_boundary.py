@@ -287,8 +287,12 @@ def test_incremental_reader_refuses_snapshot_changed_during_hash(
             ).fetchall() == []
         monkeypatch.setattr(index, "_read_candidate", original)
         assert index.update_path("changing.py")["updated"] is True
-        assert index.symbols(name="new_symbol")
-        assert index.symbols(name="old_symbol") == []
+        with index._connect() as db:
+            symbols = db.execute(
+                "SELECT name FROM symbols WHERE path=?", ("changing.py",)
+            ).fetchall()
+        assert ("new_symbol",) in symbols
+        assert ("old_symbol",) not in symbols
     finally:
         index.close()
 
