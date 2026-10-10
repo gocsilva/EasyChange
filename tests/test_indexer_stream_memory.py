@@ -90,6 +90,75 @@ def test_refresh_reads_changed_files_in_bounded_batches(tmp_path, monkeypatch):
         ).fetchone()[0].startswith("def changed():")
 
 
+def test_full_refresh_prunes_ignored_trees_before_directory_enumeration(tmp_path):
+    import os
+
+    for ignored in (".git", ".venv", "node_modules", ".easychange"):
+        nested=tmp_path/ignored/"deep"/"nested"
+        nested.mkdir(parents=True)
+        (nested/"never_index.py").write_text(
+            "def PRIVATE_IGNORE(): pass\n",encoding="utf-8")
+    source=tmp_path/"src"
+    source.mkdir()
+    (source/"visible.py").write_text(
+        "def PUBLIC_SYMBOL(): pass\n",encoding="utf-8")
+
+    idx=Indexer(tmp_path)
+    visited=[]
+    original_scandir=os.scandir
+
+    def traced_scandir(folder):
+        visited.append(Path(folder))
+        return original_scandir(folder)
+
+    with patch("easychange.core.indexer.os.scandir",
+               side_effect=traced_scandir):
+        result=idx.refresh(force=True)
+
+    assert result["files"]==1
+    assert idx.count()==1
+    assert any(folder==source for folder in visited)
+    for ignored in (".git", ".venv", "node_modules", ".easychange"):
+        assert not any(ignored in folder.relative_to(tmp_path).parts
+                       for folder in visited)
+    assert idx.symbols(name="PUBLIC_SYMBOL")
+    assert idx.symbols(name="PRIVATE_IGNORE")==[]
+
+
+def test_scan_prunes_symlinked_directory_without_following_external_target(
+        tmp_path):
+    import os
+    import pytest
+
+    project=tmp_path/"project"
+    project.mkdir()
+    outside=tmp_path/"elsewhere"
+    outside.mkdir()
+    (outside/"external.py").write_text(
+        "def SENSITIVE_FUNCTION(): pass\n",encoding="utf-8")
+    linked=project/"linked_dir"
+    try:
+        linked.symlink_to(outside,target_is_directory=True)
+    except (OSError,NotImplementedError):
+        pytest.skip("directory symlinks unavailable")
+    (project/"safe.py").write_text(
+        "def SAFE_FUNCTION(): pass\n",encoding="utf-8")
+    index=Indexer(project)
+    walked=[]
+    real_scandir=os.scandir
+
+    def spy(folder):
+        walked.append(Path(folder))
+        return real_scandir(folder)
+
+    with patch("easychange.core.indexer.os.scandir",side_effect=spy):
+        result=index.refresh(force=True)
+    assert result["files"]==1
+    assert index.symbols(name="SAFE_FUNCTION")
+    assert index.symbols(name="SENSITIVE_FUNCTION")==[]
+    assert not any(folder==linked for folder in walked)
+
+
 def test_full_refresh_resolves_trusted_root_only_once(tmp_path):
     # Boundary checks still resolve every candidate path, but must not
     # re-resolve the *same* workspace root thousands of times on cold scans.
