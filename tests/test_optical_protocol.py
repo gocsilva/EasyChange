@@ -288,6 +288,35 @@ def test_structured_primary_duplication_is_compacted_on_wire_and_restored():
 
 
 
+def test_ec2_sparse_retransmission_deduplicates_many_indexes_linearly():
+    import hashlib
+
+    # Deterministic low-compressibility content yields many actual packets.
+    text="".join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(100))
+    result=Result(True,"read",{"text":text},sequence="QLINEARIDX")
+    full=encode_result_chunks(result,chunk_chars=120)
+    assert len(full)>10
+    last=len(full)-1
+    requested=([0]*3000)+([last]*3000)+(["0"]*3000)
+    subset=encode_result_chunks(result,chunk_chars=120,indexes=requested)
+    assert subset==[full[0],full[-1]]
+
+
+def test_ec2_sparse_index_input_budget_checked_before_iteration(monkeypatch):
+    import pytest
+    import easychange.remote.optical_protocol as optical
+
+    result=Result(True,"read",{"text":"small"},sequence="QINDEXCAP")
+    monkeypatch.setattr(optical,"MAX_EC2_PACKETS",3)
+    with pytest.raises(ValueError,match="OPTICAL_CHUNK_INDEX_REQUEST_TOO_LARGE"):
+        encode_result_chunks(result,indexes=[0,0,0,0])
+    with pytest.raises(ValueError,match="OPTICAL_CHUNK_INDEX_REQUEST_TOO_LARGE"):
+        encode_result_chunks(result,indexes=iter([0]))
+    with pytest.raises(ValueError,match="invalid optical chunk index"):
+        encode_result_chunks(result,indexes=["0"*100000])
+    assert len(encode_result_chunks(result,indexes=[0,0]))==1
+
+
 def test_ec2_sparse_indexes_reject_fractional_values_without_rounding():
     import pytest
 
