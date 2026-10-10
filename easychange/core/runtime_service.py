@@ -1341,10 +1341,10 @@ class ProjectRuntimeService:
         # documentation. Accept recognisable UI mount points or actual loader
         # scripts, not a plain word anywhere in the HTML response.
         mount=re.search(
-            rb"<(?:div|main|section)\b[^>]{0,512}\bid\s*=\s*[\"']swagger-ui[\"']",
+            rb"<(?:div|main|section)\b[^>]{0,512}\bid\s*=\s*[\x22\x27]swagger-ui[\x22\x27]",
             sample)
         script=re.search(
-            rb"<script\b[^>]{0,512}\bsrc\s*=\s*[\"'][^\\"']*swagger-ui-bundle(?:\.min)?\.js(?:\?[^\\"']*)?[\"']",
+            rb"<script\b[^>]{0,512}\bsrc\s*=\s*[\x22\x27][^\x22\x27]*swagger-ui-bundle(?:\.min)?\.js(?:\?[^\x22\x27]*)?[\x22\x27]",
             sample)
         javascript=(b"<script" in sample and
                     re.search(rb"\bswaggeruibundle\s*\(",sample))
