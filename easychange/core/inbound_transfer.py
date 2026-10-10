@@ -157,7 +157,7 @@ class InboundCommandStore:
         if path.is_symlink():
             raise InboundTransferError("INBOUND_CHUNK_READ_FAILED")
         flags=(os.O_RDONLY|getattr(os,"O_BINARY",0)|
-               getattr(os,"O_NOFOLLOW",0))
+               getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_NONBLOCK",0))
         try:
             fd=os.open(path,flags)
         except OSError as exc:
