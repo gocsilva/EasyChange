@@ -555,3 +555,41 @@ def test_secret_source_path_is_persistently_excluded_from_index(tmp_path, monkey
                 assert secret.encode("utf-8") not in file.read_bytes()
     finally:
         reopened.close()
+
+
+def test_secret_source_registry_refuses_new_entry_instead_of_eviction(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA",str(tmp_path/"localapp"))
+    oldest=tmp_path/"oldest.env"
+    oldest.write_text("OLD_PRIVATE_CONTENT_MUST_STAY_EXCLUDED\n",encoding="utf-8")
+    latest=tmp_path/"new.env"
+    latest.write_text("NEW_PRIVATE_CONTENT\n",encoding="utf-8")
+    old_paths=["oldest.env"]+[f"legacy/import_{i:03}.env" for i in range(127)]
+
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        service.indexer.protect_path("oldest.env",scrub=True)
+        service.state_store.data["sensitive_source_paths"]=list(old_paths)
+        service.state_store.save()
+        with pytest.raises(ValueError,match="SECRET_SOURCE_PROTECTION_LIMIT"):
+            service._secret_value_from_workspace_source("new.env")
+        assert service.state_store.data["sensitive_source_paths"]==old_paths
+        assert "oldest.env" in service.indexer.protected_paths()
+        assert "new.env" not in service.indexer.protected_paths()
+        # Importing an already protected source is still allowed at capacity.
+        value,_meta=service._secret_value_from_workspace_source("oldest.env")
+        assert value=="OLD_PRIVATE_CONTENT_MUST_STAY_EXCLUDED"
+        assert len(service.state_store.data["sensitive_source_paths"])==128
+    finally:
+        service.close()
+
+    persisted=json.loads(
+        (tmp_path/".easychange"/"session.json").read_text(encoding="utf-8"))
+    assert persisted["sensitive_source_paths"]==old_paths
+    reopened=CommandService(Workspace.open(tmp_path))
+    try:
+        reopened.indexer.refresh(force=True)
+        assert "oldest.env" in reopened.indexer.protected_paths()
+        assert all(row["path"]!="oldest.env"
+                   for row in reopened.indexer.files(limit=1000))
+    finally:
+        reopened.close()
