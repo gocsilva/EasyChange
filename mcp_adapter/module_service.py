@@ -107,15 +107,21 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200,detach_hub(token))
         except (ValueError,TypeError,PermissionError) as exc:
             return self.send(403,{"error":type(exc).__name__})
-        except (OSError,RuntimeError):
+        except (ImportError,OSError,RuntimeError):
             # Do not strand attach callers when MCP is offline or times out.
             # Keep the credential/error internals out of the HTTP response.
             return self.send(503,{"error":"HUB_UNAVAILABLE"})
 
     def do_GET(self):
         if self.path=="/hub":
-            from module_bridge import MCPBridge
-            bridge=MCPBridge()
+            try:
+                from module_bridge import MCPBridge
+                bridge=MCPBridge()
+            except (ImportError,RuntimeError,OSError):
+                # The optional MCP client must never crash a standalone
+                # module's HTTP status endpoint during import or startup.
+                return self.send(503,{"connected":False,
+                                    "error":"HUB_CLIENT_UNAVAILABLE"})
             if not bridge.connected:
                 return self.send(200,{"connected":False,"standalone":True})
             try:
