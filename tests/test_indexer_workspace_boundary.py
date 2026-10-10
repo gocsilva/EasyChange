@@ -85,3 +85,87 @@ def test_refresh_preserves_working_index_and_removes_stale_linked_entries(tmp_pa
     assert index.count()==0
     with pytest.raises(ValueError,match="INVALID_PROTECTED_INDEX_PATH"):
         index.update_path("some.py")
+
+
+def test_git_cold_search_never_exposes_protected_files(tmp_path, monkeypatch):
+    from subprocess import CompletedProcess
+    import easychange.core.indexer as module
+
+    project=tmp_path/"project"
+    project.mkdir()
+    (project/".git").mkdir()
+    (project/"visible.py").write_text("TOKEN=public\n",encoding="utf-8")
+    (project/"private.py").write_text("TOKEN=secret\n",encoding="utf-8")
+    index=Indexer(project)
+    index.protect_path("private.py",scrub=False)
+    calls=[]
+
+    def git_grep(argv, **kwargs):
+        calls.append(argv)
+        return CompletedProcess(
+            args=argv,returncode=0,
+            stdout="private.py:1:TOKEN=secret\nvisible.py:1:TOKEN=public\n",
+            stderr="")
+
+    monkeypatch.setattr(module.subprocess,"run",git_grep)
+    monkeypatch.setattr(index,"start_background_refresh",lambda:None)
+    matches=index.search("TOKEN")
+    assert [(item["file"],item["text"]) for item in matches]==[
+        ("visible.py","TOKEN=public")]
+    assert len(calls)==1
+    with index._connect() as db:
+        assert db.execute(
+            "SELECT count(*) FROM files WHERE path='private.py'").fetchone()[0]==0
+
+
+def test_protection_is_enforced_on_warm_git_fallback(tmp_path, monkeypatch):
+    from subprocess import CompletedProcess
+    import easychange.core.indexer as module
+
+    project=tmp_path/"project"
+    project.mkdir()
+    (project/".git").mkdir()
+    protected=project/"config.py"
+    protected.write_text("SECRET_NEEDLE=hidden\n",encoding="utf-8")
+    index=Indexer(project)
+    index.refresh(force=True)
+    index.protect_path("config.py",scrub=False)
+
+    def git_grep(argv, **kwargs):
+        return CompletedProcess(
+            args=argv,returncode=0,
+            stdout="config.py:1:SECRET_NEEDLE=hidden\n",stderr="")
+
+    monkeypatch.setattr(module.subprocess,"run",git_grep)
+    assert index.search("SECRET_NEEDLE")==[]
+    with index._connect() as db:
+        assert db.execute(
+            "SELECT count(*) FROM files WHERE path='config.py'").fetchone()[0]==0
+
+
+def test_git_search_filters_external_symlink_and_internal_generated_dirs(tmp_path, monkeypatch):
+    from subprocess import CompletedProcess
+    import easychange.core.indexer as module
+
+    project=tmp_path/"project"
+    project.mkdir()
+    (project/".git").mkdir()
+    (project/"normal.py").write_text("TOKEN=valid\n",encoding="utf-8")
+    (project/".easychange").mkdir()
+    outside=tmp_path/"out.py"
+    outside.write_text("TOKEN=external\n",encoding="utf-8")
+    try:
+        (project/"linked.py").symlink_to(outside)
+    except (OSError,NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    index=Indexer(project)
+
+    def git_grep(argv, **kwargs):
+        return CompletedProcess(args=argv,returncode=0,
+            stdout="linked.py:1:TOKEN=external\n.easychange/cache.py:1:TOKEN=internal\n"
+                   "normal.py:1:TOKEN=valid\n",stderr="")
+
+    monkeypatch.setattr(module.subprocess,"run",git_grep)
+    assert index._git_search(
+        "TOKEN",regex=False,extension=None,path_prefix=None,
+        case_sensitive=False)==[("normal.py","1:TOKEN=valid")]
