@@ -274,3 +274,43 @@ def test_profile_lock_refuses_symlink_without_writing_config(tmp_path):
         service.configure_profile("unsafe",test_argv=["python","-m","pytest"])
     assert outside.read_text(encoding="utf-8")=="UNTOUCHED"
     assert not service.config_path.exists()
+
+
+def test_configure_profile_rejects_ambiguous_environment_inheritance(tmp_path):
+    import pytest
+
+    folder=tmp_path/".easychange"
+    folder.mkdir()
+    service=object.__new__(ProjectRuntimeService)
+    service.workspace=SimpleNamespace(root_path=tmp_path)
+    service.config_path=folder/"runtime_profiles.json"
+    service.resolve_environment=lambda *_a,**_k: (
+        {},{"resolved_env_keys":[],"unresolved_env_refs":[]})
+    service.configure_profile("valid",inherit_env=False)
+    baseline=service.config_path.read_bytes()
+
+    for invalid in ("false","true",1,0,[],None):
+        with pytest.raises(ValueError,match="INVALID_RUNTIME_INHERIT_ENV"):
+            service.configure_profile("invalid",inherit_env=invalid)
+        assert service.config_path.read_bytes()==baseline
+    assert service._configured_profiles()[0]["inherit_env"] is False
+
+
+def test_configure_profile_does_not_save_nonlist_url_collections(tmp_path):
+    import pytest
+
+    folder=tmp_path/".easychange"
+    folder.mkdir()
+    service=object.__new__(ProjectRuntimeService)
+    service.workspace=SimpleNamespace(root_path=tmp_path)
+    service.config_path=folder/"runtime_profiles.json"
+    service.resolve_environment=lambda *_a,**_k: (
+        {},{"resolved_env_keys":[],"unresolved_env_refs":[]})
+    service.configure_profile("valid",urls=["http://localhost:5000"])
+    before=service.config_path.read_bytes()
+    for invalid in ("http://localhost:5000",
+                    {"http://localhost:5000":True},
+                    ["http://localhost:5000",17]):
+        with pytest.raises(ValueError,match="INVALID_RUNTIME_URLS"):
+            service.configure_profile("bad",urls=invalid)
+        assert service.config_path.read_bytes()==before
