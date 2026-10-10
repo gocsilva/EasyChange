@@ -23,7 +23,7 @@ import math
 from dataclasses import dataclass
 
 from .command_parser import CommandParser
-from .file_service import ExternalChangeError, FileService
+from .file_service import ExternalChangeError, FileService, MAX_TEXT_FILE_BYTES
 from .git_service import GitService
 from .human_text_service import HumanTextService
 from .indexer import Indexer
@@ -807,7 +807,16 @@ class CommandService:
                     if resolved.exists():
                         if not resolved.is_file():
                             raise SafeEditError("NOT_A_FILE", f"Not a file: {relative}")
-                        data = resolved.read_bytes()
+                        # FileService enforces this existing 4 MiB text
+                        # limit for writes; the planned-batch preflight must
+                        # enforce it *before* materializing a source file.
+                        with resolved.open("rb") as stream:
+                            data = stream.read(MAX_TEXT_FILE_BYTES + 1)
+                        if len(data) > MAX_TEXT_FILE_BYTES:
+                            raise SafeEditError(
+                                "FILE_TOO_LARGE",
+                                f"File exceeds text read limit ({MAX_TEXT_FILE_BYTES} bytes): {relative}",
+                            )
                         if b"\0" in data:
                             raise SafeEditError("BINARY_FILE", f"Binary file cannot be patched: {relative}")
                         originals[relative] = data.decode("utf-8-sig")
