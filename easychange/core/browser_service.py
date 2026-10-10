@@ -7,6 +7,7 @@ from collections import deque
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import shutil
 import socket
@@ -76,6 +77,26 @@ class _NoCDPHttpRedirect(urllib.request.HTTPRedirectHandler):
 
 _CDP_HTTP_OPENER=urllib.request.build_opener(
     urllib.request.ProxyHandler({}),_NoCDPHttpRedirect())
+
+
+def _unique_cdp_json_fields(pairs):
+    value={}
+    for key,item in pairs:
+        if key in value:
+            raise ValueError("CDP_DUPLICATE_JSON_KEY")
+        value[key]=item
+    return value
+
+
+def _finite_cdp_float(token):
+    value=float(token)
+    if not math.isfinite(value):
+        raise ValueError("CDP_NONFINITE_JSON_NUMBER")
+    return value
+
+
+def _reject_cdp_constant(_token):
+    raise ValueError("CDP_NONFINITE_JSON_NUMBER")
 
 
 class _BoundedProcessCapture:
@@ -332,8 +353,12 @@ class _WebSocket:
                     self._response_ready.notify_all()
                 return
             try:
-                message = json.loads(raw)
-            except json.JSONDecodeError:
+                message = json.loads(
+                    raw, object_pairs_hook=_unique_cdp_json_fields,
+                    parse_float=_finite_cdp_float,
+                    parse_constant=_reject_cdp_constant,
+                )
+            except (ValueError, RecursionError):
                 # A malformed CDP message is transport damage, not a valid
                 # event. Keep the socket alive and surface a bounded counter by
                 # recording a synthetic diagnostic event.
