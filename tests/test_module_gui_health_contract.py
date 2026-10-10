@@ -779,3 +779,42 @@ def test_uncertain_existing_pid_never_allows_duplicate_standalone_start():
         gui.refresh.assert_not_called()
         assert gui.process is previous
         assert "Estado do serviço desconhecido" in gui.message.set.call_args.args[0]
+
+
+def test_failed_pid_poll_during_health_refresh_is_fail_closed():
+    """An invalid child handle must not crash the Tk callback or imply stop."""
+    from unittest.mock import Mock
+    src=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(
+        encoding="utf-8")
+    klass=next(node for node in ast.parse(src).body
+               if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+    workers=[]
+    class Thread:
+        def __init__(self,*,target,daemon):
+            self.target=target
+        def start(self):
+            workers.append(self.target)
+    ns={"threading":type("Threads",(),{"Thread":Thread}),
+        "status":lambda:{"running":False},
+        "tk":type("Tk",(),{"TclError":RuntimeError})}
+    exec(compile(ast.Module(body=[klass],type_ignores=[]),
+                 "<health-pid-error>","exec"),ns)
+    gui=object.__new__(ns["ModuleGUI"])
+    gui.root=Mock()
+    gui.message=Mock()
+    gui.process=Mock()
+    gui.process.poll.side_effect=OSError("INVALID_CHILD_HANDLE")
+    gui._closing=False
+    gui._refresh_inflight=False
+    gui._refresh_generation=0
+    gui._readiness_job=None
+    gui.refresh()
+    assert len(workers)==1
+    workers.pop()()
+    callback=gui.root.after.call_args.args[1]
+    callback()
+    assert gui.process is not None
+    assert gui._refresh_inflight is False
+    assert gui._readiness_job is None
+    assert "Estado do serviço desconhecido: OSError" in gui.message.set.call_args.args[0]
+    gui.root.destroy.assert_not_called()
