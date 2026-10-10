@@ -2,7 +2,10 @@
 from __future__ import annotations
 from pathlib import Path
 from functools import lru_cache
+import io
 import tomllib
+
+MAX_PROJECT_METADATA_BYTES = 131072
 from easychange.core.operation_registry import (
     structured_capabilities, structured_operation_profile,
     structured_operation_is_mutation,
@@ -16,13 +19,22 @@ def _project_version(path: str, modified_ns: int, size: int) -> str:
     # invalidates the small cache for editable-development installs.
     del modified_ns, size
     with Path(path).open("rb") as handle:
-        project=tomllib.load(handle).get("project",{})
+        raw=handle.read(MAX_PROJECT_METADATA_BYTES+1)
+    if len(raw)>MAX_PROJECT_METADATA_BYTES:
+        raise ValueError("MODULE_PROJECT_METADATA_TOO_LARGE")
+    project=tomllib.load(io.BytesIO(raw)).get("project",{})
     return str(project.get("version","unknown"))
 
 def module_status(*, esp_enabled: bool = False) -> dict:
     manifest=ROOT/"pyproject.toml"
-    metadata=manifest.stat()
-    version=_project_version(str(manifest),metadata.st_mtime_ns,metadata.st_size)
+    try:
+        metadata=manifest.stat()
+    except FileNotFoundError:
+        # Wheels/packaged services may not contain the source pyproject.
+        # Their read-only module status should still be available.
+        version="unknown"
+    else:
+        version=_project_version(str(manifest),metadata.st_mtime_ns,metadata.st_size)
     return {"installed":True,"module_root":str(ROOT),
             "version":version,
             "physical_transport":"ESP HID + HDMI EC2",
