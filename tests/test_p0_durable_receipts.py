@@ -1158,6 +1158,35 @@ def test_receipt_path_symlink_swap_fails_closed_at_open(tmp_path, monkeypatch):
     assert store.get(sequence)["state"]=="RUNNING"
 
 
+def test_failed_receipt_fd_wrapper_releases_raw_descriptor(tmp_path, monkeypatch):
+    import os
+    import pytest
+    import easychange.core.result_store as result_module
+
+    store=DurableResultStore(tmp_path / "results")
+    sequence="QFDOPENFAIL01"
+    store.mark_running(sequence,"a"*64,":job",mutation=True)
+    before=store._path(sequence).read_bytes()
+    real_close=os.close
+    closed=[]
+
+    def track_close(fd):
+        closed.append(fd)
+        return real_close(fd)
+
+    def fail_fdopen(*args, **kwargs):
+        raise OSError("SIMULATED_FDOPEN_FAILURE")
+
+    with monkeypatch.context() as ctx:
+        ctx.setattr(result_module.os,"fdopen",fail_fdopen)
+        ctx.setattr(result_module.os,"close",track_close)
+        with pytest.raises(RuntimeError,match="RESULT_RECEIPT_UNREADABLE"):
+            store.get(sequence)
+    assert len(closed)==1
+    assert store._path(sequence).read_bytes()==before
+    assert store.get(sequence)["state"]=="RUNNING"
+
+
 def test_oversized_receipt_fails_closed_without_deleting_disk_evidence(tmp_path, monkeypatch):
     import pytest
     import easychange.core.result_store as result_module
