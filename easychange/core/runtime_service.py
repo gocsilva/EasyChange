@@ -1013,6 +1013,13 @@ class ProjectRuntimeService:
         started = time.monotonic()
         try:
             parsed = urlsplit(url)
+            # Evidence probes are HTTP requests, never local-file or other
+            # scheme readers. Reject credentials in URLs before they can be
+            # serialized into result metadata and logs.
+            if (parsed.scheme not in {"http", "https"} or
+                    not parsed.hostname or
+                    parsed.username is not None or parsed.password is not None):
+                raise ValueError("INVALID_HTTP_PROBE_URL")
             request = urllib.request.Request(url, headers={"User-Agent": "EasyChange/0.1"})
             # Prefix matching is unsafe: https://localhost.attacker.test
             # is not loopback and must retain certificate verification.
