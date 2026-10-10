@@ -790,8 +790,16 @@ class DurableResultStore:
         value = self.get(sequence)
         if value is None:
             return None
-        started = float(value.get("started_at") or 0.0)
-        finished = float(value.get("finished_at") or 0.0)
+        try:
+            started = float(value.get("started_at") or 0.0)
+            finished = float(value.get("finished_at") or 0.0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            # A valid updated_at can coexist with corrupt legacy timing fields.
+            # Never manufacture duration_ms or mask the durable replay claim.
+            raise RuntimeError("RESULT_RECEIPT_UNREADABLE") from exc
+        if (not math.isfinite(started) or not math.isfinite(finished) or
+                started < 0 or finished < 0):
+            raise RuntimeError("RESULT_RECEIPT_UNREADABLE")
         elapsed_end = finished or time.time()
         return {
             "sequence": sequence,
