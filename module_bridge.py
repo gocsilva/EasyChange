@@ -385,20 +385,28 @@ class MCPBridge:
         cannot repeat the handler's operation or acknowledge a different ID.
         """
         payload={"ids":ids}
+        # One 8-second budget across *all* idempotent attempts, not three
+        # independent 8-second waits that can pin the consumer for 24 seconds.
+        deadline=time.monotonic()+8.0
+        last_error=None
         for attempt in range(3):
+            remaining=deadline-time.monotonic()
+            if attempt and remaining<=0:
+                raise last_error
+            timeout=8.0 if attempt==0 else min(8.0,remaining)
             try:
-                # ACK is recipient-scoped and idempotent. Keep a stalled
-                # loopback hub from holding the consumer lease for 3 x 40s.
-                return self._request("/v1/inbox/ack",payload,timeout=8)
+                return self._request("/v1/inbox/ack",payload,timeout=timeout)
             except HTTPError as exc:
-                # A real HTTP rejection is not an uncertain transport outcome.
-                # Close its response rather than holding a rejected ACK socket.
+                # HTTP rejection is not an uncertain transport outcome.
                 exc.close()
                 raise
-            except (URLError, ConnectionError, TimeoutError):
-                if attempt==2:
+            except (URLError, ConnectionError, TimeoutError) as exc:
+                last_error=exc
+                if attempt==2 or time.monotonic()>=deadline:
                     raise
-                time.sleep(0.05*(attempt+1))
+                pause=min(0.05*(attempt+1),max(0.0,deadline-time.monotonic()))
+                if pause:
+                    time.sleep(pause)
 
     def process_pending(self, handler, *, limit=20, ack_batch_size=1):
         """Opt-in callback processing. ACK only after explicit True.
