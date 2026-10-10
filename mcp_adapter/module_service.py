@@ -59,6 +59,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200,{"connected":False,"standalone":True})
             try:
                 members=bridge.peers()
+                if (not isinstance(members,dict) or members.get("ok") is not True
+                        or members.get("self")!="easychange"):
+                    return self.send(503,{"connected":False,
+                                          "error":"MCP_MODULE_IDENTITY_MISMATCH"})
                 return self.send(200,{"connected":True,"identity":members.get("self"),
                                       "peers":members.get("peers",[]),
                                       "tools":len(bridge.catalog().get("tools",[]))})
