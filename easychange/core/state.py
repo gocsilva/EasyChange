@@ -11,6 +11,16 @@ from pathlib import Path
 MAX_MACHINE_SESSION_BYTES = 16 * 1024 * 1024
 
 
+def _unique_session_fields(pairs):
+    """Reject ambiguous duplicate fields in imported session JSON."""
+    values = {}
+    for key, value in pairs:
+        if key in values:
+            raise ValueError("MACHINE_SESSION_DUPLICATE_JSON_FIELD")
+        values[key] = value
+    return values
+
+
 def _finite_session_number(token: str) -> float:
     number = float(token)
     if not math.isfinite(number):
@@ -53,7 +63,9 @@ class MachineSession:
                 if len(raw) > MAX_MACHINE_SESSION_BYTES:
                     raise ValueError("MACHINE_SESSION_TOO_LARGE")
                 loaded = json.loads(
-                    raw.decode("utf-8"), parse_constant=_reject_session_constant,
+                    raw.decode("utf-8"),
+                    object_pairs_hook=_unique_session_fields,
+                    parse_constant=_reject_session_constant,
                     parse_float=_finite_session_number)
                 if isinstance(loaded, dict) and loaded.get("workspace") == workspace:
                     # A valid JSON object is not necessarily a valid session.
