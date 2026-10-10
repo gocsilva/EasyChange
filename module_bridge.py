@@ -224,7 +224,10 @@ class MCPBridge:
         max_response = (
             8_388_608 + 131_072 if path == "/v1/tools/call"
             else 2_097_152 if path == "/v1/tools"
-            else 1_048_576 if path in ("/v1/inbox", "/v1/inbox/peek")
+            # The hub permits 100 messages of up to 16 KiB each (plus
+            # envelope metadata). A 1 MiB inbox read limit rejects a valid
+            # near-full batch even though the server admitted every message.
+            else 2_097_152 if path in ("/v1/inbox", "/v1/inbox/peek")
             else 65_536
         )
         with _local_opener.open(req,timeout=timeout) as response:
