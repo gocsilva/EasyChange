@@ -174,6 +174,11 @@ class MCPBridge:
                         if len(item)>request_limit:
                             raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
                         if isinstance(item,dict):
+                            # Python accepts non-string mapping keys; JSON
+                            # stringifies them, allowing collisions such as
+                            # 1 and "1". Reject before network admission.
+                            if any(type(key) is not str for key in item):
+                                raise ValueError("MCP_BUS_INVALID_JSON_KEY")
                             pending.append(itertools.chain(item.keys(),item.values()))
                         else:
                             pending.append(iter(item))
