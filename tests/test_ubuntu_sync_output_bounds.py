@@ -105,3 +105,20 @@ def test_failed_wsl_wait_attempts_reap_before_reporting_error(monkeypatch):
     assert process.killed is True
     assert process.wait_calls==[2,3]
     assert process.stdout.closed and process.stderr.closed
+
+
+def test_wsl_closed_output_pipe_is_never_reported_as_complete(monkeypatch):
+    service=UbuntuService(None)
+    monkeypatch.setattr(service,"_wsl_argv",
+                        lambda session, argv:["wsl.exe","--exec",*argv])
+    process=FakeWSLProcess(stdout=b"",stderr=b"")
+    class ClosedPipe(io.BytesIO):
+        def read(self,_size=-1):
+            raise ValueError("read of closed file")
+    process.stdout=ClosedPipe()
+    with patch("easychange.core.ubuntu_service.subprocess.Popen",
+               return_value=process):
+        with pytest.raises(UbuntuError,match="UBUNTU_OUTPUT_CAPTURE_INCOMPLETE"):
+            service._run_sync(None,["kubectl","get","pods"],max_bytes=1024)
+    assert process.stdout.closed
+    assert process.stderr.closed
