@@ -267,6 +267,42 @@ def test_legacy_done_journal_without_result_cannot_reexecute_mutation(tmp_path, 
         service.close()
 
 
+def test_malformed_legacy_journal_never_claims_or_reexecutes_sequence(tmp_path, monkeypatch):
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        sequence="QBADJOURNAL1"
+        operation={"op":"operation","type":"replace_exact",
+                   "path":"sample.txt","old_text":"BEFORE","new_text":"AFTER"}
+        (tmp_path/"sample.txt").write_text("BEFORE",encoding="utf-8")
+        before=(tmp_path/"sample.txt").read_bytes()
+        def forbidden(*args,**kwargs):
+            raise AssertionError("corrupt legacy state must not execute or claim")
+        monkeypatch.setattr(service,"_execute_structured",forbidden)
+        monkeypatch.setattr(service.result_store,"claim_running",forbidden)
+        wire=":ec "+sequence+" :j1 "+json.dumps(operation)
+        for corrupt_root in (None, [], "unreadable", 9, False):
+            service.state_store.data["ec_results"]=corrupt_root
+            answer=service.execute(wire)
+            assert answer.ok is False
+            assert answer.code=="SEQUENCE_STATE_UNAVAILABLE"
+            assert answer.sequence==sequence
+            assert service.state_store.data["ec_results"] is corrupt_root
+            assert service.result_store.get(sequence) is None
+        for invalid_entry in (None, [], "DONE", True, 11):
+            journal={sequence:invalid_entry}
+            service.state_store.data["ec_results"]=journal
+            answer=service.execute(wire)
+            assert answer.ok is False
+            assert answer.code=="SEQUENCE_STATE_UNAVAILABLE"
+            assert answer.sequence==sequence
+            assert journal[sequence] is invalid_entry
+            assert service.result_store.get(sequence) is None
+        assert (tmp_path/"sample.txt").read_bytes()==before
+    finally:
+        service.state_store.data["ec_results"]={}
+        service.close()
+
+
 def test_unpaired_unicode_command_rejected_before_sequence_claim(tmp_path, monkeypatch):
     service=CommandService(Workspace.open(tmp_path))
     try:
