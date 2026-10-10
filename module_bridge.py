@@ -490,7 +490,11 @@ class MCPBridge:
             unique=set()
             for message in selected:
                 if (not isinstance(message,dict) or
-                        type(message.get("id")) is not int or message["id"]<1):
+                        type(message.get("id")) is not int or
+                        not 1<=message["id"]<=(1<<63)-1):
+                    # The hub persists IDs as signed SQLite INTEGER values.
+                    # Do not execute mutating callbacks for invalid IDs that
+                    # can never be acknowledged durably.
                     raise ValueError("INVALID_MCP_INBOX_MESSAGE")
                 # Legacy pages may omit the page-level recipient, but each
                 # message must still prove its intended target. Without this
