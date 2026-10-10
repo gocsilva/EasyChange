@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
+import zlib
 from typing import Any
 
 from .process_service import ProcessService
@@ -32,6 +33,73 @@ def _rel(root: Path, path: Path) -> str:
 def _slug(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-")
     return value[:80] or "evidence"
+
+
+def _is_structurally_valid_png(path: Path) -> bool:
+    """Bounded PNG framing/CRC verification, not a visual truth assertion."""
+    limit=64*1024*1024
+    depths={0:{1,2,4,8,16},2:{8,16},3:{1,2,4,8},
+            4:{8,16},6:{8,16}}
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        size=path.stat().st_size
+        if not 57<=size<=limit:
+            return False
+        with path.open("rb") as stream:
+            if stream.read(8)!=b"\x89PNG\r\n\x1a\n":
+                return False
+            remaining=size-8
+            chunks=0
+            has_idat=False
+            while remaining>=12 and chunks<10000:
+                header=stream.read(8)
+                if len(header)!=8:
+                    return False
+                length=int.from_bytes(header[:4],"big")
+                kind=header[4:]
+                if length>remaining-12 or any(
+                    not (65<=item<=90 or 97<=item<=122) for item in kind
+                ):
+                    return False
+                if chunks==0 and (kind!=b"IHDR" or length!=13):
+                    return False
+                crc=zlib.crc32(kind)
+                if kind==b"IHDR":
+                    if chunks or length!=13:
+                        return False
+                    data=stream.read(13)
+                    if len(data)!=13:
+                        return False
+                    width=int.from_bytes(data[:4],"big")
+                    height=int.from_bytes(data[4:8],"big")
+                    depth,colour,compress,filter_mode,interlace=data[8:]
+                    if (not width or not height or width*height>100_000_000
+                            or depth not in depths.get(colour,set())
+                            or compress or filter_mode or interlace not in (0,1)):
+                        return False
+                    crc=zlib.crc32(data,crc)
+                else:
+                    if kind==b"IDAT" and length:
+                        has_idat=True
+                    left=length
+                    while left:
+                        piece=stream.read(min(left,65536))
+                        if not piece:
+                            return False
+                        crc=zlib.crc32(piece,crc)
+                        left-=len(piece)
+                checksum=stream.read(4)
+                if len(checksum)!=4 or int.from_bytes(checksum,"big")!=(crc&0xffffffff):
+                    return False
+                remaining-=length+12
+                chunks+=1
+                if kind==b"IEND":
+                    return bool(length==0 and has_idat and remaining==0
+                                and not stream.read(1))
+            return False
+    except (OSError,ValueError,TypeError):
+        return False
 
 
 class _SameOriginRuntimeRedirect(urllib.request.HTTPRedirectHandler):
@@ -1189,18 +1257,11 @@ class ProjectRuntimeService:
         # HTTP 200 verifies the endpoint, not the screenshot. This runtime
         # intentionally does not spin up an automated browser; a missing
         # image must never be reported as complete visual evidence.
-        screenshot_captured = False
-        if screenshot_path is not None and screenshot_path == folder / "swagger.png":
-            try:
-                # A returned pathname is not visual evidence. Require the
-                # expected regular file and PNG signature; never read the
-                # whole image back into memory just to validate existence.
-                if screenshot_path.is_file() and not screenshot_path.is_symlink():
-                    with screenshot_path.open("rb") as image_stream:
-                        screenshot_captured = (
-                            image_stream.read(8) == b"\x89PNG\r\n\x1a\n")
-            except OSError:
-                pass
+        screenshot_captured = bool(
+            screenshot_path is not None
+            and screenshot_path == folder / "swagger.png"
+            and _is_structurally_valid_png(screenshot_path)
+        )
         if not screenshot_captured:
             screenshot_path = None
         evidence = {
