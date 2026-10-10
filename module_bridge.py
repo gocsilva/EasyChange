@@ -227,6 +227,12 @@ class MCPBridge:
                     if isinstance(item,str):
                         if len(item)>request_limit:
                             raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
+                    elif type(item) is int:
+                        # Python ints have unlimited precision. Reject
+                        # obviously oversized decimal wire values *before*
+                        # JSONEncoder allocates their string representation.
+                        if item.bit_length()>(request_limit+1)*10//3:
+                            raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
                     elif isinstance(item,(dict,list,tuple)):
                         identity=id(item)
                         if identity in active_containers:
