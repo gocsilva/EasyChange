@@ -203,6 +203,25 @@ class TestHubRedirectBoundary(unittest.TestCase):
                              {"connected":False})
             self.assertTrue(module_bridge._runtime_detached)
 
+    def test_attach_rejects_non_base64url_token_before_hub_network(self):
+        from unittest.mock import patch
+
+        canonical=module_bridge.CANONICAL_MODULE_ID
+        bad=("é"*48,"A"*47+" ","A"*47+chr(13),
+             "A"*47+"/","A"*47+"=",chr(0xD800)*48,
+             b"A"*48,True,None)
+        for token in bad:
+            with self.subTest(token_type=type(token).__name__), \
+                 patch.object(module_bridge,"_runtime_token","saved-active-token"), \
+                 patch.object(module_bridge,"_runtime_detached",False), \
+                 patch.object(module_bridge.MCPBridge,"peers",
+                              side_effect=AssertionError("UNSAFE_NETWORK")) as peers:
+                with self.assertRaisesRegex(ValueError,"INVALID_HUB_CREDENTIAL"):
+                    module_bridge.attach_hub(token,canonical)
+                peers.assert_not_called()
+                self.assertEqual(module_bridge._runtime_token,"saved-active-token")
+                self.assertFalse(module_bridge._runtime_detached)
+
     def test_detach_never_recovers_inherited_bootstrap_token(self):
         from unittest.mock import patch
 
