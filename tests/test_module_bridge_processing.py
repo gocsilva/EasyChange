@@ -495,6 +495,30 @@ class TestProcessPending(unittest.TestCase):
         self.assertEqual(
             b.process_pending(lambda _:True,ack_batch_size=2)["acknowledged"],2)
 
+    def test_legacy_page_never_executes_message_with_missing_target(self):
+        handler=Mock(return_value=True)
+        client=self.bridge([item(95)])
+        # The legacy inbox omitted only the page-level recipient; it never
+        # authorized a message without its own canonical recipient target.
+        unaddressed={key:value for key,value in item(95).items()
+                     if key!="target"}
+        client.receive.return_value={
+            "ok":True,"requires_ack":True,
+            "messages":[unaddressed],"pending":1}
+        with self.assertRaisesRegex(ValueError,"MCP_INBOX_TARGET_MISMATCH"):
+            client.process_pending(handler)
+        handler.assert_not_called()
+        client.ack.assert_not_called()
+
+        # Preserve compatibility with a headerless legacy page when the
+        # individual message still identifies the correct destination.
+        client.receive.return_value={
+            "ok":True,"requires_ack":True,
+            "messages":[item(95)],"pending":1}
+        self.assertEqual(client.process_pending(handler)["acknowledged"],1)
+        handler.assert_called_once()
+        client.ack.assert_called_once_with([95])
+
     def test_mismatched_inbox_or_ack_recipient_fails_closed(self):
         import module_bridge
 
