@@ -4149,7 +4149,15 @@ class CommandService:
             if not re.fullmatch(r"[A-Za-z_$][\w$]*", old) or not re.fullmatch(r"[A-Za-z_$][\w$]*", new):
                 raise ValueError("Symbol names must be identifiers")
             if not self.symbol_service.definition(old): raise LookupError(f"Symbol definition not found: {old}")
+            # This legacy rename scans a fixed 100k-file window. Never start
+            # a filesystem mutation if files beyond that window would be
+            # silently excluded from a purported workspace-wide rename.
+            indexed_count = self.indexer.count()
+            if indexed_count > 100000:
+                raise ValueError("RENAME_SYMBOL_INDEX_TOO_LARGE")
             candidates = self.indexer.files(limit=100000)
+            if len(candidates) != indexed_count or self.indexer.count() != indexed_count:
+                raise ValueError("RENAME_SYMBOL_INDEX_CHANGED")
             changes = []
             own_transaction = self.transaction is None
             if own_transaction:
