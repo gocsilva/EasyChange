@@ -2096,3 +2096,57 @@ def test_reused_browser_attach_missing_url_does_not_destroy_healthy_session(tmp_
     assert browser._session("T1") is session
     assert session.cdp.closed is False
     assert session.browser_cdp.closed is False
+
+
+def test_devtools_port_marker_reads_only_first_bounded_line(tmp_path, monkeypatch):
+    profile = tmp_path / "browser-profile"
+    profile.mkdir()
+    marker = profile / "DevToolsActivePort"
+    marker.write_bytes(b"9333\n" + b"x" * (256 * 1024))
+    reads = []
+    original_read = browser_module.os.read
+
+    def tracked_read(fd, size):
+        reads.append(size)
+        return original_read(fd, size)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(browser_module.os, "read", tracked_read)
+        assert BrowserService._active_port(profile) == 9333
+    assert reads == [16]
+    for invalid in (
+        b"70000\n/devtools/browser/abc\n",
+        b"0\n/devtools/browser/abc\n",
+        b"9222garbage\n",
+        b"\xff9222\n",
+        b"9999999999999999999999\n",
+    ):
+        marker.write_bytes(invalid)
+        assert BrowserService._active_port(profile) == 0
+    marker.unlink()
+    assert BrowserService._active_port(profile) == 0
+
+
+def test_port_wait_reuses_strict_parser_and_refuses_infinite_timeout(tmp_path, monkeypatch):
+    browser = _new_browser(tmp_path, monkeypatch)
+    profile = tmp_path / "browser-profile"
+    profile.mkdir()
+    marker = profile / "DevToolsActivePort"
+    marker.write_bytes(b"70000\n")
+    with monkeypatch.context() as patcher:
+        patcher.setattr(browser_module.time, "monotonic", lambda: 100.0)
+        patcher.setattr(browser_module.time, "sleep", lambda *_: (_ for _ in ()).throw(
+            AssertionError("unexpected wait during validation")))
+        for duration in (float("nan"), float("inf"), -float("inf"), "invalid"):
+            with pytest.raises(ValueError, match="BROWSER_CDP_INVALID_TIMEOUT"):
+                browser._wait_port(profile, duration)
+    marker.write_bytes(b"5555\n/devtools/browser/abc\n")
+    assert browser._wait_port(profile, 0.01) == 5555
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX named FIFO safety")
+def test_devtools_port_marker_fifo_does_not_block_or_become_port(tmp_path):
+    profile = tmp_path / "browser-profile"
+    profile.mkdir()
+    os.mkfifo(profile / "DevToolsActivePort")
+    assert BrowserService._active_port(profile) == 0
