@@ -497,3 +497,39 @@ def test_metadata_descriptor_must_match_path_inode_before_read(tmp_path, monkeyp
     refreshed=service.info()
     assert refreshed["sha256"]==saved["sha256"]
     assert refreshed["bytes"]==len("canonical buffer content".encode("utf-8"))
+
+
+def test_paginated_read_rejects_in_place_rewrite_during_page_io(tmp_path,monkeypatch):
+    import os
+    import easychange.core.human_text_service as module
+
+    service=HumanTextService(tmp_path)
+    service.save("AAAA")
+    previous=service.info()
+    original_fstat=module.os.fstat
+    seen=[]
+
+    def rewrite_on_final_fstat(fd):
+        seen.append(fd)
+        if len(seen)==3:
+            # The descriptor already passed the initial signature check.
+            # Another process mutates the same inode before completion.
+            with service.path.open("r+b") as output:
+                output.write(b"BBBB")
+                output.flush()
+                os.fsync(output.fileno())
+            original=os.stat(service.path)
+            os.utime(service.path,ns=(
+                original.st_atime_ns,previous["file_mtime_ns"]+1_000_000_000))
+        return original_fstat(fd)
+
+    with monkeypatch.context() as ctx:
+        ctx.setattr(service,"info",lambda:previous)
+        ctx.setattr(module.os,"fstat",rewrite_on_final_fstat)
+        with pytest.raises(ValueError,match="HUMAN_TEXT_FILE_CHANGED_RETRY"):
+            service.read(cursor=0,max_bytes=512)
+    assert seen
+    assert service.load()=="BBBB"
+    assert service.info()["sha256"]==hashlib.sha256(b"BBBB").hexdigest()
+
+
