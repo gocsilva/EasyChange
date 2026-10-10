@@ -372,7 +372,8 @@ class Indexer:
         # secret could be read directly before the index has warmed.
         if path is not None:
             path = self._normalize_relative_path(path)
-            if path in self._protected_paths:
+            if (path in self._protected_paths or
+                    any(part in SKIP_DIRS for part in Path(path).parts)):
                 return []
         def load_rows() -> list[tuple]:
             clauses: list[str] = []
@@ -471,10 +472,17 @@ class Indexer:
                 self.refresh(force=True)
             rows = load_rows()
 
+        # Old indexes may still contain paths that are excluded by today's
+        # scanner. Never expose such rows while an incremental refresh waits.
+        with self._lock:
+            protected=set(self._protected_paths)
+        visible=(row for row in rows
+                 if row[0] not in protected and
+                 not any(part in SKIP_DIRS for part in Path(row[0]).parts))
         return [
             {"id": f"S{index}", "file": row[0], "name": row[1], "kind": row[2],
              "line": row[3], "column": row[4], "signature": row[5]}
-            for index, row in enumerate(rows, 1)
+            for index, row in enumerate(visible, 1)
         ]
 
 
