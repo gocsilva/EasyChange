@@ -299,6 +299,27 @@ def test_stream_chunks_bounds_duplicate_request_and_preserves_retransmission(tmp
         store.stream_chunks(sequence, list(range(17)))
 
 
+def test_logical_chunks_bounded_duplicates_preserve_retransmission(tmp_path):
+    import pytest
+
+    store=DurableResultStore(tmp_path / "receipts")
+    seq="QLOGICALBATCH1"
+    store.mark_running(seq, "a"*64, ":state", mutation=False)
+    store.complete(seq, "a"*64, ":state", {
+        "ok":True,"command":"state",
+        "data":{"text":"A"*40000},"sequence":seq,
+    })
+    result=store.chunks(seq, ["0"]*256)
+    assert result["returned_indexes"] == [0]
+    assert len(result["chunks"]) == 1
+    assert result["complete"] is True
+
+    with pytest.raises(ValueError, match="RESULT_CHUNK_REQUEST_TOO_LARGE"):
+        store.chunks(seq, ["0"]*257)
+    with pytest.raises(ValueError, match="RESULT_CHUNK_BATCH_LIMIT"):
+        store.chunks(seq, list(range(17)))
+
+
 def test_terminal_header_cache_preserves_expired_replay_tombstone(tmp_path, monkeypatch):
     import time
 
