@@ -319,6 +319,28 @@ class TestProcessPending(unittest.TestCase):
         self.assertEqual(bridge.process_pending(handler)["acknowledged"],1)
         handler.assert_called_once()
 
+    def test_foreign_target_is_refused_even_without_legacy_page_recipient(self):
+        handler=Mock(return_value=True)
+        wrong=next(name for name in ("esp","bmollm","android","easychange")
+                   if name != CANONICAL_MODULE_ID)
+        client=self.bridge([item(91)])
+        client.receive.return_value={
+            "requires_ack":True,
+            "messages":[{**item(91),"target":wrong}],
+            "pending":1}
+        with self.assertRaisesRegex(ValueError,"MCP_INBOX_TARGET_MISMATCH"):
+            client.process_pending(handler)
+        handler.assert_not_called()
+        client.ack.assert_not_called()
+
+        # A legacy page may omit the recipient header when its messages
+        # still declare the correct target.
+        client.receive.return_value={
+            "requires_ack":True,"messages":[item(91)],"pending":1}
+        self.assertEqual(client.process_pending(handler)["acknowledged"],1)
+        handler.assert_called_once()
+        client.ack.assert_called_once_with([91])
+
     def test_standalone_without_hub_cannot_consume(self):
         b=MCPBridge(token="")
         with self.assertRaisesRegex(RuntimeError,"MCP_NOT_CONNECTED_STANDALONE"):
