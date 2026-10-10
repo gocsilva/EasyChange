@@ -238,7 +238,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 from module_bridge import MCPBridge
                 bridge=MCPBridge()
-            except (ImportError,RuntimeError,OSError):
+            except (ImportError,RuntimeError,ValueError,OSError):
                 # The optional MCP client must never crash a standalone
                 # module's HTTP status endpoint during import or startup.
                 return self.send(503,{"connected":False,
