@@ -133,6 +133,30 @@ def test_special_fifo_chunk_rejected_without_blocking_reader(tmp_path):
         InboundCommandStore._read_chunk_bounded(target)
 
 
+def test_symlinked_transfer_directory_cannot_redirect_staging_or_abort(tmp_path):
+    store=InboundCommandStore(tmp_path / "inbound")
+    external=tmp_path / "outside-project"
+    external.mkdir()
+    (external / "do-not-touch.txt").write_text("private",encoding="utf-8")
+    alias=store.root / "UOUTSIDE01"
+    try:
+        alias.symlink_to(external,target_is_directory=True)
+    except (OSError,NotImplementedError) as exc:
+        pytest.skip("Directory symlinks unavailable: "+type(exc).__name__)
+    with pytest.raises(InboundTransferError,match="INBOUND_UNSAFE_TRANSFER_DIRECTORY"):
+        store.begin("UOUTSIDE01",raw_bytes=3,compressed_bytes=3,
+                    chunk_count=1,sha256="a"*64)
+    with pytest.raises(InboundTransferError,match="INBOUND_UNSAFE_TRANSFER_DIRECTORY"):
+        store.status("UOUTSIDE01")
+    with pytest.raises(InboundTransferError,match="INBOUND_UNSAFE_TRANSFER_DIRECTORY"):
+        store.abort("UOUTSIDE01")
+    assert (external / "do-not-touch.txt").read_text(encoding="utf-8")=="private"
+    assert alias.is_symlink()
+    alias.unlink()
+    assert store.begin("UOUTSIDE01",raw_bytes=3,compressed_bytes=3,
+                       chunk_count=1,sha256="a"*64)["duplicate"] is False
+
+
 def test_inbound_transfer_ascii_casefold_preserves_existing_directory(tmp_path):
     store=InboundCommandStore(tmp_path / "inbound")
     first=store.begin("uss234567",raw_bytes=10,compressed_bytes=8,
