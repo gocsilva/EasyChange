@@ -157,6 +157,60 @@ def test_symlinked_transfer_directory_cannot_redirect_staging_or_abort(tmp_path)
                        chunk_count=1,sha256="a"*64)["duplicate"] is False
 
 
+def test_hardlinked_transfer_metadata_is_rejected_without_reading_alias(tmp_path):
+    import os
+
+    store=InboundCommandStore(tmp_path/"inbound")
+    key="UMETALINK1"
+    params={"raw_bytes":3,"compressed_bytes":3,
+            "chunk_count":1,"sha256":"a"*64}
+    store.begin(key,**params)
+    actual=store._meta_path(key)
+    alias=tmp_path/"alias-meta.json"
+    try:
+        os.link(actual,alias)
+    except (OSError,NotImplementedError) as exc:
+        pytest.skip("Hard links unavailable: "+type(exc).__name__)
+    before=actual.read_bytes()
+    with pytest.raises(InboundTransferError,
+                       match="INBOUND_TRANSFER_META_CORRUPT"):
+        store.status(key)
+    assert actual.read_bytes()==before
+    assert alias.read_bytes()==before
+    alias.unlink()
+    assert store.status(key)["ready"] is False
+
+
+def test_hardlinked_chunk_is_rejected_without_reading_shared_file(tmp_path):
+    import os
+    import base64
+    import binascii
+    import zlib
+
+    store=InboundCommandStore(tmp_path/"inbound")
+    command=b":state"
+    compressed=zlib.compress(command)
+    key="UPARTLINK1"
+    store.begin(key,raw_bytes=len(command),compressed_bytes=len(compressed),
+                chunk_count=1,sha256=hashlib.sha256(command).hexdigest())
+    store.put_chunk(
+        key,index=0,
+        crc32=f"{binascii.crc32(compressed) & 0xffffffff:08x}",
+        token=base64.urlsafe_b64encode(compressed).decode("ascii").rstrip("="))
+    actual=store._dir(key)/"0000.part"
+    alias=tmp_path/"alias-part.bin"
+    try:
+        os.link(actual,alias)
+    except (OSError,NotImplementedError) as exc:
+        pytest.skip("Hard links unavailable: "+type(exc).__name__)
+    before=actual.read_bytes()
+    with pytest.raises(InboundTransferError,match="INBOUND_CHUNK_READ_FAILED"):
+        store.status(key)
+    assert actual.read_bytes()==before and alias.read_bytes()==before
+    alias.unlink()
+    assert store.status(key)["verified"] is True
+
+
 def test_transfer_metadata_symlink_is_never_read_or_overwritten(tmp_path):
     store=InboundCommandStore(tmp_path / "inbound")
     key="UMETASAFE1"
