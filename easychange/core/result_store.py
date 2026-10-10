@@ -467,8 +467,15 @@ class DurableResultStore:
                     # Preserve uncertain receipts; corruption must never turn
                     # an already-executed command into a new command.
                     continue
-                if self._active_record(value) or value.get("mutation") is True:
-                    # Keep uncertain work and completed mutations in full.
+                # Legacy/imported mutation receipts can carry a mutation
+                # lifecycle or receipt even when the old boolean flag is
+                # absent. Never shrink these records into non-mutation
+                # tombstones and discard rollback/verification evidence.
+                mutation_state = value.get("mutation_state")
+                if (self._active_record(value)
+                        or value.get("mutation") is True
+                        or value.get("mutation_receipt") is not None
+                        or mutation_state not in (None, "", "NOT_APPLICABLE")):
                     continue
                 if value.get("result_expired") is True:
                     continue
