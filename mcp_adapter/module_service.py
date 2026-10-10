@@ -79,7 +79,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200,capabilities())
         return self.send(404,{"error":"NOT_FOUND"})
     def send(self,status,body):
-        raw=json.dumps(body,ensure_ascii=False).encode("utf-8")
+        try:
+            raw=json.dumps(body,ensure_ascii=False,allow_nan=False).encode("utf-8")
+        except (TypeError,ValueError,OverflowError,RecursionError):
+            # Match the other standalone module servers: a malformed status
+            # must never emit non-standard JSON or crash an HTTP request.
+            status=502
+            raw=b'{"error":"INVALID_SERVICE_RESPONSE"}'
         self.send_response(status)
         self.send_header("Content-Type","application/json")
         self.send_header("Cache-Control","no-store")
