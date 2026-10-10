@@ -1404,7 +1404,7 @@ class CommandService:
                     job_id=str(item.get("job_id") or self.ids.next("J")),
                     wait_ms=wait_ms,
                     max_bytes=max_bytes,
-                    allow_mutation=bool(item.get("allow_mutation", False)),
+                    allow_mutation=item.get("allow_mutation", False),
                     confirm_context=str(item.get("confirm_context") or ""),
                 )
             elif kind == "ubuntu_shell":
@@ -1414,7 +1414,7 @@ class CommandService:
                     job_id=str(item.get("job_id") or self.ids.next("J")),
                     wait_ms=wait_ms,
                     max_bytes=max_bytes,
-                    allow_mutation=bool(item.get("allow_mutation", False)),
+                    allow_mutation=item.get("allow_mutation", False),
                 )
             elif kind == "ubuntu_batch":
                 commands = item.get("commands")
@@ -1522,7 +1522,7 @@ class CommandService:
                     [str(value) for value in args],
                     job_id=str(item.get("job_id") or self.ids.next("J")),
                     namespace=str(item.get("namespace") or ""),
-                    allow_mutation=bool(item.get("allow_mutation", False)),
+                    allow_mutation=item.get("allow_mutation", False),
                     confirm_context=str(item.get("confirm_context") or ""),
                     wait_ms=wait_ms,
                     max_bytes=max_bytes,
