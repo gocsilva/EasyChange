@@ -683,13 +683,15 @@ class Indexer:
     def search(self, query: str, *, regex: bool = False, extension: str | None = None,
                path_prefix: str | None = None, case_sensitive: bool = False,
                offset: int = 0, limit: int = 100) -> list[dict]:
+        # Reject invalid regexes before spawning git-grep or materializing
+        # potentially large SQLite candidate rows. Reuse one compiled object.
+        pattern = re.compile(query, 0 if case_sensitive else re.IGNORECASE) if regex else None
         if not self._fully_indexed:
             cold = self._git_search(query, regex=regex, extension=extension,
                                     path_prefix=path_prefix, case_sensitive=case_sensitive)
             self.start_background_refresh()
             if cold:
                 found = []
-                pattern = re.compile(query, 0 if case_sensitive else re.IGNORECASE) if regex else None
                 needle = query if case_sensitive else query.casefold()
                 for file_path, line_payload in cold:
                     number_text, text = line_payload.split(":", 1)
@@ -754,7 +756,6 @@ class Indexer:
                 rows = self._candidate_rows(query, regex=regex, extension=extension, path_prefix=path_prefix)
 
         found = []
-        pattern = re.compile(query, 0 if case_sensitive else re.IGNORECASE) if regex else None
         needle = query if case_sensitive else query.casefold()
         for file_path, content, _, _ in rows:
             if content is None:
