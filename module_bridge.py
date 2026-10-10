@@ -278,7 +278,9 @@ class MCPBridge:
         return data
 
     def catalog(self):
-        return self._request("/v1/tools")
+        # Metadata-only localhost call: never spend a 40s tool-RPC budget on
+        # a status screen. Actual tool calls retain their 120s timeout.
+        return self._request("/v1/tools",timeout=8)
 
     def call(self,tool,**arguments):
         payload={"tool":tool,"arguments":arguments}
