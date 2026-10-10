@@ -786,7 +786,13 @@ class DurableResultStore:
                 "result_hash": serialized_hash,
                 "result_bytes": len(serialized),
                 "result": result,
-                "mutation_receipt": mutation_receipt,
+                # An earlier update_mutation_receipt() may have persisted the
+                # verified physical/file side-effect before terminal delivery.
+                # Omitting a new receipt must never erase that audit evidence.
+                "mutation_receipt": (
+                    mutation_receipt if mutation_receipt is not None
+                    else current.get("mutation_receipt")
+                ),
             }
             self._write(sequence, value)
             self._payload_cache_put(sequence, serialized, serialized_hash)
