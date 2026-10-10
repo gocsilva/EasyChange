@@ -3,6 +3,45 @@ from easychange.remote.optical_protocol import encode_result_chunks
 from mcp_adapter.optical_reader import OpticalAssembler
 
 class OpticalReaderTests(unittest.TestCase):
+    def test_no_frame_does_not_initialize_or_call_qr_detector(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from mcp_adapter import optical_reader as reader
+
+        qr=Mock()
+        cv2_stub=SimpleNamespace(error=RuntimeError,QRCodeDetector=qr)
+        with patch.dict(sys.modules,{"cv2":cv2_stub}):
+            for frame in (None,object(),
+                          SimpleNamespace(shape=(0,320,3)),
+                          SimpleNamespace(shape=(240,0,3)),
+                          SimpleNamespace(shape=("bad",320,3))):
+                with self.subTest(frame=frame):
+                    self.assertEqual(reader.decode_hdmi_qr(frame),[])
+        qr.assert_not_called()
+
+    def test_transient_qr_decoder_exception_allows_next_frame(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import Mock,patch
+        from mcp_adapter import optical_reader as reader
+
+        class InvalidImage(Exception):
+            pass
+        detector=Mock()
+        detector.detectAndDecodeMulti.side_effect=[
+            InvalidImage("CAPTURE_INTERRUPTED"),
+            (False, [], None, None),
+        ]
+        detector.detectAndDecode.return_value=("EC2_VALID",None,None)
+        cv2_stub=SimpleNamespace(error=InvalidImage,QRCodeDetector=lambda:detector)
+        frame=SimpleNamespace(shape=(480,640,3))
+        with patch.dict(sys.modules,{"cv2":cv2_stub}), \
+             patch.object(reader._qr_detectors,"detector",None,create=True):
+            self.assertEqual(reader.decode_hdmi_qr(frame),[])
+            self.assertEqual(reader.decode_hdmi_qr(frame),["EC2_VALID"])
+        self.assertEqual(detector.detectAndDecodeMulti.call_count,2)
+
     def test_ec2_round_trip_with_integrity_check(self):
         expected={"sequence":"example-1","ok":True,"code":"OK","data":{"text":"x"*500}}
         chunks=encode_result_chunks(expected)
