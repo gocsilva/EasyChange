@@ -126,6 +126,16 @@ def test_non_boolean_mutation_permission_rejected_before_any_remote_session(perm
     assert processes.started==[]
 
 
+@pytest.mark.parametrize("policy", ("false","true",0,1,None,[],{}))
+def test_invalid_fail_fast_policy_cannot_start_ubuntu_batch(policy):
+    processes=_FakeProcesses()
+    service=UbuntuService(processes)
+    commands=[{"argv":["echo","one"],"allow_mutation":False}]
+    with pytest.raises(ValueError,match="CONTINUE_ON_ERROR_BOOLEAN_REQUIRED"):
+        service.batch("hml",commands,continue_on_error=policy)
+    assert processes.started==[]
+
+
 def test_ubuntu_batch_invalid_later_permission_rejects_entire_batch_preflight():
     processes=_FakeProcesses()
     service=UbuntuService(processes)
