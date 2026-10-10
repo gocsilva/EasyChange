@@ -485,3 +485,97 @@ def test_late_health_probe_or_queued_callback_cannot_revive_stopped_gui():
     pending()
     assert gui.message.set.call_count==calls_after_stop
     assert gui._refresh_inflight is False
+
+
+def test_stale_health_worker_cannot_clear_new_generation_inflight():
+    """A stop/start race cannot let an obsolete /health steal the new slot."""
+    from unittest.mock import Mock
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(encoding="utf-8")
+    cls=next(node for node in ast.parse(source).body
+             if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+    workers=[]
+
+    class DeferredThread:
+        def __init__(self,*,target,daemon):
+            self.target=target
+        def start(self):
+            workers.append(self.target)
+
+    env={"threading":type("Threads",(),{"Thread":DeferredThread}),
+         "status":lambda:{"running":True},
+         "tk":type("Tk",(),{"TclError":RuntimeError})}
+    exec(compile(ast.Module(body=[cls],type_ignores=[]),
+                 "<health-generation-race>","exec"),env)
+    gui=object.__new__(env["ModuleGUI"])
+    gui.root=Mock()
+    gui.message=Mock()
+    gui.process=None
+    gui._closing=False
+    gui._refresh_inflight=False
+    gui._refresh_generation=0
+    gui._readiness_job=None
+
+    gui.refresh()
+    old_worker=workers.pop()
+    assert gui._refresh_inflight is True
+    assert gui.stop() is True
+    assert gui._refresh_generation==1
+    assert gui._refresh_inflight is False
+
+    gui.refresh()
+    new_worker=workers.pop()
+    assert gui._refresh_inflight is True
+    old_worker()
+    assert gui._refresh_inflight is True
+    new_worker()
+    assert gui._refresh_inflight is True
+    gui.refresh()
+    assert workers==[]
+    gui.root.after.call_args.args[1]()
+    assert gui._refresh_inflight is False
+    assert gui.message.set.call_args.args[0]=="Serviço ativo"
+
+
+def test_stale_queued_health_callback_cannot_release_new_probe():
+    """Generation check must also guard the queued Tk finally block."""
+    from unittest.mock import Mock
+
+    source=(Path(__file__).resolve().parents[1]/"module_gui.py").read_text(encoding="utf-8")
+    cls=next(node for node in ast.parse(source).body
+             if isinstance(node,ast.ClassDef) and node.name=="ModuleGUI")
+    workers=[]
+
+    class DeferredThread:
+        def __init__(self,*,target,daemon):
+            self.target=target
+        def start(self):
+            workers.append(self.target)
+
+    env={"threading":type("Threads",(),{"Thread":DeferredThread}),
+         "status":lambda:{"running":True},
+         "tk":type("Tk",(),{"TclError":RuntimeError})}
+    exec(compile(ast.Module(body=[cls],type_ignores=[]),
+                 "<health-queued-race>","exec"),env)
+    gui=object.__new__(env["ModuleGUI"])
+    gui.root=Mock()
+    gui.message=Mock()
+    gui.process=None
+    gui._closing=False
+    gui._refresh_inflight=False
+    gui._refresh_generation=0
+    gui._readiness_job=None
+
+    gui.refresh()
+    workers.pop()()
+    old_callback=gui.root.after.call_args.args[1]
+    assert gui.stop() is True
+    gui.refresh()
+    workers.pop()()
+    new_callback=gui.root.after.call_args.args[1]
+    old_callback()
+    assert gui._refresh_inflight is True
+    gui.refresh()
+    assert workers==[]
+    new_callback()
+    assert gui._refresh_inflight is False
