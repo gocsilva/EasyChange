@@ -65,3 +65,29 @@ def test_claim_update_header_complete_and_replay_use_real_file_lock(tmp_path):
     assert owns is False
     assert replay["execution_id"]==first["execution_id"]
     assert replay["state"]=="DONE"
+
+
+def test_completed_receipt_requires_prior_exclusive_sequence_claim(tmp_path):
+    import pytest
+
+    store=DurableResultStore(tmp_path/"receipts")
+    sequence="QNOCLAIM1"
+    digest="a"*64
+    command=":write example.txt"
+    completed={"ok":True,"sequence":sequence,"data":{"applied":True}}
+    with pytest.raises(RuntimeError,match="RESULT_SEQUENCE_NOT_CLAIMED"):
+        store.complete(sequence,digest,command,completed,
+                       mutation_receipt={"state":"COMMITTED"})
+    assert store.get(sequence) is None
+
+    claimed,owns=store.claim_running(sequence,digest,command,mutation=True)
+    assert owns is True
+    done=store.complete(sequence,digest,command,completed,
+                        mutation_receipt={"state":"COMMITTED"})
+    assert done["state"]=="DONE"
+    assert done["execution_id"]==claimed["execution_id"]
+    duplicate=store.complete(sequence,digest,command,
+                             {"ok":False,"data":{"applied":False}})
+    assert duplicate==done
+    with pytest.raises(ValueError,match="RESULT_SEQUENCE_COMMAND_HASH_MISMATCH"):
+        store.complete(sequence,"b"*64,command,completed)
