@@ -14,6 +14,55 @@ from easychange.core.indexer import Indexer
     r"C:\Users\someone\secret.cs", "nested/../secret.py",
     "./", "a//b.py",
 ])
+def test_case_variant_protection_is_durable_and_scrubs_legacy_rows(tmp_path):
+    root=tmp_path/"project"
+    root.mkdir()
+    secret=root/"Secrets.py"
+    secret.write_text("def HiddenToken():\n    return 'SECRET_NEVER_INDEX'\n",
+                      encoding="utf-8")
+    visible=root/"public.py"
+    visible.write_text("def VisibleToken(): return 'PUBLIC_ONLY'\n",
+                       encoding="utf-8")
+
+    first=Indexer(root)
+    assert first.refresh(force=True)["files"]==2
+    assert first.protect_path("secrets.py",scrub=False)["protected"] is True
+    with first._connect() as db:
+        assert db.execute("SELECT path FROM files ORDER BY path").fetchall()==[
+            ("public.py",)]
+        assert db.execute("SELECT path FROM symbols WHERE path=?",
+                          ("Secrets.py",)).fetchall()==[]
+        if first._fts_enabled:
+            assert db.execute("SELECT path FROM files_fts WHERE path=?",
+                              ("Secrets.py",)).fetchall()==[]
+    assert first.update_path("Secrets.py")["protected"] is True
+    assert first.search("SECRET_NEVER_INDEX")==[]
+    assert first.symbols(name="HiddenToken")==[]
+
+    # The original capitalization is irrelevant after reopening the DB.
+    first.close()
+    reopened=Indexer(root)
+    assert reopened.protected_paths()==["secrets.py"]
+    assert reopened.refresh(force=True)["files"]==1
+    assert reopened.update_path("Secrets.py")["protected"] is True
+    assert reopened.search("SECRET_NEVER_INDEX")==[]
+    assert reopened.symbols(name="HiddenToken")==[]
+    assert reopened.search("PUBLIC_ONLY")
+    reopened.close()
+
+
+def test_corrupt_persisted_protection_metadata_fails_closed(tmp_path):
+    root=tmp_path/"project"
+    root.mkdir()
+    index=Indexer(root)
+    index.close()
+    with sqlite3.connect(root/".easychange"/"index.db") as db:
+        db.execute("INSERT OR REPLACE INTO index_meta(key,value) VALUES(?,?)",
+                   ("protected_paths_v1", '{"not":"a list"}'))
+    with pytest.raises(RuntimeError,match="INDEXER_PROTECTED_PATHS_CORRUPT"):
+        Indexer(root)
+
+
 def test_update_path_rejects_absolute_or_traversing_names(tmp_path, name):
     project=tmp_path/"project"
     project.mkdir()
