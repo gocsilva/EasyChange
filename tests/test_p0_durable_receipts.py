@@ -38,6 +38,59 @@ def test_mutation_receipt_is_definitive_and_auditable(tmp_path):
         service.close()
 
 
+def test_receipt_rename_is_followed_by_directory_fsync_on_posix(tmp_path, monkeypatch):
+    import os
+    import stat
+    import pytest
+    import easychange.core.result_store as module
+
+    if os.name != "posix":
+        pytest.skip("directory fsync is POSIX-specific")
+    store = DurableResultStore(tmp_path / "results")
+    events = []
+    original_replace = module.os.replace
+    original_fsync = module.os.fsync
+
+    def observed_replace(source, destination):
+        events.append("replace")
+        return original_replace(source, destination)
+
+    def observed_fsync(fd):
+        kind = "directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+        events.append("fsync_" + kind)
+        return original_fsync(fd)
+
+    monkeypatch.setattr(module.os, "replace", observed_replace)
+    monkeypatch.setattr(module.os, "fsync", observed_fsync)
+    store.mark_running("QDIRSYNC01", "a" * 64, ":state", mutation=False)
+    assert events.index("fsync_file") < events.index("replace")
+    assert events.index("replace") < events.index("fsync_directory")
+    assert store.get("QDIRSYNC01")["state"] == "RUNNING"
+
+
+def test_unsupported_directory_fsync_preserves_atomic_receipt(tmp_path, monkeypatch):
+    import os
+    import stat
+    import easychange.core.result_store as module
+
+    if os.name != "posix":
+        return
+    store = DurableResultStore(tmp_path / "results")
+    original_fsync = module.os.fsync
+    attempted = []
+
+    def unsupported_directory(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            attempted.append(True)
+            raise OSError("DIRECTORY_FSYNC_UNSUPPORTED")
+        return original_fsync(fd)
+
+    monkeypatch.setattr(module.os, "fsync", unsupported_directory)
+    store.mark_running("QDIRFALLBACK01", "b" * 64, ":state", mutation=False)
+    assert attempted == [True]
+    assert store.get("QDIRFALLBACK01")["state"] == "RUNNING"
+
+
 def test_result_header_is_small_and_durable(tmp_path):
     store = DurableResultStore(tmp_path / "results")
     sequence = "QHEADER01"
