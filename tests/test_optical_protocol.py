@@ -23,6 +23,30 @@ def test_ec2_encoder_rejects_identity_receiver_would_drop(monkeypatch):
     assert optical.decode_result_chunks(valid)["sequence"]=="Q"*256
 
 
+def test_ec2_final_and_durable_headers_also_fit_qr_render_capacity():
+    import pytest
+    import easychange.remote.optical_protocol as optical
+
+    very_long_id="C"*2400
+    finished={"sequence":"QFINALHDR","ok":True,
+              "command_id":very_long_id,"data":{"text":"done"}}
+    with pytest.raises(ValueError,match="OPTICAL_QR_CAPACITY_EXCEEDED"):
+        optical.encode_result_header(finished)
+
+    durable={"sequence":"QDURABLEHDR","finished":True,"success":True,
+             "sha256":"a"*64,"payload_length":10,
+             "command_id":very_long_id}
+    with pytest.raises(ValueError,match="OPTICAL_QR_CAPACITY_EXCEEDED"):
+        optical.encode_durable_result_header(durable)
+
+    finished["command_id"]="C1"
+    durable["command_id"]="C1"
+    for header in (optical.encode_result_header(finished),
+                   optical.encode_durable_result_header(durable)):
+        assert len(header.encode("utf-8"))<=optical.MAX_EC2_QR_RENDER_BYTES
+        assert json.loads(header)["p"]=="EC2H"
+
+
 def test_ec2_generated_qr_fits_real_m_level_byte_capacity():
     import pytest
     import easychange.remote.optical_protocol as optical
