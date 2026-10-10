@@ -129,6 +129,29 @@ def test_ec2_fragment_crc_rejects_corruption():
         decode_result_chunks(corrupted)
 
 
+def test_ec2_rejects_ambiguous_packet_fields_and_nonfinite_json():
+    import pytest
+    from easychange.remote.optical_protocol import decode_ec2_packet_json
+
+    valid=encode_result_chunks(
+        Result(True,"read",{"text":"unmodified"},sequence="QSTRICTJSON1"))[0]
+    assert decode_result_chunks([valid])["data"]["text"]=="unmodified"
+    for suffix in (
+            ',"n":999',
+            ',"p":"EC2H"',
+            ',"metadata":{"id":1,"id":2}',
+            ',"metadata":{"number":NaN}',
+            ',"metadata":{"number":Infinity}',
+            ',"metadata":{"number":1e999999}'):
+        tampered=valid[:-1]+suffix+"}"
+        with pytest.raises(ValueError,match="invalid optical packet JSON"):
+            decode_result_chunks([tampered])
+        with pytest.raises(ValueError,match="invalid optical packet JSON"):
+            decode_ec2_packet_json(tampered)
+        # A corrupted QR must not alter a later, valid transfer.
+        assert decode_result_chunks([valid])["sequence"]=="QSTRICTJSON1"
+
+
 def test_ec2_rejects_pathologically_nested_packet_json():
     import pytest
 
