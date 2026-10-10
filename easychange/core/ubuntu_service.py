@@ -262,6 +262,16 @@ class UbuntuService:
                 proc.kill()
                 proc.wait(timeout=3)
                 returncode = None
+            except (OSError, ValueError, TypeError) as exc:
+                # A failed wait must not strand a child that still owns both
+                # redirected pipes. Best-effort reap, then report a stable
+                # failure rather than returning an unverified exit status.
+                try:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                raise UbuntuError("UBUNTU_PROCESS_WAIT_FAILED") from exc
         finally:
             for pump in pumps:
                 pump.join(timeout=5)
