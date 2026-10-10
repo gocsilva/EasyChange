@@ -854,6 +854,8 @@ class OpticalReaderTests(unittest.TestCase):
             ("c", "a"*7),
             ("s", ""),
             ("s", "Q"*257),
+            ("s", "Q"+chr(0xD800)),
+            ("s", chr(0xDFFF)+"Q"),
         )
         for field,invalid in cases:
             with self.subTest(field=field,invalid=invalid):
