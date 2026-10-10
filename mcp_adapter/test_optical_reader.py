@@ -42,6 +42,30 @@ class OpticalReaderTests(unittest.TestCase):
                         reader.decode_hdmi_qr(SimpleNamespace(shape=dims)),[])
         qr.assert_not_called()
 
+    def test_single_only_opencv_detector_still_reads_ec2_qr(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from mcp_adapter import optical_reader as reader
+
+        class SingleOnly:
+            def __init__(self):
+                self.calls=0
+            def detectAndDecode(self,frame):
+                self.calls+=1
+                return "EC2_SINGLE_QR",None,None
+
+        detector=SingleOnly()
+        cv2_stub=SimpleNamespace(
+            error=RuntimeError,QRCodeDetector=lambda:detector)
+        image=SimpleNamespace(shape=(480,640,3))
+        with patch.dict(sys.modules,{"cv2":cv2_stub}), \
+             patch.object(reader._qr_detectors,"detector",None,create=True):
+            self.assertEqual(reader.decode_hdmi_qr(image),["EC2_SINGLE_QR"])
+            self.assertEqual(reader.decode_hdmi_qr(image),["EC2_SINGLE_QR"])
+        self.assertEqual(detector.calls,2)
+
+
     def test_non_cv2_image_type_error_is_recoverable_on_next_frame(self):
         import sys
         from types import SimpleNamespace
