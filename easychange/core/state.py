@@ -42,7 +42,36 @@ class MachineSession:
                     raise ValueError("MACHINE_SESSION_TOO_LARGE")
                 loaded = json.loads(raw.decode("utf-8"))
                 if isinstance(loaded, dict) and loaded.get("workspace") == workspace:
-                    self.data.update(loaded)
+                    # A valid JSON object is not necessarily a valid session.
+                    # Corrupt or externally edited nested fields must not
+                    # crash CommandService, FileService or IdFactory startup.
+                    # Keep the disk file untouched for recovery/diagnosis.
+                    safe = dict(loaded)
+                    if (type(safe.get("session_id")) is not str or
+                            not 1 <= len(safe["session_id"]) <= 128):
+                        safe.pop("session_id", None)
+                    aliases = safe.get("aliases")
+                    if (type(aliases) is not dict or
+                            any(type(k) is not str or type(v) is not str
+                                for k, v in aliases.items())):
+                        safe.pop("aliases", None)
+                    history = safe.get("history")
+                    if (type(history) is not list or
+                            any(type(item) is not str for item in history)):
+                        safe.pop("history", None)
+                    counts = safe.get("id_counts")
+                    if counts is not None and (
+                            type(counts) is not dict or
+                            any(type(k) is not str or type(v) is not int or v < 0
+                                for k, v in counts.items())):
+                        safe.pop("id_counts", None)
+                    hashes = safe.get("file_hashes")
+                    if hashes is not None and (
+                            type(hashes) is not dict or
+                            any(type(k) is not str or type(v) is not str
+                                for k, v in hashes.items())):
+                        safe.pop("file_hashes", None)
+                    self.data.update(safe)
             except (ValueError, OSError, UnicodeError, RecursionError):
                 # Preserve the original file for diagnosis and start with a
                 # fresh in-memory session instead of crashing workspace load.
