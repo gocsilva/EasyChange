@@ -108,7 +108,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path not in ("/v1/attach","/v1/detach"):
             return self.send(404,{"error":"NOT_FOUND"})
-        if self.headers.get("Origin"):
+        if "Origin" in self.headers:
             return self.send(403,{"error":"BROWSER_ORIGIN_NOT_ALLOWED"})
         if self.headers.get("Content-Type","").split(";")[0].strip().lower()!="application/json":
             return self.send(415,{"error":"JSON_REQUIRED"})
