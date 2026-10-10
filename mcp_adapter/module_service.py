@@ -113,7 +113,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Content-Type","").split(";")[0].strip().lower()!="application/json":
             return self.send(415,{"error":"JSON_REQUIRED"})
         try:
-            size=int(self.headers.get("Content-Length","0"))
+            length=self.headers.get("Content-Length","0")
+            # Control bodies are capped at 512 bytes. Validate the header
+            # before converting attacker-controlled digits into a Python int.
+            if (type(length) is not str or not 1<=len(length)<=10 or
+                    not length.isascii() or not length.isdecimal()):
+                return self.send(400,{"error":"INVALID_CONTENT_LENGTH"})
+            size=int(length)
             if not 0<size<=512:
                 return self.send(413,{"error":"PAYLOAD_TOO_LARGE"})
             request=json.loads(
