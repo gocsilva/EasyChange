@@ -216,19 +216,19 @@ def decode_hdmi_qr(frame) -> list[str]:
         # valid EC2 receipt unreadable merely because multi-QR is unavailable.
         multi=getattr(detector,"detectAndDecodeMulti",None)
         if callable(multi):
-            ok, texts, _points, _rectified=multi(frame)
             decoded=[]
-            if ok and texts is not None and not isinstance(texts,(str,bytes,dict)):
-                try:
-                    # QR detectors normally yield a small sequence. Guard
-                    # against a malformed/streaming backend iterator that
-                    # could otherwise consume a frame polling thread forever.
+            try:
+                ok, texts, _points, _rectified=multi(frame)
+                if ok and texts is not None and not isinstance(texts,(str,bytes,dict)):
+                    # The multi API may return generators rather than tuples.
+                    # Never exhaust an unbounded iterator in the HDMI reader.
                     decoded=[value for value in itertools.islice(texts,32)
                              if isinstance(value,str) and value]
-                except TypeError:
-                    # An unusable multi-QR response is not proof that the
-                    # single-QR decoder cannot recover this same frame.
-                    decoded=[]
+            except TypeError:
+                # An older OpenCV binding can expose multi-QR but reject its
+                # invocation/signature. Attempt the single-QR API on this
+                # same observed frame rather than needlessly losing it.
+                decoded=[]
         else:
             decoded=[]
         if not decoded:
