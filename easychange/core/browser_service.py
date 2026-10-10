@@ -299,7 +299,9 @@ class _WebSocket:
             return
         with self._response_ready:
             raw_id = message.get("id")
-            if isinstance(raw_id, int):
+            # A JSON boolean is an int subclass in Python: True == 1.
+            # Never let a malformed reply with id:true resolve call #1.
+            if type(raw_id) is int:
                 if raw_id in self._pending_ids:
                     self._responses[raw_id] = message
                 else:
