@@ -12,6 +12,7 @@ import os
 import shutil
 import socket
 import ssl
+import stat
 import struct
 import threading
 import time
@@ -984,12 +985,24 @@ class BrowserService:
 
     @staticmethod
     def _active_port(profile: Path) -> int:
+        """Read only the first bounded line of a regular local port marker."""
         marker = profile / "DevToolsActivePort"
+        flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0) |
+                 getattr(os, "O_NOFOLLOW", 0) |
+                 getattr(os, "O_NONBLOCK", 0))
         try:
-            lines = marker.read_text(encoding="utf-8").splitlines()
-            value = int(lines[0])
-            return value if 1 <= value <= 65535 else 0
-        except (OSError, ValueError, IndexError):
+            fd = os.open(marker, flags)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return 0
+                line = os.read(fd, 16).split(b"\n", 1)[0].strip()
+            finally:
+                os.close(fd)
+            if not 1 <= len(line) <= 5 or not line.isdigit():
+                return 0
+            port = int(line)
+            return port if 1 <= port <= 65535 else 0
+        except OSError:
             return 0
 
     def _discover_devtools_ports(self) -> list[dict]:
@@ -1179,16 +1192,17 @@ class BrowserService:
             parse_float=_finite_cdp_float, parse_constant=_reject_cdp_constant)
 
     def _wait_port(self, profile: Path, timeout: float) -> int:
-        marker = profile / "DevToolsActivePort"
-        deadline = time.monotonic() + max(1.0, float(timeout))
+        try:
+            duration = float(timeout)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("BROWSER_CDP_INVALID_TIMEOUT") from exc
+        if not math.isfinite(duration):
+            raise ValueError("BROWSER_CDP_INVALID_TIMEOUT")
+        deadline = time.monotonic() + max(1.0, duration)
         while time.monotonic() < deadline:
-            try:
-                if marker.exists():
-                    value = int(marker.read_text(encoding="utf-8").splitlines()[0])
-                    if value > 0:
-                        return value
-            except (OSError, ValueError, IndexError):
-                pass
+            port = self._active_port(profile)
+            if port:
+                return port
             time.sleep(0.05)
         raise TimeoutError("BROWSER_CDP_START_TIMEOUT")
 
