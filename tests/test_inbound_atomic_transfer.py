@@ -70,6 +70,26 @@ def test_inbound_lock_rejects_symlink_without_touching_external_file(tmp_path):
                        chunk_count=1,sha256="a"*64)["duplicate"] is False
 
 
+def test_inbound_lock_fdopen_failure_releases_raw_descriptor(tmp_path):
+    import os
+    store=InboundCommandStore(tmp_path / "transfer")
+    original_close=os.close
+    closed=[]
+    def track_close(fd):
+        closed.append(fd)
+        return original_close(fd)
+    with patch.object(inbound_module.os,"fdopen",
+                      side_effect=OSError("LOCK_STREAM_FAILURE")), \
+         patch.object(inbound_module.os,"close",side_effect=track_close):
+        with pytest.raises(OSError,match="LOCK_STREAM_FAILURE"):
+            with store._transaction_lock():
+                raise AssertionError("Lock was unexpectedly acquired")
+    assert len(closed)==1
+    # A failed wrapper must not strand the file or the next live lock.
+    with store._transaction_lock():
+        assert store._process_lock_path.is_file()
+
+
 def test_inbound_transfer_ascii_casefold_preserves_existing_directory(tmp_path):
     store=InboundCommandStore(tmp_path / "inbound")
     first=store.begin("uss234567",raw_bytes=10,compressed_bytes=8,
