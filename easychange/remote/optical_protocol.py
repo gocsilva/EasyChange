@@ -227,7 +227,13 @@ def _transport_components(
         raise ValueError("OPTICAL_RESULT_OK_BOOLEAN_REQUIRED")
     # Decoder identity limits are part of the on-wire contract. Reject an
     # invalid producer sequence before the expensive JSON/zlib QR stages.
-    sequence = str(value.get("sequence") or "-")
+    sequence_field=value.get("sequence")
+    if sequence_field is None or sequence_field == "":
+        sequence="-"
+    elif type(sequence_field) is str:
+        sequence=sequence_field
+    else:
+        raise ValueError("OPTICAL_SEQUENCE_STRING_REQUIRED")
     if not 1 <= len(sequence) <= 256:
         raise ValueError("OPTICAL_SEQUENCE_TOO_LONG")
     wire_value = _compact_transport_value(value)
@@ -238,7 +244,6 @@ def _transport_components(
     total = max(1, (len(token) + size - 1) // size)
     digest = hashlib.sha256(raw).hexdigest()
     crc = f"{binascii.crc32(raw) & 0xffffffff:08x}"
-    sequence = str(value.get("sequence") or "-")
     data = value.get("data")
     # An uncompactable caller-provided transport_compacted field is ambiguous
     # to older unmarked decoders. Mark these rare packets as literal metadata.
@@ -302,20 +307,21 @@ def encode_durable_result_header(header: dict[str, Any]) -> str:
     """
     if not isinstance(header, dict):
         raise ValueError("durable result header object required")
-    sequence = str(header.get("sequence") or "")
-    if not sequence:
+    sequence=header.get("sequence")
+    if type(sequence) is not str or not 1<=len(sequence)<=256:
         raise ValueError("durable result sequence required")
     if header.get("finished") is not True:
         raise ValueError("durable result is not terminal")
     if type(header.get("success")) is not bool:
         raise ValueError("OPTICAL_RESULT_OK_BOOLEAN_REQUIRED")
-    try:
-        payload_length = max(0, int(header.get("payload_length") or 0))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid durable result payload length") from exc
-    mutation_state = (
-        header.get("mutation_state") if bool(header.get("mutation")) else None
-    )
+    payload_length=header.get("payload_length",0)
+    if (type(payload_length) is not int or
+            not 0<=payload_length<=64*1024*1024):
+        raise ValueError("invalid durable result payload length")
+    mutation=header.get("mutation",False)
+    if type(mutation) is not bool:
+        raise ValueError("OPTICAL_MUTATION_BOOLEAN_REQUIRED")
+    mutation_state=header.get("mutation_state") if mutation else None
     rendered = json.dumps({
         "p": HEADER_PROTOCOL, "v": 1, "s": sequence, "f": True,
         "ok": header["success"], "rc": header.get("return_code"),
