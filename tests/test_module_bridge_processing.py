@@ -295,3 +295,26 @@ class TestProcessPending(unittest.TestCase):
         b=MCPBridge(token="")
         with self.assertRaisesRegex(RuntimeError,"MCP_NOT_CONNECTED_STANDALONE"):
             b.process_pending(lambda _:True)
+
+
+def test_consumer_lease_key_is_canonical_across_installations(tmp_path):
+    import json
+    from pathlib import Path
+    from unittest.mock import patch
+    import module_bridge
+
+    declared=json.loads(
+        (Path(__file__).resolve().parents[1]/"module.mdl").read_text(
+            encoding="utf-8"))["id"]
+    assert module_bridge.CANONICAL_MODULE_ID==declared
+    initial=module_bridge._consumer_lease_path()
+    assert initial.endswith(".lock")
+    assert "mcp-module-inbox-" in initial
+    # A second checkout of the same package may resolve __file__ differently,
+    # but must still contend for the same inbox-consumer OS lock.
+    with patch.object(module_bridge,"__file__",
+                      str(tmp_path/"copy-two"/"module_bridge.py")):
+        assert module_bridge._consumer_lease_path()==initial
+    # Independent canonical module identities must not block each other.
+    with patch.object(module_bridge,"CANONICAL_MODULE_ID",declared+"-other"):
+        assert module_bridge._consumer_lease_path()!=initial
