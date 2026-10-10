@@ -161,6 +161,41 @@ class OpticalReaderTests(unittest.TestCase):
                          sum(len(__import__("json").loads(raw)["d"])
                              for raw in session.chunks.values()))
 
+    def test_unpaired_provisional_header_expires_only_on_new_frames(self):
+        from easychange.remote.optical_protocol import encode_durable_result_header
+        from mcp_adapter import optical_reader
+
+        provisional=encode_durable_result_header({
+            "sequence":"QEXPIREDHEAD","finished":True,"success":True,
+            "sha256":"a"*64,"payload_length":17,
+        })
+        session=OpticalAssembler()
+        session.ingest([provisional])
+        self.assertEqual(session.pending_provisional_header["s"],"QEXPIREDHEAD")
+        session.updated_at-=optical_reader.MAX_EC2_ASSEMBLY_IDLE_SECONDS+1
+        session.ingest([])
+        self.assertTrue(session.pending_provisional_header)
+        # A later frame starts a new observation window. A stale isolated
+        # header must not survive indefinitely waiting for its EC2 chunks.
+        stale=session.ingest(['{}'])
+        self.assertIsNone(stale["sequence"])
+        self.assertEqual(session.pending_provisional_header,{})
+        self.assertEqual(session.header,{})
+        session.ingest([provisional])
+        self.assertEqual(session.pending_provisional_header["s"],"QEXPIREDHEAD")
+
+    def test_provisional_header_updates_idle_deadline_on_acceptance(self):
+        from easychange.remote.optical_protocol import encode_durable_result_header
+        provisional=encode_durable_result_header({
+            "sequence":"QHEARTBEATHEAD","finished":True,"success":True,
+            "sha256":"b"*64,"payload_length":23,
+        })
+        session=OpticalAssembler()
+        session.updated_at=0.0
+        session.ingest([provisional])
+        self.assertGreater(session.updated_at,0.0)
+        self.assertEqual(session.pending_provisional_header["s"],"QHEARTBEATHEAD")
+
     def test_idle_expiry_does_not_discard_last_result_on_empty_poll(self):
         from mcp_adapter import optical_reader
 
