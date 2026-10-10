@@ -27,6 +27,35 @@ class TestProcessPending(unittest.TestCase):
             self.assertEqual(bridge.receive(),page)
         request.assert_called_once_with("/v1/inbox/peek",timeout=8)
 
+    def test_inbox_probe_sends_requested_small_page_to_hub(self):
+        from unittest.mock import patch
+
+        bridge=MCPBridge(token="A"*48)
+        page={"ok":True,"recipient":CANONICAL_MODULE_ID,
+              "messages":[],"pending":0,"requires_ack":True}
+        with patch.object(bridge,"_request",return_value=page) as request:
+            self.assertEqual(bridge.receive(limit=1),page)
+        request.assert_called_once_with("/v1/inbox/peek?limit=1",timeout=8)
+
+        # Invalid caller input cannot send a request or acquire a lease.
+        with patch.object(bridge,"_request") as request:
+            for invalid in (None,True,False,0,21,1.5,"1",[],{}):
+                with self.subTest(limit=invalid):
+                    with self.assertRaisesRegex(ValueError,"INVALID_LIMIT"):
+                        bridge.receive(limit=invalid)
+        request.assert_not_called()
+
+    def test_one_message_processing_requests_only_one_from_hub(self):
+        bridge=self.bridge([item(31),item(32)])
+        calls=[]
+        receipt=bridge.process_pending(
+            lambda msg: calls.append(msg["id"]) or True,limit=1)
+        self.assertEqual(calls,[31])
+        self.assertEqual(receipt["received"],1)
+        self.assertEqual(receipt["acknowledged"],1)
+        bridge.receive.assert_called_once_with(limit=1)
+        bridge.ack.assert_called_once_with([31])
+
     def test_idempotent_ack_uses_short_timeout_even_after_lost_reply(self):
         from unittest.mock import Mock,patch
 
