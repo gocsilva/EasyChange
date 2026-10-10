@@ -44,10 +44,13 @@ def _bounded_service_json(value):
     for piece in json.JSONEncoder(ensure_ascii=False,allow_nan=False).iterencode(value):
         if len(piece)>MAX_SERVICE_RESPONSE_BYTES:
             raise ValueError("MODULE_SERVICE_RESPONSE_TOO_LARGE")
-        raw=piece.encode("utf-8")
-        if len(chunks)+len(raw)>MAX_SERVICE_RESPONSE_BYTES:
-            raise ValueError("MODULE_SERVICE_RESPONSE_TOO_LARGE")
-        chunks.extend(raw)
+        # JSONEncoder may yield one enormous Unicode fragment. Encode in
+        # small windows so the byte limit also bounds temporary allocations.
+        for offset in range(0,len(piece),4096):
+            raw=piece[offset:offset+4096].encode("utf-8")
+            if len(chunks)+len(raw)>MAX_SERVICE_RESPONSE_BYTES:
+                raise ValueError("MODULE_SERVICE_RESPONSE_TOO_LARGE")
+            chunks.extend(raw)
     return bytes(chunks)
 
 class BoundedLocalHTTPServer(ThreadingHTTPServer):
