@@ -913,6 +913,11 @@ class DurableResultStore:
                 started < 0 or finished < 0):
             raise RuntimeError("RESULT_RECEIPT_UNREADABLE")
         elapsed_end = finished or time.time()
+        duration_ms = max(0.0, elapsed_end - started) * 1000 if started else None
+        if duration_ms is not None and not math.isfinite(duration_ms):
+            # Finite legacy timestamps can still overflow when converted to
+            # milliseconds. Do not raise an uncontrolled int(inf) exception.
+            raise RuntimeError("RESULT_RECEIPT_UNREADABLE")
         return {
             "sequence": sequence,
             "execution_id": value.get("execution_id"),
@@ -930,7 +935,7 @@ class DurableResultStore:
             "expired_result_hash": value.get("expired_result_hash"),
             "started_at": value.get("started_at"),
             "finished_at": value.get("finished_at"),
-            "duration_ms": int(max(0.0, elapsed_end - started) * 1000) if started else None,
+            "duration_ms": int(duration_ms) if duration_ms is not None else None,
             "mutation_receipt": value.get("mutation_receipt"),
         }
 
