@@ -170,13 +170,28 @@ def _expand_transport_value(
 
 
 def _encode_raw(value: dict[str, Any]) -> tuple[bytes, bytes, str]:
-    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # Enforce the receiver's byte budget during JSON encoding. A full
+    # json.dumps() copy of an oversized result would spike memory before the
+    # compression/QR stages could reject the envelope.
+    output=bytearray()
+    encoder=json.JSONEncoder(ensure_ascii=False, allow_nan=False,
+                             separators=(",", ":"))
+    for part in encoder.iterencode(value):
+        encoded=part.encode("utf-8")
+        if len(output)+len(encoded)>MAX_EC2_RESULT_BYTES:
+            raise ValueError("OPTICAL_RESULT_TOO_LARGE")
+        output.extend(encoded)
+    raw=bytes(output)
     # Only the first optical page is broadcast for large results; the rest
     # is recovered from the durable ResultStore. Level 3 cuts bundle preparation
     # CPU substantially versus level 6 while keeping QR density nearly identical.
-    compressed = zlib.compress(raw, level=OPTICAL_COMPRESSION_LEVEL)
-    token = base64.urlsafe_b64encode(compressed).decode("ascii").rstrip("=")
-    return raw, compressed, token
+    compressed=zlib.compress(raw,level=OPTICAL_COMPRESSION_LEVEL)
+    if len(compressed)>MAX_EC2_COMPRESSED_BYTES:
+        raise ValueError("OPTICAL_COMPRESSED_RESULT_TOO_LARGE")
+    token=base64.urlsafe_b64encode(compressed).decode("ascii").rstrip("=")
+    if len(token)>MAX_EC2_TOKEN_CHARS:
+        raise ValueError("OPTICAL_RESULT_TOKEN_TOO_LARGE")
+    return raw,compressed,token
 
 
 def adaptive_chunk_chars(token_chars: int) -> int:
