@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import threading
 import zlib
@@ -178,7 +179,29 @@ class Journal:
         if not re_full_hash(digest):
             raise ValueError("Invalid journal blob reference")
         target = self.blob_root / f"{digest}.zlib"
-        with target.open("rb") as stream:
+        # Snapshot filenames are content-addressed but the directory may
+        # contain imported or externally replaced files. Do not follow links
+        # or block indefinitely opening a FIFO before checking its type.
+        if target.is_symlink():
+            raise ValueError("JOURNAL_BLOB_UNSAFE_FILE")
+        flags=(os.O_RDONLY | getattr(os,"O_BINARY",0) |
+               getattr(os,"O_NOFOLLOW",0) |
+               (getattr(os,"O_NONBLOCK",0) if os.name=="posix" else 0))
+        try:
+            fd=os.open(target,flags)
+        except OSError as exc:
+            if target.is_symlink():
+                raise ValueError("JOURNAL_BLOB_UNSAFE_FILE") from exc
+            raise
+        try:
+            stream=os.fdopen(fd,"rb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with stream:
+            metadata=os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink!=1:
+                raise ValueError("JOURNAL_BLOB_UNSAFE_FILE")
             compressed = stream.read(_MAX_BLOB_COMPRESSED_BYTES + 1)
         if len(compressed) > _MAX_BLOB_COMPRESSED_BYTES:
             raise ValueError("JOURNAL_BLOB_COMPRESSED_TOO_LARGE")
