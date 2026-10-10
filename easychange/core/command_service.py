@@ -466,7 +466,15 @@ class CommandService:
             except (json.JSONDecodeError, ValueError) as exc:
                 return Result(False, "ec", error=str(exc), code="INVALID_STRUCTURED_PAYLOAD", sequence=sequence)
 
-        digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
+        try:
+            digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
+        except UnicodeEncodeError:
+            # JSON permits escaped lone surrogates, but they cannot be
+            # serialized on the UTF-8 wire or used as a durable command hash.
+            # Reject before claiming a sequence or touching the filesystem.
+            return Result(
+                False, "ec", error="Command contains invalid UTF-8",
+                code="INVALID_COMMAND_ENCODING", sequence=sequence)
         mutation_types = STRUCTURED_MUTATION_TYPES
         if structured is not None:
             structured_op = str(structured.get("op") or "").casefold()
