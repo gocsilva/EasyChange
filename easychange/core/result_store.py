@@ -300,8 +300,14 @@ class DurableResultStore:
 
     @staticmethod
     def _receipt_stamp(path: Path) -> tuple[int, int, int, int]:
-        stat = path.stat()
-        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+        # lstat checks the actual pathname, not its symlink destination.
+        # A replaced cached receipt must never remain trusted merely because
+        # a symbolic link now points back to the original inode.
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError("RESULT_RECEIPT_UNSAFE_TYPE")
+        return (metadata.st_dev, metadata.st_ino,
+                metadata.st_size, metadata.st_mtime_ns)
 
     def _terminal_header_cache_put(self, sequence: str, value: dict[str, Any]) -> None:
         base = self._terminal_header_base(value)
