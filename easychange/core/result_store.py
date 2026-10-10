@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 import base64
 import binascii
+import errno
 from contextlib import contextmanager
 import hashlib
 import itertools
@@ -200,13 +201,29 @@ class DurableResultStore:
                     # different user. Otherwise a second inode or tampered
                     # lock can invalidate cross-process sequence ownership.
                     raise RuntimeError("RESULT_CLAIM_UNSAFE_LOCK_OWNER")
-                handle.seek(0)
-                if sys.platform == "win32":
-                    import msvcrt
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                # Never wait forever on a sibling process that holds this
+                # mutation-ownership lock. Contention must fail closed: a
+                # timed-out claimant is *not* authorized to execute anything.
+                deadline=time.monotonic()+2.0
+                while True:
+                    handle.seek(0)
+                    try:
+                        if sys.platform == "win32":
+                            import msvcrt
+                            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        else:
+                            import fcntl
+                            fcntl.flock(handle.fileno(),
+                                        fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except OSError as exc:
+                        if (exc.errno not in (errno.EACCES, errno.EAGAIN)
+                                and getattr(exc, "winerror",None) not in (33,36)):
+                            raise RuntimeError("RESULT_CLAIM_LOCK_UNAVAILABLE") from exc
+                        remaining=deadline-time.monotonic()
+                        if remaining<=0:
+                            raise RuntimeError("RESULT_CLAIM_LOCK_BUSY") from exc
+                        time.sleep(min(0.05,remaining))
                 try:
                     # Initialize the lock byte only after acquiring the lock:
                     # concurrent openers must not race while growing the file.
