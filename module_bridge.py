@@ -155,15 +155,23 @@ class MCPBridge:
 
     @property
     def connected(self):
-        if not self.token:
+        # Misconfigured inherited credentials must behave as disconnected,
+        # rather than raising while constructing an HTTP Authorization header.
+        if (type(self.token) is not str or not self.token or
+                len(self.token)>256 or not self.token.isascii()):
             return False
         if self._implicit_credential:
             with _runtime_state_lock:
                 # Implicit clients stop working immediately after a detach or
                 # a newer attach. Explicit tokens are verified by the hub.
-                if (_runtime_detached or
-                        (_runtime_token and not hmac.compare_digest(self.token,_runtime_token))):
+                if _runtime_detached:
                     return False
+                if _runtime_token:
+                    if (type(_runtime_token) is not str or
+                            len(_runtime_token)>256 or
+                            not _runtime_token.isascii() or
+                            not hmac.compare_digest(self.token,_runtime_token)):
+                        return False
         return True
 
     def _request(self,path,body=None,*,timeout=40):
