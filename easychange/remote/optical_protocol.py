@@ -36,6 +36,7 @@ def valid_ec2_identity(packet: dict) -> bool:
     return (
         type(packet.get("v")) is int and packet["v"] == 2
         and isinstance(seq, str) and bool(seq) and len(seq) <= 256
+        and not any(0xD800 <= ord(ch) <= 0xDFFF for ch in seq)
         and isinstance(digest, str) and len(digest) == 16
         and all(char in alphabet for char in digest)
         and isinstance(crc, str) and len(crc) == 8
@@ -252,6 +253,10 @@ def _transport_components(
         raise ValueError("OPTICAL_SEQUENCE_STRING_REQUIRED")
     if not 1 <= len(sequence) <= 256:
         raise ValueError("OPTICAL_SEQUENCE_TOO_LONG")
+    if any(0xD800 <= ord(ch) <= 0xDFFF for ch in sequence):
+        # A JSON-escaped lone surrogate cannot be faithfully encoded as
+        # UTF-8 metadata by downstream QR/result consumers.
+        raise ValueError("OPTICAL_SEQUENCE_INVALID_UNICODE")
     wire_value = _compact_transport_value(value)
     raw, _compressed, token = _encode_raw(wire_value)
     size = adaptive_chunk_chars(len(token)) if chunk_chars is None else int(chunk_chars)
