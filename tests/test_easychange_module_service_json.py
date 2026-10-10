@@ -187,3 +187,20 @@ def test_service_json_preflight_bounded_on_wide_and_cyclic_containers():
             with pytest.raises(ValueError,match="MODULE_SERVICE_RESPONSE_TOO_LARGE"):
                 module_service._bounded_service_json({"items":list(range(9))})
         encoder.assert_not_called()
+
+
+def test_oversized_json_mapping_keys_rejected_before_encoder_allocation():
+    examples=(
+        {"x"*257:1},
+        {"ok":True,"nested":{"long_key_"*33:"value"}},
+    )
+    with patch.object(module_service,"MAX_SERVICE_RESPONSE_BYTES",256), \
+         patch.object(module_service.json.JSONEncoder,"iterencode",
+                      side_effect=AssertionError("ENCODER_ALLOCATED")) as encoder:
+        for example in examples:
+            with pytest.raises(ValueError,match="MODULE_SERVICE_RESPONSE_TOO_LARGE"):
+                module_service._bounded_service_json(example)
+        encoder.assert_not_called()
+
+    accepted={"ok":True,"nested":{"short":"value"}}
+    assert json.loads(module_service._bounded_service_json(accepted))==accepted
