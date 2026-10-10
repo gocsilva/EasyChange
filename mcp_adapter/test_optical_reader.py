@@ -619,6 +619,40 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertEqual(result["payload"]["data"]["text"],content)
         self.assertEqual(len(received),1)
 
+    def test_consecutive_identical_accepted_qr_skips_repeated_json_parse(self):
+        import hashlib
+        from unittest.mock import patch
+        from mcp_adapter import optical_reader as reader
+        from easychange.core.result import Result
+
+        text="".join(hashlib.sha256(str(i).encode()).hexdigest()
+                     for i in range(80))
+        packets=encode_result_chunks(
+            Result(True,"read",{"text":text},sequence="QPARSEFAST1"),
+            chunk_chars=150)
+        self.assertGreater(len(packets),2)
+        receiver=OpticalAssembler()
+        first=receiver.ingest([packets[0]])
+        self.assertFalse(first["complete"])
+        original_chars=receiver.stored_chars
+        original_tokens=receiver.stored_token_chars
+        parser=reader.decode_ec2_packet_json
+        with patch.object(reader,"decode_ec2_packet_json",wraps=parser) as decode:
+            repeat=receiver.ingest([packets[0]]*80)
+            self.assertFalse(repeat["complete"])
+            decode.assert_not_called()
+            self.assertEqual(receiver.stored_chars,original_chars)
+            self.assertEqual(receiver.stored_token_chars,original_tokens)
+            # A distinct valid fragment MUST still pass the full parser.
+            receiver.ingest([packets[1]])
+            decode.assert_called_once_with(packets[1])
+
+        # Expiring/resetting a transfer revokes the exact-frame shortcut.
+        receiver._reset_unverified()
+        with patch.object(reader,"decode_ec2_packet_json",wraps=parser) as decode:
+            receiver.ingest([packets[0]])
+            decode.assert_called_once_with(packets[0])
+
     def test_exact_repeated_qr_avoids_rechecking_accepted_crc(self):
         import hashlib
         from unittest.mock import patch
