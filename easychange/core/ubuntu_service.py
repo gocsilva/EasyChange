@@ -18,6 +18,13 @@ class UbuntuError(RuntimeError):
     pass
 
 
+def _require_explicit_mutation_permission(value: object) -> bool:
+    """Mutation authorization is a JSON boolean, never a truthy string."""
+    if type(value) is not bool:
+        raise ValueError("ALLOW_MUTATION_BOOLEAN_REQUIRED")
+    return value
+
+
 @dataclass
 class UbuntuSession:
     session_id: str
@@ -563,6 +570,7 @@ class UbuntuService:
         allow_mutation: bool = False,
         confirm_context: str = "",
     ) -> dict:
+        allow_mutation = _require_explicit_mutation_permission(allow_mutation)
         session = self._session(session_id)
         requested = [str(item) for item in (argv or [])]
         if not requested:
@@ -605,6 +613,7 @@ class UbuntuService:
         max_bytes: int = 65536,
         allow_mutation: bool = False,
     ) -> dict:
+        allow_mutation = _require_explicit_mutation_permission(allow_mutation)
         value = str(command or "")
         if not value.strip() or len(value) > 32768 or "\x00" in value:
             raise ValueError("UBUNTU_SHELL_COMMAND_REQUIRED")
@@ -632,9 +641,14 @@ class UbuntuService:
         timeout: float = 15.0,
         max_bytes: int = 65536,
     ) -> dict:
-        session = self._session(session_id)
         if not isinstance(commands, list) or not 1 <= len(commands) <= 32:
             raise ValueError("UBUNTU_BATCH_REQUIRES_1_TO_32_COMMANDS")
+        # Validate the entire batch before even its first command can run.
+        for index, item in enumerate(commands):
+            if not isinstance(item, dict):
+                raise ValueError(f"UBUNTU_BATCH_COMMAND_OBJECT_REQUIRED:{index}")
+            _require_explicit_mutation_permission(item.get("allow_mutation", False))
+        session = self._session(session_id)
         started = time.monotonic()
         results: list[dict] = []
         failed = 0
@@ -645,7 +659,8 @@ class UbuntuService:
             try:
                 argv = item.get("argv")
                 command = item.get("command")
-                allow_mutation = bool(item.get("allow_mutation", False))
+                allow_mutation = _require_explicit_mutation_permission(
+                    item.get("allow_mutation", False))
                 confirm_context = str(item.get("confirm_context") or "")
                 mutation = False
                 if isinstance(argv, list):
@@ -897,6 +912,7 @@ class UbuntuService:
         wait_ms: int = 1800,
         max_bytes: int = 65536,
     ) -> dict:
+        allow_mutation = _require_explicit_mutation_permission(allow_mutation)
         session = self._session(session_id)
         requested = self._validate_kubectl_args(args)
         self._guard_secret_read(requested)
