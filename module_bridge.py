@@ -240,6 +240,9 @@ class MCPBridge:
             page=self.receive()
             if not isinstance(page,dict) or page.get("requires_ack") is not True:
                 raise ValueError("MCP_REQUIRES_NONDESTRUCTIVE_INBOX")
+            if ("recipient" in page and
+                    page["recipient"]!=CANONICAL_MODULE_ID):
+                raise ValueError("MCP_INBOX_RECIPIENT_MISMATCH")
             messages=page.get("messages")
             if not isinstance(messages,list):
                 raise ValueError("INVALID_MCP_INBOX")
@@ -260,7 +263,9 @@ class MCPBridge:
                 if not accepted:
                     return
                 receipt=self.ack(list(accepted))
-                if not isinstance(receipt,dict) or receipt.get("ok") is not True:
+                if (not isinstance(receipt,dict) or receipt.get("ok") is not True or
+                        ("recipient" in receipt and
+                         receipt["recipient"]!=CANONICAL_MODULE_ID)):
                     raise RuntimeError("MCP_ACK_UNCONFIRMED")
                 acked=receipt.get("acked")
                 already=receipt.get("already_acked",[])
