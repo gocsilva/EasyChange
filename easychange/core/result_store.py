@@ -164,7 +164,8 @@ class DurableResultStore:
         return value
 
 
-    def _payload_cache_put(self, sequence: str, raw: bytes, digest: str) -> None:
+    def _payload_cache_put(self, sequence: str, raw: bytes, digest: str,
+                           *, stamp: tuple[int, int, int, int] | None = None) -> None:
         size = len(raw)
         if size <= 0 or size > self._payload_cache_max_bytes:
             return
@@ -180,10 +181,11 @@ class DurableResultStore:
         ):
             _, stale = self._payload_cache.popitem(last=False)
             self._payload_cache_bytes -= len(stale[1])
-        try:
-            stamp = self._receipt_stamp(self._path(sequence))
-        except OSError:
-            return
+        if stamp is None:
+            try:
+                stamp = self._receipt_stamp(self._path(sequence))
+            except OSError:
+                return
         self._payload_cache[sequence] = (time.monotonic(), raw, digest, stamp)
         self._payload_cache_bytes += size
 
@@ -677,14 +679,30 @@ class DurableResultStore:
             if cached is not None:
                 raw, digest = cached
                 return {}, raw, digest
-        result = self.result(sequence)
-        if result is None:
-            return None
-        raw = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        digest = hashlib.sha256(raw).hexdigest()
-        with self._lock:
-            self._payload_cache_put(sequence, raw, digest)
-        return result, raw, digest
+        path = self._path(sequence)
+        for _ in range(3):
+            try:
+                before = self._receipt_stamp(path)
+            except FileNotFoundError:
+                return None
+            result = self.result(sequence)
+            if result is None:
+                return None
+            raw = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            digest = hashlib.sha256(raw).hexdigest()
+            try:
+                after = self._receipt_stamp(path)
+            except FileNotFoundError:
+                continue
+            if before != after:
+                continue
+            with self._lock:
+                # Use the stamp of the bytes actually read. Re-stat'ing in
+                # cache_put could associate an older payload with a newer
+                # receipt written by another process in the meantime.
+                self._payload_cache_put(sequence, raw, digest, stamp=after)
+            return result, raw, digest
+        raise RuntimeError("RESULT_RECEIPT_CHANGED_DURING_READ")
 
     def _stream_cache_put(
         self,
@@ -693,6 +711,8 @@ class DurableResultStore:
         stream_hash: str,
         result_hash: str,
         result_bytes: int,
+        *,
+        stamp: tuple[int, int, int, int] | None = None,
     ) -> None:
         size = len(stream)
         if size <= 0 or size > self._stream_cache_max_bytes:
@@ -709,10 +729,11 @@ class DurableResultStore:
         ):
             _, stale = self._stream_cache.popitem(last=False)
             self._stream_cache_bytes -= len(stale[1])
-        try:
-            stamp = self._receipt_stamp(self._path(sequence))
-        except OSError:
-            return
+        if stamp is None:
+            try:
+                stamp = self._receipt_stamp(self._path(sequence))
+            except OSError:
+                return
         self._stream_cache[sequence] = (
             time.monotonic(),
             stream,
@@ -750,21 +771,31 @@ class DurableResultStore:
             cached = self._stream_cache_get(sequence)
             if cached is not None:
                 return cached
-        payload = self._result_payload(sequence)
-        if payload is None:
-            return None
-        _, raw, result_hash = payload
-        stream = zlib.compress(raw, level=1)
-        stream_hash = hashlib.sha256(stream).hexdigest()
-        with self._lock:
-            self._stream_cache_put(
-                sequence,
-                stream,
-                stream_hash,
-                result_hash,
-                len(raw),
-            )
-        return stream, stream_hash, result_hash, len(raw)
+        path = self._path(sequence)
+        for _ in range(3):
+            try:
+                before = self._receipt_stamp(path)
+            except FileNotFoundError:
+                return None
+            payload = self._result_payload(sequence)
+            if payload is None:
+                return None
+            _, raw, result_hash = payload
+            stream = zlib.compress(raw, level=1)
+            stream_hash = hashlib.sha256(stream).hexdigest()
+            try:
+                after = self._receipt_stamp(path)
+            except FileNotFoundError:
+                continue
+            if before != after:
+                continue
+            with self._lock:
+                self._stream_cache_put(
+                    sequence, stream, stream_hash, result_hash, len(raw),
+                    stamp=after,
+                )
+            return stream, stream_hash, result_hash, len(raw)
+        raise RuntimeError("RESULT_RECEIPT_CHANGED_DURING_READ")
 
     @staticmethod
     def _stream_metadata(
