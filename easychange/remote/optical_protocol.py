@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import zlib
+from collections.abc import Collection
 from typing import Any
 
 PROTOCOL = "EC2"
@@ -264,7 +265,7 @@ def encode_result_bundle(
     )
 
 
-def decode_result_chunks(payloads: list[str]) -> dict[str, Any]:
+def decode_result_chunks(payloads: Collection[str]) -> dict[str, Any]:
     """Reassemble bounded EC2 packets and reject malformed or oversized QR data."""
     if not payloads:
         raise ValueError("no optical chunks")
