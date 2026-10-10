@@ -420,6 +420,22 @@ class DurableResultStore:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, target)
+            if os.name == "posix":
+                # The file fsync above persists its bytes; fsync the parent
+                # directory after the atomic rename so the receipt name is
+                # also durable across sudden power loss where supported.
+                # Some filesystems do not permit directory fsync; the atomic
+                # replace still stands and recovery remains fail-closed.
+                directory_fd = None
+                try:
+                    directory_fd = os.open(
+                        self.root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                    os.fsync(directory_fd)
+                except OSError:
+                    pass
+                finally:
+                    if directory_fd is not None:
+                        os.close(directory_fd)
         finally:
             temporary.unlink(missing_ok=True)
 
