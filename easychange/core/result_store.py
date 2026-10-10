@@ -18,6 +18,7 @@ import zlib
 
 
 MAX_COMPRESSED_RECEIPT_BYTES = 32 * 1024 * 1024
+MAX_DECODED_RECEIPT_BYTES = 64 * 1024 * 1024
 
 
 def _find_execution_summary(value: Any, depth: int = 0) -> dict[str, Any] | None:
@@ -130,14 +131,19 @@ class DurableResultStore:
 
     @staticmethod
     def _encode(value: dict[str, Any]) -> bytes:
-        # Durable results favor write/read latency over a few percent of disk
-        # density. Local benchmarks on ~1.25 MiB structured results show level 1
-        # is roughly 2x faster than level 6 while remaining compact enough for
-        # the bounded 128-result store.
-        return zlib.compress(
-            json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
-            level=1,
-        )
+        # Writer and reader must agree on their byte budgets. Otherwise a
+        # successful atomic replacement could create an unreadable receipt,
+        # losing replay identity after a mutation has already executed.
+        # Level 1 retains the established low-latency compression policy.
+        raw = json.dumps(
+            value, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        if len(raw) > MAX_DECODED_RECEIPT_BYTES:
+            raise ValueError("RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE")
+        compressed = zlib.compress(raw, level=1)
+        if len(compressed) > MAX_COMPRESSED_RECEIPT_BYTES:
+            raise ValueError("RESULT_RECEIPT_COMPRESSED_TOO_LARGE")
+        return compressed
 
     @staticmethod
     def _read_compressed(path: Path) -> bytes:
@@ -154,7 +160,7 @@ class DurableResultStore:
         # Reject oversized compressed records and decompression bombs before
         # allocating an unbounded JSON document.
         max_compressed = MAX_COMPRESSED_RECEIPT_BYTES
-        max_decoded = 64 * 1024 * 1024
+        max_decoded = MAX_DECODED_RECEIPT_BYTES
         if len(raw) > max_compressed:
             raise ValueError("RESULT_RECEIPT_COMPRESSED_TOO_LARGE")
         decoder = zlib.decompressobj()
