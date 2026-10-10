@@ -341,6 +341,47 @@ def test_oversize_decimal_index_is_rejected_without_integer_conversion(tmp_path)
         store.chunks(seq, [enormous])
 
 
+def test_stream_batch_uses_one_consistent_receipt_snapshot(tmp_path, monkeypatch):
+    import base64
+    import hashlib
+    import zlib
+
+    store=DurableResultStore(tmp_path / "receipts")
+    seq="QSNAPSHOT01"
+
+    def payload(text):
+        raw=json.dumps({"ok":True,"data":{"text":text}},
+                       separators=(",",":")).encode("utf-8")
+        packed=zlib.compress(raw, level=1)
+        return (packed, hashlib.sha256(packed).hexdigest(),
+                hashlib.sha256(raw).hexdigest(),len(raw))
+
+    initial=payload("A"*40000)
+    replacement=payload("B"*40000)
+    calls=[]
+    def concurrent_snapshot(_sequence):
+        calls.append(_sequence)
+        return initial if len(calls)==1 else replacement
+
+    monkeypatch.setattr(store, "_result_stream_payload", concurrent_snapshot)
+    response=store.stream_chunks(seq,[0])
+    assert len(calls)==1
+    assert response["eligible"] is True
+    assert response["stream_hash"]==initial[1]
+    assert response["result_hash"]==initial[2]
+    assert response["stream_bytes"]==len(initial[0])
+    chunk=response["chunks"][0]
+    assert chunk["stream_hash"]==response["stream_hash"]
+    assert chunk["result_hash"]==response["result_hash"]
+    encoded=chunk["payload_b64"]
+    assert base64.urlsafe_b64decode(encoded+"="*(-len(encoded)%4))==initial[0]
+
+    calls.clear()
+    metadata=store.stream_meta(seq)
+    assert metadata["stream_hash"]==initial[1]
+    assert len(calls)==1
+
+
 def test_terminal_header_cache_preserves_expired_replay_tombstone(tmp_path, monkeypatch):
     import time
 
