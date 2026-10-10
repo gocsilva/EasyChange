@@ -40,3 +40,38 @@ def test_git_grep_leading_hyphen_cannot_be_interpreted_as_option(
     assert argv.index("-e") < argv.index("--")
     assert argv[-1]=="--"
     assert ("-E" if regex else "-F") in argv
+
+
+def test_git_prefix_is_literal_and_intersects_extension(tmp_path):
+    (tmp_path / ".git").mkdir()
+    index=Indexer(tmp_path)
+    output=(
+        "src_[x]/expected.py:1:TOKEN=valid\n"
+        "src_[x]/wrong.cs:2:TOKEN=incorrect-extension\n"
+        "src_any/escaped.py:3:TOKEN=wrong-path\n"
+        "src_[x]other/sibling.py:4:TOKEN=wrong-prefix\n"
+    )
+    captured=[]
+    def git_grep(argv, **kwargs):
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv,0,output,"")
+
+    with patch("easychange.core.indexer.subprocess.run",side_effect=git_grep):
+        rows=index._git_search(
+            "TOKEN",regex=False,extension="py",path_prefix="src_[x]",
+            case_sensitive=False)
+
+    assert rows==[("src_[x]/expected.py","1:TOKEN=valid")]
+    assert captured[0][-1]==":(literal)src_[x]"
+    assert not any(arg.startswith(":(glob)src_") for arg in captured[0])
+
+
+@pytest.mark.parametrize("prefix", ["../outside", "/tmp/outside", "src/../outside"])
+def test_git_prefix_rejects_workspace_traversal_before_subprocess(tmp_path,prefix):
+    (tmp_path / ".git").mkdir()
+    index=Indexer(tmp_path)
+    with patch("easychange.core.indexer.subprocess.run") as runner:
+        with pytest.raises(ValueError,match="INVALID_PROTECTED_INDEX_PATH"):
+            index._git_search("TOKEN",regex=False,extension=None,
+                              path_prefix=prefix,case_sensitive=False)
+    runner.assert_not_called()
