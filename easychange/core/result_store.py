@@ -340,7 +340,9 @@ class DurableResultStore:
         # A replaced cached receipt must never remain trusted merely because
         # a symbolic link now points back to the original inode.
         metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode):
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            # A safe receipt later gaining a hard-link alias keeps the same
+            # inode and mtime. Invalidate cached headers on that transition.
             raise OSError("RESULT_RECEIPT_UNSAFE_TYPE")
         return (metadata.st_dev, metadata.st_ino,
                 metadata.st_size, metadata.st_mtime_ns)
