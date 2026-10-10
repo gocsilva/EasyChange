@@ -189,3 +189,54 @@ def test_valid_extra_session_maps_are_preserved(tmp_path):
     reloaded = MachineSession(path, str(tmp_path))
     for key, value in expected.items():
         assert reloaded.data[key] == value
+
+
+@pytest.mark.parametrize("field, invalid, fallback", (
+    ("transport", None, "local"),
+    ("transport", 42, "local"),
+    ("transport", ["hid"], "local"),
+    ("transport", "unrecognized", "local"),
+    ("output_mode", {"format": "json"}, "text"),
+    ("output_mode", 3, "text"),
+    ("output_mode", "unknown", "text"),
+    ("mode", True, None),
+    ("mode", ["machine"], None),
+    ("line", False, 1),
+    ("line", "100", 1),
+    ("line", -1, 1),
+    ("line", 2_147_483_648, 1),
+    ("current_file", {"path": "src/a.py"}, None),
+    ("current_file", ["src/a.py"], None),
+    ("current_file", "bad\x00name", None),
+    ("current_file", "x" * 4097, None),
+))
+def test_malformed_persisted_scalar_does_not_break_machine_session(
+        tmp_path, field, invalid, fallback):
+    path = tmp_path / ".easychange" / "session.json"
+    path.parent.mkdir()
+    original = json.dumps({
+        "workspace": str(tmp_path), "session_id": "SSCALAR",
+        "mode": "machine", field: invalid,
+    }).encode("utf-8")
+    path.write_bytes(original)
+
+    restored = MachineSession(path, str(tmp_path))
+    assert restored.data.get(field) == fallback
+    assert restored.data["session_id"] == "SSCALAR"
+    assert path.read_bytes() == original
+
+
+def test_valid_persisted_editor_and_transport_scalar_modes_round_trip(tmp_path):
+    path = tmp_path / ".easychange" / "session.json"
+    initial = MachineSession(path, str(tmp_path))
+    fields = {
+        "current_file": "src/models/Arquivo.cs",
+        "line": 2147483647,
+        "output_mode": "json",
+        "transport": "esp_hid",
+        "mode": "machine",
+    }
+    initial.data.update(fields)
+    initial.save()
+    restored = MachineSession(path, str(tmp_path))
+    assert {key: restored.data[key] for key in fields} == fields
