@@ -6,6 +6,37 @@ from urllib.error import HTTPError
 import module_bridge
 
 class TestHubRedirectBoundary(unittest.TestCase):
+    def test_duplicate_attach_token_cannot_change_live_bus_credentials(self):
+        import io
+        from unittest.mock import Mock,patch
+        from mcp_adapter.module_service import Handler
+
+        for payload in (
+                b'{"token":"safe","token":"other"}',
+                b'{"token":"safe","metadata":{"id":"one","id":"two"}}'):
+            with self.subTest(payload=payload):
+                handler=object.__new__(Handler)
+                handler.path="/v1/attach"
+                handler.headers={"Content-Type":"application/json",
+                                 "Content-Length":str(len(payload))}
+                handler.rfile=io.BytesIO(payload)
+                handler.send=Mock()
+                with patch("module_bridge.attach_hub",
+                           side_effect=AssertionError("UNSAFE_ATTACH")) as attach:
+                    handler.do_POST()
+                attach.assert_not_called()
+                handler.send.assert_called_once_with(
+                    403,{"error":"ValueError"})
+
+    def test_duplicate_peer_health_cannot_fake_esp_connectivity(self):
+        import io
+        from unittest.mock import patch
+        from mcp_adapter.module_service import esp_online
+        raw=b'{"ok":false,"ok":true,"id":"esp"}'
+        with patch("mcp_adapter.module_service.urlopen",
+                   return_value=io.BytesIO(raw)):
+            self.assertFalse(esp_online())
+
     def test_attach_never_accepts_other_modules_identity_or_credential(self):
         from unittest.mock import patch
 
