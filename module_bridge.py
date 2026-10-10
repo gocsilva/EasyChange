@@ -24,6 +24,7 @@ class _NoRedirect(HTTPRedirectHandler):
 _local_opener=build_opener(ProxyHandler({}),_NoRedirect)
 
 _runtime_token=""
+_runtime_detached=False
 CANONICAL_MODULE_ID="easychange"
 # Single consumer in this module process, including multiple MCPBridge objects.
 _processing_lock=threading.Lock()
@@ -88,7 +89,11 @@ def _release_consumer_lease(lease):
 
 class MCPBridge:
     def __init__(self,token=None):
-        self.token=token if token is not None else (_runtime_token or os.environ.get("MCP_MODULE_BUS_TOKEN",""))
+        # Explicit detach overrides an inherited bootstrap credential.
+        # The host must also rotate its token to revoke pre-existing clients.
+        self.token=(token if token is not None else
+                    ("" if _runtime_detached else
+                     (_runtime_token or os.environ.get("MCP_MODULE_BUS_TOKEN",""))))
         self.module=os.environ.get("MCP_MODULE_ID","")
 
     @property
@@ -327,7 +332,7 @@ def attach_hub(token,expected_module):
     this module. Only then is it installed; arbitrary localhost callers cannot
     claim a module or choose an external URL.
     """
-    global _runtime_token
+    global _runtime_token, _runtime_detached
     if expected_module != CANONICAL_MODULE_ID:
         # A caller must never install another module's valid hub bearer on
         # this standalone process (cross-module identity confusion).
@@ -338,13 +343,15 @@ def attach_hub(token,expected_module):
     if members.get("self")!=expected_module or members.get("ok") is not True:
         raise PermissionError("HUB_MODULE_IDENTITY_MISMATCH")
     _runtime_token=token
+    _runtime_detached=False
     return {"connected":True,"id":expected_module}
 
 def detach_hub(token):
-    global _runtime_token
+    global _runtime_token, _runtime_detached
     if not isinstance(token,str) or not _runtime_token or not hmac.compare_digest(token,_runtime_token):
         raise PermissionError("INVALID_DETACH_CREDENTIAL")
     _runtime_token=""
+    _runtime_detached=True
     return {"connected":False}
 
 def self_test():
