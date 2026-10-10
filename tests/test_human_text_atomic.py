@@ -83,6 +83,30 @@ def test_human_text_stream_wrapper_error_releases_fd_and_temp(tmp_path):
     assert not list(service.root.glob(".*.tmp"))
 
 
+def test_paginated_read_rejects_stale_metadata_after_same_size_replacement(tmp_path):
+    service=HumanTextService(tmp_path)
+    service.save("AAAA")
+    previous=service.info()
+    service._atomic_write(service.path,b"BBBB")
+    with patch.object(service,"info",return_value=previous):
+        with pytest.raises(ValueError,match="HUMAN_TEXT_FILE_CHANGED_RETRY"):
+            service.read(cursor=0,max_bytes=512)
+    with patch.object(service,"info",return_value=previous):
+        with pytest.raises(ValueError,match="HUMAN_TEXT_FILE_CHANGED_RETRY"):
+            service.read(cursor=4,max_bytes=512)
+    assert service.read(cursor=0)["text"]=="BBBB"
+
+
+def test_paginated_read_validates_utf8_boundary_on_open_file(tmp_path):
+    service=HumanTextService(tmp_path)
+    service.save("ábc")
+    with pytest.raises(ValueError,match="HUMAN_TEXT_CURSOR_NOT_UTF8_BOUNDARY"):
+        service.read(cursor=1)
+    page=service.read(cursor=2)
+    assert page["text"]=="bc"
+    assert page["complete"] is True
+
+
 def test_human_text_load_rejects_overlong_data_with_bounded_read(tmp_path):
     service=HumanTextService(tmp_path)
     service.path.write_bytes(b"A"*200)
