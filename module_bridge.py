@@ -27,6 +27,9 @@ _local_opener=build_opener(ProxyHandler({}),_NoRedirect)
 
 _runtime_token=""
 _runtime_detached=False
+# HTTP module-service handlers may concurrently attach and detach the hub.
+# Serialize credential transitions so a delayed attach cannot undo a detach.
+_runtime_state_lock=threading.RLock()
 CANONICAL_MODULE_ID="easychange"
 def _finite_hub_json_number(token):
     number=float(token)
@@ -423,12 +426,13 @@ def attach_hub(token,expected_module):
         raise PermissionError("HUB_MODULE_IDENTITY_MISMATCH")
     if not isinstance(token,str) or len(token)<32 or len(token)>200:
         raise ValueError("INVALID_HUB_CREDENTIAL")
-    members=MCPBridge(token).peers()
-    if members.get("self")!=expected_module or members.get("ok") is not True:
-        raise PermissionError("HUB_MODULE_IDENTITY_MISMATCH")
-    _runtime_token=token
-    _runtime_detached=False
-    return {"connected":True,"id":expected_module}
+    with _runtime_state_lock:
+        members=MCPBridge(token).peers()
+        if members.get("self")!=expected_module or members.get("ok") is not True:
+            raise PermissionError("HUB_MODULE_IDENTITY_MISMATCH")
+        _runtime_token=token
+        _runtime_detached=False
+        return {"connected":True,"id":expected_module}
 
 def detach_hub(token):
     global _runtime_token, _runtime_detached
@@ -436,14 +440,15 @@ def detach_hub(token):
     # without a later attach_hub(). That exact credential must still be able
     # to revoke the local bridge; an explicit detach permanently disables
     # inherited-token fallback until authenticated attach_hub() succeeds.
-    expected=(_runtime_token or
-              ("" if _runtime_detached else
-               os.environ.get("MCP_MODULE_BUS_TOKEN","")))
-    if not isinstance(token,str) or not expected or not hmac.compare_digest(token,expected):
-        raise PermissionError("INVALID_DETACH_CREDENTIAL")
-    _runtime_token=""
-    _runtime_detached=True
-    return {"connected":False}
+    with _runtime_state_lock:
+        expected=(_runtime_token or
+                  ("" if _runtime_detached else
+                   os.environ.get("MCP_MODULE_BUS_TOKEN","")))
+        if not isinstance(token,str) or not expected or not hmac.compare_digest(token,expected):
+            raise PermissionError("INVALID_DETACH_CREDENTIAL")
+        _runtime_token=""
+        _runtime_detached=True
+        return {"connected":False}
 
 def self_test():
     return {"standalone":not bool(MCPBridge().token),
