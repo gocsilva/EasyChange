@@ -180,6 +180,8 @@ def test_standalone_gui_launches_real_python_package_not_nested_script(tmp_path)
     for candidate in (linux_python,windows_python):
         candidate.parent.mkdir(parents=True,exist_ok=True)
         candidate.write_bytes(b"")
+        if os.name!="nt":
+            candidate.chmod(0o700)
     preferred=windows_python if os.name=="nt" else linux_python
     gui.process=None
     with patch("subprocess.Popen",return_value=fake_process) as launched_venv, \
@@ -196,6 +198,17 @@ def test_standalone_gui_launches_real_python_package_not_nested_script(tmp_path)
          patch("socket.create_connection",side_effect=ConnectionRefusedError):
         gui.start()
     assert fallback.call_args.args[0][0]==sys.executable
+
+    if os.name!="nt":
+        # A POSIX venv may exist but have lost its execute permission during
+        # checkout or copying. It must not prevent a healthy system fallback.
+        preferred.write_bytes(b"")
+        preferred.chmod(0o600)
+        gui.process=None
+        with patch("subprocess.Popen",return_value=fake_process) as denied, \
+             patch("socket.create_connection",side_effect=ConnectionRefusedError):
+            gui.start()
+        assert denied.call_args.args[0][0]==sys.executable
 
 
 def test_module_gui_startup_failures_stay_in_status_instead_of_raising(tmp_path):
