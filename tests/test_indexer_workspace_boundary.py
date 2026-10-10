@@ -173,6 +173,51 @@ def test_exclusion_arriving_while_index_batch_reads_never_reimports_secret(
         first.close()
 
 
+def test_update_path_rechecks_cross_process_exclusion_after_initial_sync(
+        tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "Secret.py").write_text(
+        "def Secret(): return 'RACE_SHOULD_NEVER_REAPPEAR'\n",
+        encoding="utf-8",
+    )
+    first = Indexer(root)
+    second = Indexer(root)
+    original_sync = second._sync_protected_paths
+    protected = []
+
+    def protect_just_after_second_read_exclusions():
+        original_sync()
+        if not protected:
+            first.protect_path("secret.py", scrub=False)
+            protected.append(True)
+
+    monkeypatch.setattr(
+        second, "_sync_protected_paths",
+        protect_just_after_second_read_exclusions,
+    )
+    try:
+        assert second.update_path("Secret.py") == {
+            "path": "Secret.py", "ignored": True, "protected": True
+        }
+        assert protected == [True]
+        with second._connect() as db:
+            assert db.execute(
+                "SELECT path FROM files WHERE path = 'Secret.py'"
+            ).fetchall() == []
+            assert db.execute(
+                "SELECT path FROM symbols WHERE path = 'Secret.py'"
+            ).fetchall() == []
+            if second._fts_enabled:
+                assert db.execute(
+                    "SELECT path FROM files_fts WHERE path = 'Secret.py'"
+                ).fetchall() == []
+        assert second.search("RACE_SHOULD_NEVER_REAPPEAR") == []
+    finally:
+        first.close()
+        second.close()
+
+
 def test_corrupt_persisted_protection_metadata_fails_closed(tmp_path):
     root=tmp_path/"project"
     root.mkdir()
