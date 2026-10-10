@@ -6,6 +6,7 @@ import tempfile
 import hmac
 import threading
 import json
+import itertools
 import math
 import os
 import time
@@ -148,11 +149,18 @@ class MCPBridge:
             if isinstance(body,dict):
                 # Iterative scan with a bounded visit budget: deep, shared
                 # or cyclic structures cannot make preflight loop forever.
-                pending=[body]
+                # Use iterator frames, not one temporary list reference
+                # per member of a large RPC dictionary. This keeps scan
+                # memory proportional to nesting depth.
+                pending=[iter((body,))]
                 seen_containers=set()
                 visits=0
                 while pending:
-                    item=pending.pop()
+                    try:
+                        item=next(pending[-1])
+                    except StopIteration:
+                        pending.pop()
+                        continue
                     visits+=1
                     if visits>request_limit:
                         raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
@@ -166,10 +174,9 @@ class MCPBridge:
                         if len(item)>request_limit:
                             raise ValueError("MCP_BUS_REQUEST_TOO_LARGE")
                         if isinstance(item,dict):
-                            pending.extend(item.keys())
-                            pending.extend(item.values())
+                            pending.append(itertools.chain(item.keys(),item.values()))
                         else:
-                            pending.extend(item)
+                            pending.append(iter(item))
             # Shared object graphs can expand exponentially in JSON.
             # json.dumps() materializes that expansion before a length check;
             # stream encoder fragments into a byte-limited buffer instead.
