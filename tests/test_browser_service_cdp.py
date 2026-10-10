@@ -366,6 +366,31 @@ def test_browser_http_discovery_rejects_spoofed_loopback_before_request(
             BrowserService._http_json(unsafe)
 
 
+def test_browser_discovery_bounds_http_body_before_parsing(monkeypatch):
+    class Monitored(io.BytesIO):
+        def __init__(self,raw):
+            super().__init__(raw)
+            self.read_sizes=[]
+        def read(self,size=-1):
+            self.read_sizes.append(size)
+            return super().read(size)
+
+    oversized=Monitored(b"x"*(1024*1024+2))
+    monkeypatch.setattr(browser_module._CDP_HTTP_OPENER,"open",
+                        lambda *_a,**_k:oversized)
+    with pytest.raises(browser_module.CdpError,
+                       match="CDP_HTTP_RESPONSE_TOO_LARGE"):
+        BrowserService._http_json("http://127.0.0.1:9222/json/version")
+    assert oversized.read_sizes==[1024*1024+1]
+
+    valid=Monitored(b'{"Browser":"Microsoft Edge/140.0"}')
+    monkeypatch.setattr(browser_module._CDP_HTTP_OPENER,"open",
+                        lambda *_a,**_k:valid)
+    assert BrowserService._http_json(
+        "http://127.0.0.1:9222/json/version")["Browser"].startswith("Microsoft")
+    assert valid.read_sizes==[1024*1024+1]
+
+
 def test_browser_http_discovery_disables_proxies_and_redirects():
     import urllib.request
     handlers=browser_module._CDP_HTTP_OPENER.handlers
