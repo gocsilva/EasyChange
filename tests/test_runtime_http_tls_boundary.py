@@ -20,14 +20,16 @@ def test_external_prefix_lookalikes_keep_certificate_verification():
         "https://example.com/health",
     ):
         with patch(
-            "easychange.core.runtime_service.urllib.request.urlopen",
-            return_value=FakeResponse(b'{"ok":true}'),
-        ) as fetch, patch(
+            "easychange.core.runtime_service.urllib.request.build_opener",
+        ) as factory, patch(
             "easychange.core.runtime_service.ssl._create_unverified_context"
         ) as unverified:
+            factory.return_value.open.return_value=FakeResponse(b'{"ok":true}')
             result=service._http_get(url)
         assert result["ok"] is True
-        assert fetch.call_args.kwargs["context"] is None
+        assert factory.return_value.open.call_args.kwargs["timeout"] == 4.0
+        assert any(type(h).__name__=="HTTPSHandler" and h._context is None
+                   for h in factory.call_args.args)
         unverified.assert_not_called()
 
 
@@ -40,22 +42,43 @@ def test_actual_loopback_https_preserves_local_development_behavior():
     ):
         marker=object()
         with patch(
-            "easychange.core.runtime_service.urllib.request.urlopen",
-            return_value=FakeResponse(b"healthy"),
-        ) as fetch, patch(
+            "easychange.core.runtime_service.urllib.request.build_opener",
+        ) as factory, patch(
             "easychange.core.runtime_service.ssl._create_unverified_context",
             return_value=marker,
         ) as unverified:
+            factory.return_value.open.return_value=FakeResponse(b"healthy")
             result=service._http_get(url)
         assert result["ok"] is True
-        assert fetch.call_args.kwargs["context"] is marker
+        assert any(type(h).__name__=="HTTPSHandler" and h._context is marker
+                   for h in factory.call_args.args)
         unverified.assert_called_once_with()
 
 
 def test_invalid_url_fails_without_opening_network_or_tls_exception():
     service=object.__new__(ProjectRuntimeService)
-    with patch("easychange.core.runtime_service.urllib.request.urlopen") as fetch:
+    with patch("easychange.core.runtime_service.urllib.request.build_opener") as fetch:
         result=service._http_get("https://[invalid")
     assert result["ok"] is False
     assert result["error"] == "ValueError"
     fetch.assert_not_called()
+
+
+def test_same_origin_redirect_is_allowed_but_off_origin_is_refused():
+    from urllib.request import Request
+    from easychange.core.runtime_service import _SameOriginRuntimeRedirect
+
+    policy=_SameOriginRuntimeRedirect()
+    request=Request("https://localhost:5051/swagger")
+    local=policy.redirect_request(
+        request,None,302,"Found",{},"https://localhost:5051/swagger/index.html")
+    assert local is not None
+    assert local.full_url=="https://localhost:5051/swagger/index.html"
+    for escaped in (
+        "https://localhost.attacker.example/swagger",
+        "https://localhost:5052/swagger",
+        "http://localhost:5051/swagger",
+        "https://other.example.com/",
+        "https://localhost:5051@evil.example/",
+    ):
+        assert policy.redirect_request(request,None,302,"Found",{},escaped) is None
