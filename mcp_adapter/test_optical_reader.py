@@ -109,7 +109,7 @@ class OpticalReaderTests(unittest.TestCase):
         self.assertEqual(detector.calls,2)
 
 
-    def test_non_cv2_image_type_error_is_recoverable_on_next_frame(self):
+    def test_multi_qr_signature_type_error_recovers_same_frame_via_single(self):
         import sys
         from types import SimpleNamespace
         from unittest.mock import Mock,patch
@@ -126,9 +126,10 @@ class OpticalReaderTests(unittest.TestCase):
         image=SimpleNamespace(shape=(480,640,3))
         with patch.dict(sys.modules,{"cv2":cv2_stub}), \
              patch.object(reader._qr_detectors,"detector",None,create=True):
-            self.assertEqual(reader.decode_hdmi_qr(image),[])
+            self.assertEqual(reader.decode_hdmi_qr(image),["EC2_RECOVERED"])
             self.assertEqual(reader.decode_hdmi_qr(image),["EC2_RECOVERED"])
         self.assertEqual(detector.detectAndDecodeMulti.call_count,2)
+        self.assertEqual(detector.detectAndDecode.call_count,2)
 
     def test_transient_qr_decoder_exception_allows_next_frame(self):
         import sys
