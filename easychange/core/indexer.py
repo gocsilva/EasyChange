@@ -92,6 +92,29 @@ class Indexer:
                 self._fts_enabled = False
             current_version = db.execute("SELECT value FROM index_meta WHERE key='version'").fetchone()
             self._force_rebuild = not current_version or current_version[0] != _INDEX_VERSION
+            protected = db.execute(
+                "SELECT value FROM index_meta WHERE key='protected_paths_v1'"
+            ).fetchone()
+            if protected is not None:
+                saved = protected[0]
+                if not isinstance(saved, str) or len(saved) > 1_048_576:
+                    raise RuntimeError("INDEXER_PROTECTED_PATHS_CORRUPT")
+                try:
+                    decoded = json.loads(saved)
+                    if (not isinstance(decoded, list) or len(decoded) > 10_000
+                            or any(type(item) is not str or len(item) > 4096
+                                   for item in decoded)):
+                        raise ValueError("bad protected paths")
+                    self._protected_paths = {
+                        self._normalize_relative_path(item) for item in decoded
+                    }
+                    self._protected_keys = {
+                        item.casefold() for item in self._protected_paths
+                    }
+                except (TypeError, ValueError, RecursionError) as exc:
+                    # Unknown protected metadata must never mean "no secret
+                    # paths". Refuse initialization instead of reindexing.
+                    raise RuntimeError("INDEXER_PROTECTED_PATHS_CORRUPT") from exc
 
     @contextmanager
     def _connect(self):
@@ -223,6 +246,12 @@ class Indexer:
             self._protected_paths.add(relative)
             self._protected_keys.add(relative.casefold())
             with self._connect() as db:
+                # Remember exclusion in existing metadata atomically with
+                # SQLite/FTS row deletion, including after an app restart.
+                db.execute(
+                    "INSERT OR REPLACE INTO index_meta(key,value) VALUES(?,?)",
+                    ("protected_paths_v1", json.dumps(sorted(self._protected_paths))),
+                )
                 # An old index can contain a different on-disk capitalization
                 # of the same Windows path. Scrub all aliases, including FTS.
                 for table in (("files", "symbols", "files_fts")
