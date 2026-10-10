@@ -244,3 +244,26 @@ def test_warm_search_purges_file_replaced_by_external_symlink(tmp_path):
     index.invalidate()
     index.refresh(force=True)
     assert index.search("OUTSIDE_SYMBOL")==[]
+
+
+def test_hot_symbol_lookup_never_leaks_legacy_rows_from_ignored_folders(tmp_path):
+    root=tmp_path/"workspace"
+    root.mkdir()
+    index=Indexer(root)
+    # Simulate a DB produced by an earlier index version before directory
+    # exclusions. Readers must fail closed even before the next refresh.
+    with index._connect() as db:
+        for relative in ("node_modules/cache.py",".venv/lib/private.py",
+                         ".easychange/cache.py","src/visible.py"):
+            db.execute(
+                "INSERT INTO symbols(path,name,kind,line,column_no,signature,file_hash) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (relative,"same_name","function",1,1,
+                 "def same_name(): pass","old"))
+    index._fully_indexed=True
+    result=index.symbols(name="same_name")
+    assert [(row["file"],row["name"]) for row in result]==[
+        ("src/visible.py","same_name")]
+    for excluded in ("node_modules/cache.py",".venv/lib/private.py",
+                     ".easychange/cache.py"):
+        assert index.symbols(path=excluded)==[]
