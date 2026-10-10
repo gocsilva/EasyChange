@@ -109,11 +109,14 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError,TypeError,PermissionError) as exc:
             return self.send(403,{"error":type(exc).__name__})
         except HTTPError as exc:
-            # A reachable MCP rejected the bearer; do not misreport this as
-            # an offline host, which would encourage unsafe retry loops.
-            if exc.code in (401,403):
-                return self.send(403,{"error":"HUB_CREDENTIAL_REJECTED"})
-            return self.send(503,{"error":"HUB_UNAVAILABLE"})
+            # HTTPError owns an underlying HTTP response/socket. Repeated
+            # attach retries must not leak rejected response descriptors.
+            try:
+                if exc.code in (401,403):
+                    return self.send(403,{"error":"HUB_CREDENTIAL_REJECTED"})
+                return self.send(503,{"error":"HUB_UNAVAILABLE"})
+            finally:
+                exc.close()
         except (ImportError,OSError,RuntimeError):
             # Do not strand attach callers when MCP is offline or times out.
             # Keep the credential/error internals out of the HTTP response.
