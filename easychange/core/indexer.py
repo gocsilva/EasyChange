@@ -740,7 +740,10 @@ class Indexer:
         ext = str(extension or "").strip()
         if ext and not ext.startswith("."):
             ext = "." + ext
-        prefix = str(path_prefix or "").replace("\\", "/").strip().strip("/")
+        # Cold discovery and warm searches must apply the same literal
+        # workspace-bound path validation. Stripping "/" or accepting ".."
+        # would silently broaden a requested search scope.
+        prefix = self._normalize_relative_path(path_prefix) if path_prefix else ""
         by_term: dict[str, dict] = {
             term: {"definitions": [], "references": [], "files": [], "occurrences": 0}
             for term in clean
@@ -801,15 +804,34 @@ class Indexer:
                         **hidden_console_kwargs(),
                     )
                 if completed.returncode in {0, 1}:
+                    trusted_root = self.root.resolve()
                     for line in (completed.stdout or "").splitlines():
                         parts = line.split(":", 2)
                         if len(parts) != 3:
                             continue
                         try:
+                            relative = self._normalize_relative_path(parts[0])
                             number = int(parts[1])
-                        except ValueError:
+                            if number < 1:
+                                continue
+                            if any(part in SKIP_DIRS for part in relative.split("/")):
+                                continue
+                            folded = relative.casefold()
+                            if prefix and not (folded == prefix.casefold() or
+                                               folded.startswith(prefix.casefold() + "/")):
+                                continue
+                            if ext and not folded.endswith(ext.casefold()):
+                                continue
+                            with self._lock:
+                                if relative in self._protected_paths:
+                                    continue
+                            target = self.root / Path(relative)
+                            if (target.is_symlink() or not target.is_file() or
+                                    not target.resolve().is_relative_to(trusted_root)):
+                                continue
+                        except (ValueError, OSError, RuntimeError):
                             continue
-                        rows.append((parts[0].replace("\\", "/"), number, parts[2].rstrip()))
+                        rows.append((relative, number, parts[2].rstrip()))
             except (OSError, subprocess.TimeoutExpired):
                 rows = []
 
