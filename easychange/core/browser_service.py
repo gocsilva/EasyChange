@@ -374,6 +374,15 @@ class _WebSocket:
                     if not self._closed:
                         self._reader_error = f"{type(exc).__name__}:{str(exc)[:500]}"
                     self._response_ready.notify_all()
+                # An invalid frame or disconnected reader is terminal for
+                # this WebSocket generation. Free the socket rather than
+                # leaving an idle connected descriptor after the reader dies.
+                sock=getattr(self,"sock",None)
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
                 return
             try:
                 message = json.loads(
