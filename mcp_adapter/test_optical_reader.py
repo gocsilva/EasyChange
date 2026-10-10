@@ -251,6 +251,40 @@ class OpticalReaderTests(unittest.TestCase):
         receiver.ingest(packets)
         self.assertEqual(receiver.stored_token_chars,saved)
 
+    def test_complete_bad_hash_carousel_releases_slot_for_valid_retransmission(self):
+        import hashlib
+        import json
+        from easychange.core.result import Result
+
+        data="".join(hashlib.sha256(str(number).encode()).hexdigest()
+                     for number in range(100))
+        valid=encode_result_chunks(
+            Result(True,"read",{"text":data},sequence="QRETRANSMIT"),
+            chunk_chars=160)
+        self.assertGreater(len(valid),2)
+        first=json.loads(valid[0])
+        wrong_digest=("0" if first["h"][0]!="0" else "1")+first["h"][1:]
+        bad=[]
+        for raw in valid:
+            packet=json.loads(raw)
+            packet["h"]=wrong_digest
+            bad.append(json.dumps(packet))
+
+        receiver=OpticalAssembler()
+        with self.assertRaisesRegex(ValueError,"optical sha256 mismatch"):
+            receiver.ingest(bad)
+        self.assertEqual(receiver.sequence,"")
+        self.assertEqual(receiver.chunks,{})
+        self.assertEqual(receiver.total,0)
+        self.assertEqual(receiver.stored_chars,0)
+        self.assertEqual(receiver.stored_token_chars,0)
+        self.assertIsNone(receiver.packet_identity)
+        self.assertIsNone(receiver.verified_payload)
+        replay=receiver.ingest(valid)
+        self.assertTrue(replay["complete"])
+        self.assertTrue(replay["verified"])
+        self.assertEqual(replay["payload"]["data"]["text"],data)
+
     def test_repeated_complete_carousel_decodes_only_once(self):
         from unittest.mock import patch
         from easychange.core.result import Result
