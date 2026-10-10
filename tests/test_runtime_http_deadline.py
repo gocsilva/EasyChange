@@ -30,6 +30,41 @@ def test_http_readiness_stops_between_candidates_after_total_deadline():
     sleep.assert_not_called()
 
 
+def test_http_readiness_with_zero_candidates_does_not_wait_at_all():
+    service=object.__new__(ProjectRuntimeService)
+    service._http_get=lambda *_args,**_kwargs: (
+        (_ for _ in ()).throw(AssertionError("NO_ENDPOINT_SHOULD_BE_PROBED")))
+    with patch("easychange.core.runtime_service.time.sleep",
+               side_effect=AssertionError("EMPTY_POLL_MUST_NOT_SLEEP")) as sleep:
+        result=service.wait_for_http([],timeout=35.0)
+    assert result=={"ok":False,"error":"HTTP_STARTUP_TIMEOUT",
+                    "last":{},"urls":[]}
+    sleep.assert_not_called()
+
+
+def test_http_readiness_avoids_duplicate_candidates_with_same_deadline():
+    service=object.__new__(ProjectRuntimeService)
+    current=[0.0]
+    visited=[]
+    def unavailable(url,*,timeout):
+        visited.append(url)
+        current[0]+=0.6
+        return {"ok":False,"status":503,"url":url}
+
+    service._http_get=unavailable
+    first="http://127.0.0.1:5000/swagger"
+    second="http://127.0.0.1:5000/openapi.json"
+    urls=[first,first,second,first,second]
+    with patch("easychange.core.runtime_service.time.monotonic",
+               side_effect=lambda:current[0]), \
+         patch("easychange.core.runtime_service.time.sleep") as sleep:
+        result=service.wait_for_http(urls,timeout=1.0)
+    assert visited==[first,second]
+    assert result["error"]=="HTTP_STARTUP_TIMEOUT"
+    assert result["urls"]==urls
+    sleep.assert_not_called()
+
+
 def test_http_readiness_returns_successful_probe_without_waiting_for_more():
     service=object.__new__(ProjectRuntimeService)
     seen=[]
