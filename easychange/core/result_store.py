@@ -455,7 +455,8 @@ class DurableResultStore:
                     continue
                 try:
                     value = self._decode(self._read_compressed(path))
-                except (OSError, ValueError, json.JSONDecodeError, zlib.error):
+                except (OSError, ValueError, TypeError, OverflowError,
+                        RecursionError, zlib.error):
                     # Preserve uncertain receipts; corruption must never turn
                     # an already-executed command into a new command.
                     continue
@@ -492,7 +493,8 @@ class DurableResultStore:
                 if old_stream is not None:
                     self._stream_cache_bytes -= len(old_stream[1])
                 self._terminal_header_cache.pop(sequence, None)
-            except (OSError, ValueError):
+            except (OSError, ValueError, TypeError, OverflowError,
+                    RecursionError):
                 # A decoded but malformed legacy receipt can contain a
                 # sequence that _path() rejects. Preserve its evidence and
                 # continue cleaning independent receipts.
