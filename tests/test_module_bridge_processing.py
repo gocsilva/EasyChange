@@ -357,7 +357,7 @@ class TestProcessPending(unittest.TestCase):
                     message.pop("target")
                 bridge.receive.return_value={
                     "recipient":CANONICAL_MODULE_ID,
-                    "requires_ack":True,"messages":[message],"pending":1}
+                    "ok":True,"requires_ack":True,"messages":[message],"pending":1}
                 with self.assertRaisesRegex(ValueError,
                                             "MCP_INBOX_TARGET_MISMATCH"):
                     bridge.process_pending(handler)
@@ -366,7 +366,7 @@ class TestProcessPending(unittest.TestCase):
 
         # The canonical page and message identity proceed normally.
         bridge.receive.return_value={
-            "recipient":CANONICAL_MODULE_ID,"requires_ack":True,
+            "recipient":CANONICAL_MODULE_ID,"ok":True,"requires_ack":True,
             "messages":[item(21)],"pending":1}
         self.assertEqual(bridge.process_pending(handler)["acknowledged"],1)
         handler.assert_called_once()
@@ -377,7 +377,7 @@ class TestProcessPending(unittest.TestCase):
                    if name != CANONICAL_MODULE_ID)
         client=self.bridge([item(91)])
         client.receive.return_value={
-            "requires_ack":True,
+            "ok":True,"requires_ack":True,
             "messages":[{**item(91),"target":wrong}],
             "pending":1}
         with self.assertRaisesRegex(ValueError,"MCP_INBOX_TARGET_MISMATCH"):
@@ -388,7 +388,7 @@ class TestProcessPending(unittest.TestCase):
         # A legacy page may omit the recipient header when its messages
         # still declare the correct target.
         client.receive.return_value={
-            "requires_ack":True,"messages":[item(91)],"pending":1}
+            "ok":True,"requires_ack":True,"messages":[item(91)],"pending":1}
         self.assertEqual(client.process_pending(handler)["acknowledged"],1)
         handler.assert_called_once()
         client.ack.assert_called_once_with([91])
@@ -444,7 +444,7 @@ class TestProcessPending(unittest.TestCase):
         candidate=self.bridge([item(77)])
         handler=Mock(return_value=True)
         candidate.receive.return_value={
-            "requires_ack":True,"recipient":peer,
+            "ok":True,"requires_ack":True,"recipient":peer,
             "messages":[item(77)],"pending":1}
         with self.assertRaisesRegex(ValueError,"MCP_INBOX_RECIPIENT_MISMATCH"):
             candidate.process_pending(handler)
@@ -453,7 +453,7 @@ class TestProcessPending(unittest.TestCase):
 
         candidate=self.bridge([item(78)])
         candidate.receive.return_value={
-            "requires_ack":True,"recipient":module_id,
+            "ok":True,"requires_ack":True,"recipient":module_id,
             "messages":[item(78)],"pending":1}
         candidate.ack.side_effect=None
         candidate.ack.return_value={
