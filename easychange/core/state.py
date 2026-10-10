@@ -45,6 +45,21 @@ class MachineSession:
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(temporary, self.path)
+                if os.name == "posix":
+                    # fsync(file) persists bytes, but not necessarily the new
+                    # directory entry installed by atomic rename on power loss.
+                    # Filesystems lacking directory fsync retain atomic replace.
+                    directory_fd = None
+                    try:
+                        directory_fd = os.open(
+                            self.path.parent,
+                            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                        os.fsync(directory_fd)
+                    except OSError:
+                        pass
+                    finally:
+                        if directory_fd is not None:
+                            os.close(directory_fd)
                 return
             except FileNotFoundError as exc:
                 last_error = exc
