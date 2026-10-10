@@ -35,6 +35,7 @@ def _isolated_gui(tmp_path):
                  "<standalone-gui-start>", "exec"), globals_)
     gui = object.__new__(globals_["ModuleGUI"])
     gui.process = None
+    gui.root = Mock()
     gui.message = Mock()
     gui.refresh = Mock()
     return gui, assignments
