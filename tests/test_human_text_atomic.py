@@ -107,6 +107,34 @@ def test_paginated_read_validates_utf8_boundary_on_open_file(tmp_path):
     assert page["complete"] is True
 
 
+def test_scan_rejects_atomic_replacement_during_hashing(tmp_path):
+    from pathlib import Path
+
+    service=HumanTextService(tmp_path)
+    service.save("AAAA")
+    original_stat=Path.stat
+    checks=[]
+    def concurrent_swap(self,*args,**kwargs):
+        if self==service.path:
+            checks.append(1)
+            if len(checks)==2:
+                service._atomic_write(service.path,b"BBBB")
+        return original_stat(self,*args,**kwargs)
+    with patch.object(Path,"stat",concurrent_swap):
+        with pytest.raises(ValueError,match="HUMAN_TEXT_FILE_CHANGED_RETRY"):
+            service._scan_info()
+    assert service.load()=="BBBB"
+    assert service.info()["sha256"]==hashlib.sha256(b"BBBB").hexdigest()
+
+
+def test_scan_refuses_large_legacy_buffer_before_hashing(tmp_path):
+    service=HumanTextService(tmp_path)
+    service.path.write_bytes(b"X"*256)
+    service.max_bytes=64
+    with pytest.raises(ValueError,match="HUMAN_TEXT_EXCEEDS_CONFIGURED_LIMIT"):
+        service._scan_info()
+
+
 def test_human_text_load_rejects_overlong_data_with_bounded_read(tmp_path):
     service=HumanTextService(tmp_path)
     service.path.write_bytes(b"A"*200)
