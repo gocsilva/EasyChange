@@ -28,6 +28,11 @@ def esp_online():
         # The loopback port is not an identity: another service may occupy it.
         return (isinstance(status,dict) and status.get("ok") is True
                 and status.get("id")=="esp")
+    except HTTPError as exc:
+        # Non-2xx responses are raised before the with-response cleanup
+        # begins. Close the rejected peer reply before reporting offline.
+        exc.close()
+        return False
     except Exception:
         return False
 
