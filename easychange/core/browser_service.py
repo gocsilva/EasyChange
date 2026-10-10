@@ -1172,7 +1172,11 @@ class BrowserService:
             raw=response.read(1024 * 1024 + 1)
         if len(raw)>1024 * 1024:
             raise CdpError("CDP_HTTP_RESPONSE_TOO_LARGE")
-        return json.loads(raw.decode("utf-8"))
+        # CDP discovery responses choose which browser target receives
+        # requests; ambiguous duplicate URLs and nonfinite JSON are unsafe.
+        return json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_unique_cdp_json_fields,
+            parse_float=_finite_cdp_float, parse_constant=_reject_cdp_constant)
 
     def _wait_port(self, profile: Path, timeout: float) -> int:
         marker = profile / "DevToolsActivePort"
