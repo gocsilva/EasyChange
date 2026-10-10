@@ -16,7 +16,8 @@ def handler(path):
 def test_status_failure_is_503_and_health_stays_independent():
     status=handler("/status")
     health=handler("/health")
-    with patch("mcp_adapter.module_service.module_status",
+    with patch("mcp_adapter.module_service.esp_online",return_value=False), \
+         patch("mcp_adapter.module_service.module_status",
                side_effect=OSError("PRIVATE_PATH_OR_DEVICE")):
         status.do_GET()
         health.do_GET()
@@ -40,6 +41,7 @@ def test_normal_status_and_capabilities_keep_previous_shapes():
         ("/capabilities","capabilities",{"tools":[]}),
     ):
         client=handler(path)
-        with patch("mcp_adapter.module_service."+field,return_value=payload):
+        with patch("mcp_adapter.module_service.esp_online",return_value=False), \
+             patch("mcp_adapter.module_service."+field,return_value=payload):
             client.do_GET()
         client.send.assert_called_once_with(200,payload)
