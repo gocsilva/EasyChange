@@ -287,11 +287,13 @@ class DurableResultStore:
 
         if run_cleanup:
             self._writes_since_cleanup += 1
-            now = time.monotonic()
-            if (
-                self._writes_since_cleanup >= 8
-                or now - self._last_cleanup_monotonic >= 30.0
-            ):
+            elapsed = time.monotonic() - self._last_cleanup_monotonic
+            # Maintenance stat()s every stored receipt. At high write rates,
+            # scanning the entire directory every eight writes turns O(n)
+            # cleanup into a major bottleneck. Bound scan frequency by time;
+            # TTL is at least 60s, so a 5s minimum never weakens retention.
+            if (elapsed >= 30.0 or
+                    (self._writes_since_cleanup >= 128 and elapsed >= 5.0)):
                 self._cleanup()
 
     @staticmethod
