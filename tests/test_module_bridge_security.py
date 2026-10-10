@@ -341,6 +341,26 @@ class TestHubRedirectBoundary(unittest.TestCase):
         self.assertGreater(len(network.call_args.args[0].data),17408)
 
 
+    def test_hub_never_serializes_nonfinite_json_or_calls_network(self):
+        import math
+        from unittest.mock import patch
+
+        bridge=module_bridge.MCPBridge(token="local-test-credential")
+        with patch.object(module_bridge._local_opener,"open") as network:
+            for invalid in (math.nan,math.inf,-math.inf):
+                with self.subTest(number=repr(invalid)):
+                    with self.assertRaisesRegex(ValueError,
+                                                "Out of range float values"):
+                        bridge.send("esp","test.nonfinite",
+                                    {"nested":{"bad":invalid}})
+                    with self.assertRaisesRegex(ValueError,
+                                                "Out of range float values"):
+                        bridge.call("read_only",value=[{"n":invalid}])
+                    with self.assertRaisesRegex(ValueError,
+                                                "Out of range float values"):
+                        bridge.ack([invalid])
+            network.assert_not_called()
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
