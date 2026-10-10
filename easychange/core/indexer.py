@@ -183,14 +183,14 @@ class Indexer:
     @staticmethod
     def _normalize_relative_path(relative_path: str) -> str:
         value = str(relative_path or "").replace("\\", "/").strip()
+        if value.startswith("/") or re.match(r"^[a-zA-Z]:", value):
+            raise ValueError("INVALID_PROTECTED_INDEX_PATH")
         while value.startswith("./"):
             value = value[2:]
-        value = value.strip("/")
+        value = value.rstrip("/")
         if (
             not value
-            or value == ".."
-            or value.startswith("../")
-            or "/../" in f"/{value}/"
+            or any(part in ("", ".", "..") for part in value.split("/"))
         ):
             raise ValueError("INVALID_PROTECTED_INDEX_PATH")
         return value
@@ -230,8 +230,10 @@ class Indexer:
             return sorted(self._protected_paths)
     def update_path(self, relative_path: str) -> dict:
         """Update exactly one known path after an EasyChange mutation."""
-        relative = relative_path.replace("\\", "/")
+        relative = self._normalize_relative_path(relative_path)
         target = self.root / Path(relative)
+        if not target.resolve().is_relative_to(self.root.resolve()):
+            raise ValueError("INVALID_PROTECTED_INDEX_PATH")
         with self._lock, self._connect() as db:
             if relative in self._protected_paths:
                 db.execute("DELETE FROM files WHERE path=?", (relative,))
@@ -239,14 +241,14 @@ class Indexer:
                 if self._fts_enabled:
                     db.execute("DELETE FROM files_fts WHERE path=?", (relative,))
                 return {"path": relative, "ignored": True, "protected": True}
+            if any(part in SKIP_DIRS for part in Path(relative).parts):
+                return {"path": relative, "ignored": True}
             if not target.exists() or not target.is_file():
                 db.execute("DELETE FROM files WHERE path=?", (relative,))
                 db.execute("DELETE FROM symbols WHERE path=?", (relative,))
                 if self._fts_enabled:
                     db.execute("DELETE FROM files_fts WHERE path=?", (relative,))
                 return {"path": relative, "removed": True}
-            if any(part in SKIP_DIRS for part in Path(relative).parts):
-                return {"path": relative, "ignored": True}
             stat = target.stat()
             relative, size, mtime_ns, digest, content, symbols = self._read_candidate(
                 (target, relative, stat.st_size, stat.st_mtime_ns)
@@ -267,7 +269,9 @@ class Indexer:
 
         for path in self.root.rglob("*"):
             try:
-                if not path.is_file():
+                if not path.is_file() or path.is_symlink():
+                    continue
+                if not path.resolve().is_relative_to(self.root.resolve()):
                     continue
                 relative_path = path.relative_to(self.root)
                 if any(part in SKIP_DIRS for part in relative_path.parts):
