@@ -9,6 +9,7 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import ttk
+from urllib.error import HTTPError
 from urllib.request import ProxyHandler, HTTPRedirectHandler, build_opener
 
 class _NoStandaloneRedirect(HTTPRedirectHandler):
@@ -52,6 +53,11 @@ def status():
         return {"running":isinstance(data,dict) and
                 data.get("ok") is True and data.get("id")==MODULE_ID,
                 "service":MODULE_ID,"standalone":True}
+    except HTTPError as exc:
+        # An HTTP rejection/redirect is raised before the response enters
+        # the with block. Close its body/socket on every liveness poll.
+        exc.close()
+        return {"running":False,"service":MODULE_ID,"standalone":True}
     except Exception:
         return {"running":False,"service":MODULE_ID,"standalone":True}
 
