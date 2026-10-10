@@ -192,15 +192,23 @@ def encode_result_chunks(
         materialized = total if max_packets is None else max(1, min(total, int(max_packets)))
         selected = list(range(materialized))
     else:
+        # Index requests may originate from remote optical retransmissions.
+        # Bound the raw input and use O(1) deduplication instead of a growing
+        # list membership scan (O(n^2) on long sparse windows).
+        if not isinstance(indexes, (list, tuple)) or len(indexes) > MAX_EC2_PACKETS:
+            raise ValueError("OPTICAL_CHUNK_INDEX_REQUEST_TOO_LARGE")
         selected: list[int] = []
+        seen: set[int] = set()
         for raw_index in indexes:
             if (type(raw_index) is not int and
-                    not (isinstance(raw_index, str) and raw_index.strip().isdecimal())):
+                    not (isinstance(raw_index, str) and len(raw_index) <= 32
+                         and raw_index.strip().isdecimal())):
                 raise ValueError("invalid optical chunk index")
             index = int(raw_index)
             if index < 0 or index >= total:
                 raise IndexError("OPTICAL_CHUNK_OUT_OF_RANGE")
-            if index not in selected:
+            if index not in seen:
+                seen.add(index)
                 selected.append(index)
         if not selected:
             raise ValueError("at least one optical chunk index is required")
