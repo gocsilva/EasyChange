@@ -267,3 +267,67 @@ def test_hot_symbol_lookup_never_leaks_legacy_rows_from_ignored_folders(tmp_path
     for excluded in ("node_modules/cache.py",".venv/lib/private.py",
                      ".easychange/cache.py"):
         assert index.symbols(path=excluded)==[]
+
+
+def test_symlinked_parent_cannot_read_internal_protected_workspace_folder(
+        tmp_path,monkeypatch):
+    from subprocess import CompletedProcess
+    import easychange.core.indexer as module
+
+    project=tmp_path/"workspace"
+    project.mkdir()
+    private=project/".easychange"/"private.py"
+    private.parent.mkdir()
+    private.write_text("def PRIVATE_MARKER(): pass\n",encoding="utf-8")
+    alias=project/"source_alias"
+    try:
+        alias.symlink_to(private.parent,target_is_directory=True)
+    except (OSError,NotImplementedError):
+        pytest.skip("directory symlinks unavailable")
+
+    index=Indexer(project)
+    monkeypatch.setattr(index,"start_background_refresh",lambda:None)
+    with pytest.raises(ValueError,match="INVALID_PROTECTED_INDEX_PATH"):
+        index.update_path("source_alias/private.py")
+    # The cold direct-symbol path must also refuse the ancestor alias.
+    assert index.symbols(path="source_alias/private.py")==[]
+
+    (project/".git").mkdir()
+    def fake_git_search(argv,**kwargs):
+        return CompletedProcess(argv,0,
+            "source_alias/private.py:1:def PRIVATE_MARKER(): pass\n","")
+    monkeypatch.setattr(module.subprocess,"run",fake_git_search)
+    assert index._git_search("PRIVATE_MARKER",regex=False,extension=None,
+                             path_prefix=None,case_sensitive=False)==[]
+    with index._connect() as db:
+        assert db.execute("SELECT count(*) FROM files").fetchone()[0]==0
+
+
+def test_warm_index_removes_legacy_row_reached_via_directory_symlink(tmp_path):
+    project=tmp_path/"workspace"
+    project.mkdir()
+    private=project/".easychange"/"private.py"
+    private.parent.mkdir()
+    private.write_text("PRIVATE_MARKER = 'do-not-index'\n",encoding="utf-8")
+    alias=project/"source_alias"
+    try:
+        alias.symlink_to(private.parent,target_is_directory=True)
+    except (OSError,NotImplementedError):
+        pytest.skip("directory symlinks unavailable")
+
+    index=Indexer(project)
+    with index._connect() as db:
+        db.execute(
+            "INSERT INTO files(path,extension,size,mtime_ns,sha256,language,content) "
+            "VALUES(?,?,?,?,?,?,?)",
+            ("source_alias/private.py",".py",private.stat().st_size,
+             private.stat().st_mtime_ns,"old","python",
+             "PRIVATE_MARKER = 'do-not-index'"))
+    # Make the code path deterministic regardless of SQLite's FTS extension.
+    index._fts_enabled=False
+    index._fully_indexed=True
+    assert index.search("PRIVATE_MARKER")==[]
+    with index._connect() as db:
+        assert db.execute(
+            "SELECT count(*) FROM files WHERE path=?",
+            ("source_alias/private.py",)).fetchone()[0]==0
