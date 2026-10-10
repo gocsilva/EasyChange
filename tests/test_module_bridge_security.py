@@ -737,6 +737,22 @@ class TestHubRedirectBoundary(unittest.TestCase):
         self.assertEqual(request.data,json.dumps(
             data,ensure_ascii=False,allow_nan=False).encode("utf-8"))
 
+    def test_peer_health_rejection_closes_http_response(self):
+        import io
+        from urllib.error import HTTPError
+        from unittest.mock import patch
+        import mcp_adapter.module_service as service
+
+        for status in (401,403,429,503):
+            with self.subTest(code=status):
+                stream=io.BytesIO(b"untrusted local peer error")
+                rejected=HTTPError(
+                    "http://127.0.0.1/health", status,
+                    "service rejected",{},stream)
+                with patch("mcp_adapter.module_service.urlopen",side_effect=rejected):
+                    self.assertFalse(service.esp_online())
+                self.assertTrue(stream.closed)
+
     def test_post_redirect_handler_denies_forwarding(self):
         from urllib.request import HTTPRedirectHandler
         handlers=[h for h in module_bridge._local_opener.handlers
