@@ -147,7 +147,7 @@ class OpticalAssembler:
             # times. Decode and validate the identical verified payload once.
             if self.verified_payload is None:
                 try:
-                    self.verified_payload=decode_result_chunks(list(self.chunks.values()))
+                    self.verified_payload=decode_result_chunks(self.chunks.values())
                 except (ValueError, TypeError, KeyError, RecursionError, zlib.error):
                     # Every index was occupied, yet the assembled result was
                     # not authentic. Do not let a CRC-consistent but corrupted
