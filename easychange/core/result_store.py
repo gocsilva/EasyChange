@@ -21,6 +21,7 @@ import zlib
 MAX_COMPRESSED_RECEIPT_BYTES = 32 * 1024 * 1024
 MAX_DECODED_RECEIPT_BYTES = 64 * 1024 * 1024
 MAX_CACHED_TERMINAL_HEADER_BYTES = 32 * 1024  # 128 entries => at most 4 MiB
+MAX_COMPRESSED_RESULT_STREAM_BYTES = 16 * 1024 * 1024
 
 
 def _receipt_pairs_unique(pairs):
@@ -944,6 +945,27 @@ class DurableResultStore:
         self._stream_cache.move_to_end(sequence)
         return stream, stream_hash, result_hash, result_bytes
 
+    @staticmethod
+    def _compress_result_stream_bounded(raw: bytes) -> bytes:
+        """Encode at zlib level 1; empty bytes mark compression ineligible.
+
+        JSON results up to 64 MiB may be essentially incompressible. Avoid
+        retaining a second 64 MiB allocation when the stream-cache budget is
+        only 16 MiB; the existing plain-chunk path remains available.
+        """
+        compressor = zlib.compressobj(level=1)
+        stream = bytearray()
+        for start in range(0, len(raw), 65536):
+            part = compressor.compress(raw[start:start+65536])
+            if len(stream) + len(part) > MAX_COMPRESSED_RESULT_STREAM_BYTES:
+                return b""
+            stream.extend(part)
+        tail = compressor.flush()
+        if len(stream) + len(tail) > MAX_COMPRESSED_RESULT_STREAM_BYTES:
+            return b""
+        stream.extend(tail)
+        return bytes(stream)
+
     def _result_stream_payload(
         self,
         sequence: str,
@@ -962,7 +984,7 @@ class DurableResultStore:
             if payload is None:
                 return None
             _, raw, result_hash = payload
-            stream = zlib.compress(raw, level=1)
+            stream = self._compress_result_stream_bounded(raw)
             stream_hash = hashlib.sha256(stream).hexdigest()
             try:
                 after = self._receipt_stamp(path)
@@ -1048,8 +1070,10 @@ class DurableResultStore:
         stream, stream_hash, result_hash, result_bytes = payload
         size, ratio_limit = DurableResultStore._validated_stream_options(
             chunk_bytes, max_ratio)
-        ratio = (len(stream) / result_bytes) if result_bytes else 1.0
-        eligible = bool(result_bytes >= 4096 and ratio <= ratio_limit)
+        # Empty stream is the bounded compressor's ineligible sentinel,
+        # never a successful zero-byte zlib payload.
+        ratio = (len(stream) / result_bytes) if stream and result_bytes else 1.0
+        eligible = bool(stream and result_bytes >= 4096 and ratio <= ratio_limit)
         total = max(1, (len(stream) + size - 1) // size) if eligible else 0
         return {
             "sequence": sequence,
