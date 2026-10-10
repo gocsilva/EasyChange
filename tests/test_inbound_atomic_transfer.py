@@ -109,6 +109,30 @@ def test_inbound_lock_rejects_hardlink_to_another_regular_file(tmp_path):
                        chunk_count=1,sha256="a"*64)["duplicate"] is False
 
 
+def test_symlinked_staging_chunk_never_reads_foreign_file(tmp_path):
+    store=InboundCommandStore(tmp_path / "inbound")
+    foreign=tmp_path / "private.txt"
+    foreign.write_bytes(b"private content never an inbound chunk")
+    target=tmp_path / "staged.part"
+    try:
+        target.symlink_to(foreign)
+    except (OSError,NotImplementedError) as exc:
+        pytest.skip("Symlink privilege unavailable: "+type(exc).__name__)
+    with pytest.raises(InboundTransferError,match="INBOUND_CHUNK_READ_FAILED"):
+        store._read_chunk_bounded(target)
+    assert foreign.read_bytes()==b"private content never an inbound chunk"
+
+
+def test_special_fifo_chunk_rejected_without_blocking_reader(tmp_path):
+    import os
+    if not (hasattr(os,"mkfifo") and hasattr(os,"O_NONBLOCK")):
+        pytest.skip("Platform lacks a nonblocking FIFO")
+    target=tmp_path / "named-pipe.part"
+    os.mkfifo(target)
+    with pytest.raises(InboundTransferError,match="INBOUND_CHUNK_READ_FAILED"):
+        InboundCommandStore._read_chunk_bounded(target)
+
+
 def test_inbound_transfer_ascii_casefold_preserves_existing_directory(tmp_path):
     store=InboundCommandStore(tmp_path / "inbound")
     first=store.begin("uss234567",raw_bytes=10,compressed_bytes=8,
