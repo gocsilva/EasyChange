@@ -16,11 +16,14 @@ import time
 import re
 import threading
 import json
+import os
+import tempfile
 import secrets
 import binascii
 import hashlib
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 from .command_parser import CommandParser
 from .file_service import ExternalChangeError, FileService, MAX_TEXT_FILE_BYTES
@@ -4649,17 +4652,44 @@ class CommandService:
         self.transaction_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not self._transaction_storage_v2:
-            temporary = self.transaction_path.with_suffix(".tmp")
-            temporary.write_text(
-                json.dumps(
-                    {"format": "append-v2", "transaction_id": self.transaction_id},
-                    ensure_ascii=False, separators=(",", ":"),
-                ),
-                encoding="utf-8",
+            # Migration from monolithic JSON must publish the COMPLETE v2 log
+            # before replacing the legacy header. Otherwise a crash after
+            # header replacement but before append erases rollback evidence.
+            # Each staging file is unique and fsynced; no full-log JSON copy.
+            journal_fd, journal_name = tempfile.mkstemp(
+                prefix=self.transaction_log_path.name + ".", suffix=".tmp",
+                dir=self.transaction_path.parent,
             )
-            temporary.replace(self.transaction_path)
-            self.transaction_log_path.unlink(missing_ok=True)
-            self._transaction_persisted_count = 0
+            try:
+                with os.fdopen(journal_fd, "w", encoding="utf-8", newline="\n") as stream:
+                    for change in self.transaction:
+                        stream.write(json.dumps({
+                            "path": change.path, "before": change.before,
+                            "after": change.after, "change_id": change.change_id,
+                            "command": change.command,
+                        }, ensure_ascii=False, separators=(",", ":")) + "\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(journal_name, self.transaction_log_path)
+            finally:
+                Path(journal_name).unlink(missing_ok=True)
+
+            header_fd, header_name = tempfile.mkstemp(
+                prefix=self.transaction_path.name + ".", suffix=".tmp",
+                dir=self.transaction_path.parent,
+            )
+            try:
+                with os.fdopen(header_fd, "w", encoding="utf-8") as stream:
+                    stream.write(json.dumps(
+                        {"format": "append-v2", "transaction_id": self.transaction_id},
+                        ensure_ascii=False, separators=(",", ":"),
+                    ))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(header_name, self.transaction_path)
+            finally:
+                Path(header_name).unlink(missing_ok=True)
+            self._transaction_persisted_count = len(self.transaction)
             self._transaction_storage_v2 = True
 
         if self._transaction_persisted_count >= len(self.transaction):
