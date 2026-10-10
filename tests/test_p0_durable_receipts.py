@@ -225,6 +225,49 @@ def test_cleanup_retains_completed_mutation_claim_after_result_ttl(tmp_path, mon
     assert read_prior["result"] is None
 
 
+def test_cold_result_payload_streams_json_with_original_bytes_and_hash(tmp_path, monkeypatch):
+    import hashlib
+    import easychange.core.result_store as result_module
+
+    store=DurableResultStore(tmp_path/"results")
+    seq="QCOLDWIRE1"
+    store.mark_running(seq,"a"*64,":read",mutation=False)
+    result={"ok":True,"command":"read",
+            "data":{"accent":"ação","emoji":"🙂","status":[1,False,None]}}
+    terminal=store.complete(seq,"a"*64,":read",result)
+    expected=json.dumps(result,ensure_ascii=False,allow_nan=False,
+                        separators=(",",":")).encode("utf-8")
+    store._payload_cache.clear()
+    store._payload_cache_bytes=0
+    with monkeypatch.context() as patcher:
+        patcher.setattr(result_module.json,"dumps",
+                        lambda *args,**kwargs: (_ for _ in ()).throw(
+                            AssertionError("full json.dumps on cache miss")))
+        payload=store._result_payload(seq)
+    assert payload is not None
+    value,raw,digest=payload
+    assert value==result
+    assert raw==expected
+    assert digest==hashlib.sha256(expected).hexdigest()
+    assert terminal["result_hash"]==digest
+    assert terminal["result_bytes"]==len(raw)
+
+
+def test_cold_result_encoder_rejects_large_json_before_full_materialization(monkeypatch):
+    import pytest
+    import easychange.core.result_store as result_module
+
+    shared={"text":"🙂"*120}
+    value={"data":[shared,shared,shared]}
+    with monkeypatch.context() as patcher:
+        patcher.setattr(result_module,"MAX_DECODED_RECEIPT_BYTES",72)
+        patcher.setattr(result_module.json,"dumps",
+                        lambda *args,**kwargs: (_ for _ in ()).throw(
+                            AssertionError("unbounded json.dumps")))
+        with pytest.raises(ValueError,match="RESULT_RECEIPT_DECOMPRESSED_TOO_LARGE"):
+            DurableResultStore._encode_result_json(value)
+
+
 def test_receipt_encoder_streams_byte_exact_json_without_full_dumps(monkeypatch):
     import zlib
     import easychange.core.result_store as result_module
