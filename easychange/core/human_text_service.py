@@ -107,32 +107,34 @@ class HumanTextService:
                     if handle.tell()>self.max_bytes:
                         raise ValueError("HUMAN_TEXT_EXCEEDS_CONFIGURED_LIMIT")
                 chars += len(decoder.decode(b"", final=True))
-                stat=os.fstat(handle.fileno())
+                finished=os.fstat(handle.fileno())
             # Hash and metadata must refer to one file generation; do not
             # publish old bytes with a replacement file's inode/timestamps.
             try:
-                current=self.path.stat()
+                current=self.path.lstat()
             except FileNotFoundError as exc:
                 raise ValueError("HUMAN_TEXT_FILE_CHANGED_RETRY") from exc
             signature=lambda s:(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns)
-            if signature(opened)!=signature(stat) or signature(stat)!=signature(current):
+            if (not stat.S_ISREG(current.st_mode) or current.st_nlink!=1 or
+                    signature(opened)!=signature(finished) or
+                    signature(finished)!=signature(current)):
                 raise ValueError("HUMAN_TEXT_FILE_CHANGED_RETRY")
         except UnicodeDecodeError as exc:
             raise ValueError("HUMAN_TEXT_INVALID_UTF8") from exc
 
-        size = stat.st_size
+        size = finished.st_size
         lines = 0 if not saw_data else newlines + (0 if last_byte == b"\n" else 1)
         return {
             "exists": True,
             "bytes": size,
-            "file_mtime_ns": stat.st_mtime_ns,
-            "file_inode": stat.st_ino,
+            "file_mtime_ns": finished.st_mtime_ns,
+            "file_inode": finished.st_ino,
             "chars": chars,
             "lines": lines,
             "sha256": digest.hexdigest(),
-            "updated_at": stat.st_mtime,
-            "file_mtime_ns": stat.st_mtime_ns,
-            "file_inode": stat.st_ino,
+            "updated_at": finished.st_mtime,
+            "file_mtime_ns": finished.st_mtime_ns,
+            "file_inode": finished.st_ino,
             "max_bytes": self.max_bytes,
             "complete": True,
         }
@@ -375,10 +377,11 @@ class HumanTextService:
                     # Detect in-place rewrites during a page read, as well as
                     # atomic replacements after the initial descriptor check.
                     finished=os.fstat(handle.fileno())
-                    current=self.path.stat()
+                    current=self.path.lstat()
                     identity=lambda st:(st.st_dev,st.st_ino,st.st_size,
                                          st.st_mtime_ns)
-                    if (identity(opened)!=identity(finished) or
+                    if (not stat.S_ISREG(current.st_mode) or current.st_nlink!=1 or
+                            identity(opened)!=identity(finished) or
                             identity(finished)!=identity(current)):
                         raise ValueError("HUMAN_TEXT_FILE_CHANGED_RETRY")
             except FileNotFoundError as exc:
