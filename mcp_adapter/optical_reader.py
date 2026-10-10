@@ -196,7 +196,12 @@ def decode_hdmi_qr(frame) -> list[str]:
     shape=getattr(frame,"shape",None)
     if (not isinstance(shape,tuple) or len(shape) not in (2,3)
             or type(shape[0]) is not int or type(shape[1]) is not int
-            or shape[0]<1 or shape[1]<1):
+            or shape[0]<1 or shape[1]<1
+            or shape[0]*shape[1]>67_108_864
+            or (len(shape)==3 and
+                (type(shape[2]) is not int or shape[2] not in (1,3,4)))):
+        # A corrupt capture may report absurd dimensions. QR detection can
+        # allocate multiple temporary images, so reject before calling cv2.
         return []
     import cv2
     detector=getattr(_qr_detectors,"detector",None)
@@ -210,7 +215,7 @@ def decode_hdmi_qr(frame) -> list[str]:
             single,_points,_rectified=detector.detectAndDecode(frame)
             if isinstance(single,str) and single:decoded=[single]
         return decoded
-    except cv2.error:
+    except (cv2.error, TypeError, ValueError):
         # A transient invalid image or interrupted capture cannot imply
         # success and must not prevent the following frame from being read.
         return []
