@@ -135,6 +135,44 @@ def test_protected_legacy_sqlite_rows_cannot_escape_search_or_file_listing(tmp_p
         idx.close()
 
 
+def test_exclusion_arriving_while_index_batch_reads_never_reimports_secret(
+        tmp_path, monkeypatch):
+    root=tmp_path/"project"
+    root.mkdir()
+    (root/"Secret.py").write_text(
+        "def SecretSymbol(): return 'RACE_SECRET_MARKER'\n",encoding="utf-8")
+    (root/"Public.py").write_text(
+        "def PublicSymbol(): return 'PUBLIC_MARKER'\n",encoding="utf-8")
+    first=Indexer(root)
+    second=Indexer(root)
+    original=second._read_candidate
+    already_protected=[]
+
+    def protect_between_read_and_write(item, *, trusted_root=None):
+        record=original(item,trusted_root=trusted_root)
+        if item[1]=="Secret.py" and not already_protected:
+            first.protect_path("secret.py",scrub=False)
+            already_protected.append(True)
+        return record
+
+    monkeypatch.setattr(second,"_read_candidate",protect_between_read_and_write)
+    try:
+        second.refresh(force=True)
+        assert already_protected==[True]
+        with second._connect() as db:
+            assert db.execute("SELECT path FROM files ORDER BY path").fetchall()==[
+                ("Public.py",)]
+            assert db.execute(
+                "SELECT path FROM symbols WHERE path=?",("Secret.py",)).fetchall()==[]
+            if second._fts_enabled:
+                assert db.execute(
+                    "SELECT path FROM files_fts WHERE path=?",("Secret.py",)).fetchall()==[]
+        assert second.search("RACE_SECRET_MARKER")==[]
+    finally:
+        second.close()
+        first.close()
+
+
 def test_corrupt_persisted_protection_metadata_fails_closed(tmp_path):
     root=tmp_path/"project"
     root.mkdir()
