@@ -95,26 +95,39 @@ class Indexer:
             protected = db.execute(
                 "SELECT value FROM index_meta WHERE key='protected_paths_v1'"
             ).fetchone()
-            if protected is not None:
-                saved = protected[0]
-                if not isinstance(saved, str) or len(saved) > 1_048_576:
-                    raise RuntimeError("INDEXER_PROTECTED_PATHS_CORRUPT")
-                try:
-                    decoded = json.loads(saved)
-                    if (not isinstance(decoded, list) or len(decoded) > 10_000
-                            or any(type(item) is not str or len(item) > 4096
-                                   for item in decoded)):
-                        raise ValueError("bad protected paths")
-                    self._protected_paths = {
-                        self._normalize_relative_path(item) for item in decoded
-                    }
-                    self._protected_keys = {
-                        item.casefold() for item in self._protected_paths
-                    }
-                except (TypeError, ValueError, RecursionError) as exc:
-                    # Unknown protected metadata must never mean "no secret
-                    # paths". Refuse initialization instead of reindexing.
-                    raise RuntimeError("INDEXER_PROTECTED_PATHS_CORRUPT") from exc
+            self._protected_paths = self._decode_protected_paths(
+                protected[0] if protected is not None else None)
+            self._protected_keys = {
+                item.casefold() for item in self._protected_paths
+            }
+
+    @classmethod
+    def _decode_protected_paths(cls, raw) -> set[str]:
+        if raw is None:
+            return set()
+        if not isinstance(raw, str) or len(raw) > 1_048_576:
+            raise RuntimeError("INDEXER_PROTECTED_PATHS_CORRUPT")
+        try:
+            decoded = json.loads(raw)
+            if (not isinstance(decoded, list) or len(decoded) > 10_000
+                    or any(type(item) is not str or len(item) > 4096
+                           for item in decoded)):
+                raise ValueError("bad protected path metadata")
+            return {cls._normalize_relative_path(item) for item in decoded}
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise RuntimeError("INDEXER_PROTECTED_PATHS_CORRUPT") from exc
+
+    def _sync_protected_paths(self) -> None:
+        # A second EasyChange process may protect a file after this indexer
+        # opened its SQLite connection. Refresh the small exclusion metadata
+        # before source search/index operations, not for every scanned file.
+        with self._lock, self._connect() as db:
+            row = db.execute(
+                "SELECT value FROM index_meta WHERE key='protected_paths_v1'"
+            ).fetchone()
+            stored = self._decode_protected_paths(row[0] if row else None)
+            self._protected_paths.update(stored)
+            self._protected_keys.update(item.casefold() for item in stored)
 
     @contextmanager
     def _connect(self):
@@ -270,11 +283,23 @@ class Indexer:
             self._protected_paths.add(relative)
             self._protected_keys.add(relative.casefold())
             with self._connect() as db:
-                # Remember exclusion in existing metadata atomically with
-                # SQLite/FTS row deletion, including after an app restart.
+                # Serialize protection registrations from different processes
+                # rather than letting a stale instance overwrite another
+                # process's protected path list.
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    "SELECT value FROM index_meta WHERE key='protected_paths_v1'"
+                ).fetchone()
+                self._protected_paths.update(
+                    self._decode_protected_paths(row[0] if row else None))
+                self._protected_keys.update(
+                    item.casefold() for item in self._protected_paths)
+                encoded = json.dumps(sorted(self._protected_paths))
+                if len(encoded) > 1_048_576:
+                    raise ValueError("INDEXER_PROTECTED_PATHS_LIMIT")
                 db.execute(
                     "INSERT OR REPLACE INTO index_meta(key,value) VALUES(?,?)",
-                    ("protected_paths_v1", json.dumps(sorted(self._protected_paths))),
+                    ("protected_paths_v1", encoded),
                 )
                 # An old index can contain a different on-disk capitalization
                 # of the same Windows path. Scrub all aliases, including FTS.
@@ -316,6 +341,7 @@ class Indexer:
     def update_path(self, relative_path: str) -> dict:
         """Update exactly one known path after an EasyChange mutation."""
         relative = self._normalize_relative_path(relative_path)
+        self._sync_protected_paths()
         target = self.root / Path(relative)
         try:
             # A symlink within the workspace is also handled by the regular
@@ -366,6 +392,7 @@ class Indexer:
         return {"path": relative, "updated": True, "hash": digest[:12]}
 
     def refresh(self, force: bool = False) -> dict:
+        self._sync_protected_paths()
         if not force and self._fully_indexed:
             return {**self._last_refresh_result, "cached": True}
 
@@ -484,6 +511,7 @@ class Indexer:
             return int(db.execute("SELECT COUNT(*) FROM files").fetchone()[0])
 
     def symbols(self, name: str | None = None, path: str | None = None) -> list[dict]:
+        self._sync_protected_paths()
         # A cold symbol lookup must obey the same path protections as the
         # indexed/warm path. Otherwise a supplied ../ path or a protected
         # secret could be read directly before the index has warmed.
@@ -760,6 +788,7 @@ class Indexer:
         # Reject invalid regexes before spawning git-grep or materializing
         # potentially large SQLite candidate rows. Reuse one compiled object.
         pattern = re.compile(query, 0 if case_sensitive else re.IGNORECASE) if regex else None
+        self._sync_protected_paths()
         if not self._fully_indexed:
             cold = self._git_search(query, regex=regex, extension=extension,
                                     path_prefix=path_prefix, case_sensitive=case_sensitive)
@@ -852,6 +881,7 @@ class Indexer:
                       extension: str | None = None, path_prefix: str | None = None) -> dict:
         """Resolve many definitions/usages with one cold Git scan or parallel warm-index queries."""
         started = time.perf_counter()
+        self._sync_protected_paths()
         clean: list[str] = []
         seen_terms: set[str] = set()
         for value in terms or []:
