@@ -167,3 +167,36 @@ def test_single_term_cold_grep_caps_row_count(tmp_path, monkeypatch):
             case_sensitive=True)
     assert len(found) == 2
     assert found[0][0] == "source.py"
+
+
+
+def test_cold_multi_term_rejects_directory_symlink_to_protected_workspace(tmp_path):
+    project=tmp_path/"project"
+    project.mkdir()
+    (project/".git").mkdir()
+    protected=project/".easychange"
+    protected.mkdir()
+    (protected/"private.py").write_text(
+        "def CANARY():\n    return 'never reveal'\n",encoding="utf-8")
+    alias=project/"source_alias"
+    try:
+        alias.symlink_to(protected,target_is_directory=True)
+    except (NotImplementedError,OSError):
+        pytest.skip("directory symlinks unavailable")
+    normal=project/"safe.py"
+    normal.write_text("def CANARY():\n    pass\n",encoding="utf-8")
+
+    index=Indexer(project)
+    index.start_background_refresh=lambda:None
+    lines=("source_alias/private.py:1:def CANARY():\n"
+           "safe.py:1:def CANARY():\n")
+    with patch("easychange.core.indexer.subprocess.run",
+               return_value=subprocess.CompletedProcess(
+                   ["git","grep"],0,lines,"")) as runner:
+        result=index.discover_many(["CANARY"])
+    runner.assert_called_once()
+    assert result["files"]==["safe.py"]
+    assert all(item["file"]=="safe.py"
+               for item in result["by_term"]["CANARY"]["definitions"])
+    assert all(item["file"]=="safe.py"
+               for item in result["by_term"]["CANARY"]["references"])
