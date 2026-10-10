@@ -463,7 +463,17 @@ class ProjectRuntimeService:
         temporary=self.config_path.with_name(
             f".{self.config_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         try:
-            with temporary.open("x",encoding="utf-8") as output:
+            flags=(os.O_CREAT|os.O_EXCL|os.O_WRONLY|
+                   getattr(os,"O_BINARY",0)|getattr(os,"O_NOFOLLOW",0))
+            # Static env values may include credentials. Never create a
+            # world-readable replacement when the user's umask is permissive.
+            descriptor=os.open(temporary,flags,0o600)
+            try:
+                output=os.fdopen(descriptor,"w",encoding="utf-8")
+            except BaseException:
+                os.close(descriptor)
+                raise
+            with output:
                 json.dump({"profiles":list(by_id.values())},output,
                           ensure_ascii=False,indent=2)
                 output.flush()
