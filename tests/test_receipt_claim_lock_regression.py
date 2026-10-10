@@ -91,3 +91,28 @@ def test_completed_receipt_requires_prior_exclusive_sequence_claim(tmp_path):
     assert duplicate==done
     with pytest.raises(ValueError,match="RESULT_SEQUENCE_COMMAND_HASH_MISMATCH"):
         store.complete(sequence,"b"*64,command,completed)
+
+
+def test_duplicate_completion_avoids_large_result_serialization(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    import easychange.core.result_store as result_module
+
+    store=DurableResultStore(tmp_path/"receipts")
+    seq="QFASTREPLAY1"
+    original={"ok":True,"sequence":seq,"data":{"changed":True}}
+    store.claim_running(seq,"a"*64,":operation",mutation=True)
+    committed=store.complete(seq,"a"*64,":operation",original)
+
+    # Simulate a duplicate response whose result would be expensive or not
+    # serializable. The previous terminal receipt must be returned before
+    # any JSON encoding or hash computation of the supplied duplicate value.
+    with monkeypatch.context() as context:
+        context.setattr(result_module.json,"dumps",Mock(
+            side_effect=AssertionError("DUPLICATE_RESULT_RESERIALIZED")))
+        assert store.complete(seq,"a"*64,":operation",
+                              {"ok":False,"data":{"unexpected":object()}})==committed
+        import pytest
+        with pytest.raises(ValueError,match="RESULT_SEQUENCE_COMMAND_HASH_MISMATCH"):
+            store.complete(seq,"b"*64,":operation",original)
+        with pytest.raises(RuntimeError,match="RESULT_SEQUENCE_NOT_CLAIMED"):
+            store.complete("QFASTREPLAY2","a"*64,":operation",original)
