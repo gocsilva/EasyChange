@@ -205,7 +205,14 @@ class DurableResultStore:
         flags=(os.O_RDONLY|getattr(os,"O_BINARY",0)|
                getattr(os,"O_NOFOLLOW",0))
         fd=os.open(path,flags)
-        with os.fdopen(fd,"rb") as stream:
+        try:
+            stream=os.fdopen(fd,"rb")
+        except BaseException:
+            # If fdopen itself fails, no context manager owns the raw fd.
+            # Release it rather than leaking a handle on every retry.
+            os.close(fd)
+            raise
+        with stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise ValueError("RESULT_RECEIPT_UNSAFE_TYPE")
             raw=stream.read(MAX_COMPRESSED_RECEIPT_BYTES+1)
