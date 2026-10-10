@@ -573,6 +573,16 @@ def _bare_async_websocket():
     return ws
 
 
+def test_cdp_boolean_response_id_cannot_spoof_pending_call_one():
+    ws=_bare_async_websocket()
+    ws._pending_ids.add(1)
+    for bad in (True,1.0,"1"):
+        ws._dispatch_message({"id":bad,"result":{"value":"spoof"}})
+        assert ws._responses=={}
+    ws._dispatch_message({"id":1,"result":{"value":"authentic"}})
+    assert ws._responses[1]["result"]["value"]=="authentic"
+
+
 def test_cdp_websocket_continuous_reader_correlates_calls_and_buffers_events(monkeypatch):
     ws = _bare_async_websocket()
     sent = []
