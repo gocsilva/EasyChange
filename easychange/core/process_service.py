@@ -813,16 +813,18 @@ class ProcessService:
         max_bytes: int = 16384,
     ) -> dict:
         """Return only log bytes not yet consumed by the caller."""
+        # Finalize completed jobs and join their output pumps before paging.
+        # Otherwise terminal=True can accompany a stale/empty last log page.
+        try:
+            status = self.job_status(job_id)
+        except LookupError:
+            status = {}
         page = self.job_logs(
             job_id,
             stream=stream,
             cursor=cursor,
             max_bytes=max_bytes,
         )
-        try:
-            status = self.job_status(job_id)
-        except LookupError:
-            status = {}
         return {
             **page,
             "state": str(status.get("state") or ""),
