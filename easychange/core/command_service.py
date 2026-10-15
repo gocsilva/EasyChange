@@ -616,7 +616,7 @@ class CommandService:
                     code="SEQUENCE_STATE_UNAVAILABLE", sequence=sequence)
             journal = dict(legacy_root)
             previous = journal.get(sequence)
-            if previous is not None and (
+            if sequence in journal and (
                     not isinstance(previous, dict) or not previous):
                 # An existing empty journal entry is still evidence of an
                 # unknown prior sequence. A truthiness check would otherwise
@@ -2021,9 +2021,13 @@ class CommandService:
                                        else [query_item.get("chunk_index")])
                         upper = 16 if query_kind == "optical_chunks" else 1
                         if not isinstance(raw_indexes,list) or not 1<=len(raw_indexes)<=upper:
-                            return Result(False,query_kind,
-                                          error="INVALID_CHUNK_INDEX",
-                                          code="INVALID_RESULT_CHUNK")
+                            return Result(
+                                False, query_kind,
+                                error=("CHUNK_INDEXES_REQUIRES_1_TO_16_ITEMS"
+                                       if query_kind == "optical_chunks"
+                                       else "INVALID_CHUNK_INDEX"),
+                                code="INVALID_RESULT_CHUNK",
+                            )
                         if any(
                             type(item) is not int and not (
                                 isinstance(item,str) and len(item)<=32

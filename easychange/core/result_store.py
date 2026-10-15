@@ -971,8 +971,13 @@ class DurableResultStore:
         if value is None:
             return None
         try:
-            started = float(value.get("started_at") or 0.0)
-            finished = float(value.get("finished_at") or 0.0)
+            # Only truly missing/None legacy timestamps may default to zero.
+            # Falsey but malformed values such as [] must not silently become
+            # valid duration metadata for an already-claimed sequence.
+            started_raw = value.get("started_at")
+            finished_raw = value.get("finished_at")
+            started = float(0.0 if started_raw is None else started_raw)
+            finished = float(0.0 if finished_raw is None else finished_raw)
         except (TypeError, ValueError, OverflowError) as exc:
             # A valid updated_at can coexist with corrupt legacy timing fields.
             # Never manufacture duration_ms or mask the durable replay claim.

@@ -1143,7 +1143,7 @@ def test_single_chunk_helpers_preserve_valid_numeric_string_index(tmp_path):
     store=DurableResultStore(tmp_path / "receipts")
     seq="QVALIDINDEX01"
     store.mark_running(seq,"a"*64,":state",mutation=False)
-    store.complete(seq,"a"*64,":state,{
+    store.complete(seq,"a"*64,":state",{
         "ok":True,"command":"state",
         "data":{"payload":"A"*40000},"sequence":seq,
     })
