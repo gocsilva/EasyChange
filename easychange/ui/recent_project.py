@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-STATE_FILE = Path.home() / ".easychange" / "last_project.json"
+STATE_FILE = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "EasyChange" / "last_project.json"
 
 def remember_project(path: str | Path) -> None:
     target = Path(path).expanduser().resolve(strict=True)
