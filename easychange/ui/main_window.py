@@ -710,6 +710,15 @@ class MainWindow(QMainWindow):
         if self._machine != self.service.machine:
             self._machine = self.service.machine
             self._apply_machine_style()
+        # A sequenced native read has already been durably committed by
+        # CommandService. Publish its optical response before focus inspection
+        # and widget refresh; focus_command processes Qt events and can now
+        # paint the EC2 receipt instead of keeping the previous QR frame.
+        early_read_optics = bool(
+            self._machine and result.sequence and result.command == "read"
+        )
+        if early_read_optics:
+            self._update_machine_qr(result)
         self._refresh_header()
         self._sync_optical_transport_controls()
         focus = self.focus_command()
@@ -726,7 +735,8 @@ class MainWindow(QMainWindow):
                     focus.get("command_focus_confirmed")
                 )
         self.output.setPlainText(result.render(self.service.output))
-        self._update_machine_qr(result)
+        if not early_read_optics:
+            self._update_machine_qr(result)
         if result.ok and (result.data.get("path") or result.data.get("file")) and text.lstrip(":").split(maxsplit=1)[0] in {"open", "read", "context", "goto", "reload"}:
             try:
                 data = result.data
