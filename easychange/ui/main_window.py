@@ -714,10 +714,17 @@ class MainWindow(QMainWindow):
         self._sync_optical_transport_controls()
         focus = self.focus_command()
         if isinstance(result.data, dict):
-            result.data["easychange_focus"] = focus
-            result.data["command_focus_confirmed"] = bool(
-                focus.get("command_focus_confirmed")
-            )
+            # Sequenced native reads were already persisted by CommandService.
+            # Appending GUI focus diagnostics afterwards changes the optical
+            # EC2 payload and digest relative to the durable result, and
+            # needlessly inflates a 1-line answer into several dense QR cells.
+            # Keep focus diagnostics for unsequenced prepare/state and all
+            # other existing consumers; only compact the proven read path.
+            if not (result.sequence and result.command == "read"):
+                result.data["easychange_focus"] = focus
+                result.data["command_focus_confirmed"] = bool(
+                    focus.get("command_focus_confirmed")
+                )
         self.output.setPlainText(result.render(self.service.output))
         self._update_machine_qr(result)
         if result.ok and (result.data.get("path") or result.data.get("file")) and text.lstrip(":").split(maxsplit=1)[0] in {"open", "read", "context", "goto", "reload"}:
