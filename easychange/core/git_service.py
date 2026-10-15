@@ -13,9 +13,20 @@ class GitService:
         self.workspace = workspace
 
     def _run(self, *args: str) -> str:
-        result = subprocess.run(["git", *args], cwd=self.workspace.root_path, text=True,
-                                capture_output=True, timeout=30, check=False,
-                                **hidden_console_kwargs())
+        # Git emits UTF-8 paths and messages. On Windows text=True without
+        # an explicit encoding uses the current ANSI code page (often cp1252)
+        # and may raise UnicodeDecodeError for valid UTF-8 output.
+        result = subprocess.run(
+            ["git", *args],
+            cwd=self.workspace.root_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=30,
+            check=False,
+            **hidden_console_kwargs(),
+        )
         if result.returncode:
             raise RuntimeError((result.stderr or result.stdout).strip() or "Git command failed")
         return result.stdout.strip()
