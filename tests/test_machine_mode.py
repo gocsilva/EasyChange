@@ -623,3 +623,15 @@ def test_compact_ec2_receipt_uses_spare_slot_without_extra_page(
     finally:
         window.close()
         app.processEvents()
+
+
+
+def test_optical_32_qr_canvas_fits_dpi_scaled_logical_screens():
+    """All 32 cells must fit available geometry, even at 125-200% DPI."""
+    assert MainWindow._burst_qr_size_for_screen(1920, 1080) == 210
+    for width, height in ((1536, 864), (1280, 720), (960, 540), (640, 480)):
+        side = MainWindow._burst_qr_size_for_screen(width, height)
+        assert side > 0
+        assert 8 * side + 7 * 4 <= max(0, width - 160)
+        assert 4 * side + 3 * 4 <= max(0, height - 200)
+    assert MainWindow._burst_qr_size_for_screen(1280, 720) == 127

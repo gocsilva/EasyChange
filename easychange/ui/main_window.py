@@ -741,7 +741,7 @@ class MainWindow(QMainWindow):
         """
         side_by_width = (max(0, int(screen_width) - 160) - 7 * 4) // 8
         side_by_height = (max(0, int(screen_height) - 200) - 3 * 4) // 4
-        return max(160, min(cls._OPTICAL_BURST_QR_SIZE, side_by_width, side_by_height))
+        return max(1, min(cls._OPTICAL_BURST_QR_SIZE, side_by_width, side_by_height))
 
     def _set_optical_burst(self, enabled: bool) -> None:
         enabled = bool(enabled and self._machine)
