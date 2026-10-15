@@ -13,6 +13,7 @@ WINDOW_PREFIX = "EasyChange — "
 SW_RESTORE = 9
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_NO_WINDOW = 0x08000000
 
 
 def _user32():
@@ -90,7 +91,11 @@ def ensure_gui(
         }
 
     pythonw = root / ".venv" / "Scripts" / "pythonw.exe"
-    if not pythonw.exists():
+    # Prefer python.exe without a console so Python startup exceptions are
+    # reliably written to gui-launch.log. pythonw.exe can leave stderr
+    # unobservable on some Windows launch paths.
+    python = root / ".venv" / "Scripts" / "python.exe"
+    if not pythonw.exists() and not python.exists():
         return {
             "ok": False,
             "error": "PYTHONW_NOT_FOUND",
@@ -118,14 +123,20 @@ def ensure_gui(
         )
         log_handle.flush()
         process = popen_factory(
-            [str(pythonw), "-m", "easychange.gui", ".", "--human"],
+            [str(python if python.exists() else pythonw),
+             "-m", "easychange.gui", ".", "--human"],
             cwd=str(root),
             stdin=subprocess.DEVNULL,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             close_fds=True,
+            # UTF-8 mode prevents locale-specific charmap decoding during
+            # startup; keep strict subprocess decoding under service control.
+            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8:replace"},
             creationflags=(
-                DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+                (
+                    CREATE_NO_WINDOW if python.exists() else DETACHED_PROCESS
+                ) | CREATE_NEW_PROCESS_GROUP
                 if os.name == "nt"
                 else 0
             ),
