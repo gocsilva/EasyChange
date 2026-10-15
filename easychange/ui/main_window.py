@@ -918,8 +918,20 @@ class MainWindow(QMainWindow):
         # Replace the durable-only receipt with the full optical header only
         # when the page plan actually needs one. For small results the normal
         # EC2 payload replaces the provisional receipt on the next commit.
+        # Compact two/three-chunk responses have an otherwise idle QR slot.
+        # Keep the correlated EC2H receipt visible in that slot without adding
+        # a carousel page. The receiver can stop waiting immediately when one
+        # payload cell is unreadable, then recover the exact durable result.
+        # Single-chunk responses stay minimal; four chunks keep one-page
+        # geometry without adding a fifth QR.
+        show_compact_receipt = (
+            not self._optical_burst
+            and 2 <= len(self._optical_payloads) < self._OPTICAL_NORMAL_SLOTS
+        )
         self._optical_header_payload = (
-            bundle_header if (self._optical_burst or overflow_handoff) else None
+            bundle_header
+            if (self._optical_burst or overflow_handoff or show_compact_receipt)
+            else None
         )
         self._render_optical_page()
     def _optical_page_plan(self) -> tuple[int, int, int, int, bool]:

@@ -573,3 +573,53 @@ def test_terminal_ec2h_is_visible_before_background_bundle_finishes(tmp_path, mo
 
     window.close()
     app.processEvents()
+
+@pytest.mark.parametrize(
+    "chunk_count,receipt_expected",
+    [(1, False), (2, True), (3, True), (4, False)],
+)
+def test_compact_ec2_receipt_uses_spare_slot_without_extra_page(
+    tmp_path, monkeypatch, chunk_count, receipt_expected,
+):
+    from easychange.core.result import Result
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(
+        Workspace.open(tmp_path), machine_mode=True, hid_mode=True,
+    )
+    sequence = f"QSPARE{chunk_count}"
+    payloads = [
+        json.dumps(
+            {"p": "EC2", "s": sequence, "i": i,
+             "n": chunk_count, "d": f"fragment-{i}"},
+            separators=(",", ":"),
+        )
+        for i in range(chunk_count)
+    ]
+    header = json.dumps(
+        {"p": "EC2H", "s": sequence, "n": chunk_count},
+        separators=(",", ":"),
+    )
+    monkeypatch.setattr(
+        "easychange.ui.main_window.encode_result_bundle",
+        lambda result, **kwargs: (list(payloads), header),
+    )
+    try:
+        window._update_machine_qr(
+            Result(True, "state", {"ready": True}, sequence=sequence)
+        )
+        _drain_optical(window, app)
+        assert window._optical_burst is False
+        assert bool(window._optical_header_payload) is receipt_expected
+        slots, pages, start, data_slots, include_header = window._optical_page_plan()
+        assert slots == 4
+        assert pages == 1
+        assert include_header is receipt_expected
+        assert start == 0
+        assert sum(
+            label.pixmap() is not None and not label.pixmap().isNull()
+            for label in window.machine_qrs
+        ) == chunk_count + int(receipt_expected)
+    finally:
+        window.close()
+        app.processEvents()
