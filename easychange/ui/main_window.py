@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from easychange.remote.optical_protocol import encode_durable_result_header, encode_result_bundle
@@ -884,6 +884,37 @@ class MainWindow(QMainWindow):
         self._show_terminal_optical_header_fast(result)
 
         generation = self._optical_render_generation
+        # A short sequenced source read has a small, bounded payload. Encode
+        # it immediately rather than waiting behind background QR work: the
+        # MCP often sees the PREVIOUS command for several HDMI frames and
+        # otherwise replays an already executed idempotent read. Preserve
+        # async encoding for long/unbounded results and other commands.
+        lines = result.data.get("lines") if isinstance(getattr(result, "data", None), dict) else None
+        inline_small_read = bool(
+            getattr(result, "ok", False)
+            and getattr(result, "sequence", None)
+            and getattr(result, "command", "") == "read"
+            and isinstance(lines, list)
+            and 1 <= len(lines) <= 12
+            and all(isinstance(line, str) and len(line) <= 180 for line in lines)
+        )
+        if inline_small_read:
+            try:
+                payloads, header = encode_result_bundle(
+                    result,
+                    max_packets=self._OPTICAL_BROADCAST_MAX_CHUNKS,
+                    overflow_packets=self._OPTICAL_OVERFLOW_BROADCAST_CHUNKS,
+                )
+            except (ValueError, TypeError, OverflowError, RuntimeError):
+                # Preserve the durable receipt; the normal async branch still
+                # handles unexpected encoder failures.
+                pass
+            else:
+                completed = Future()
+                completed.set_result((payloads, header))
+                self._optical_encode_future = completed
+                self._poll_optical_bundle(generation, completed)
+                return
         try:
             future = self._optical_encode_executor.submit(
                 encode_result_bundle,
