@@ -499,7 +499,12 @@ def decode_result_chunks(payloads: Collection[str]) -> dict[str, Any]:
         if packet_text_chars > MAX_EC2_PACKET_SET_CHARS:
             raise ValueError("optical packet set too large")
         chunk = decode_ec2_packet_json(raw_packet)
-        if not isinstance(chunk, dict) or chunk.get("p") != PROTOCOL:
+        if not isinstance(chunk, dict):
+            # A QR envelope is an object; deeply nested JSON arrays are valid
+            # JSON but never valid EC2 packets. Fail closed instead of silently
+            # accepting them until the generic "no chunks" error.
+            raise ValueError("invalid optical packet JSON")
+        if chunk.get("p") != PROTOCOL:
             continue
         if not valid_ec2_identity(chunk):
             raise ValueError("invalid optical transfer identity")

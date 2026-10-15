@@ -55,7 +55,7 @@ def test_machine_mode_uses_compact_overflow_handoff_for_large_results(tmp_path):
     window._run_command(":ec QGUI5678 :read large.py 1 900")
     _drain_optical(window, app)
     assert not window.tree.isVisible()
-    assert len(window.machine_qrs) == 16
+    assert len(window.machine_qrs) == 32
     assert len(window._optical_payloads) == 3
     assert window._optical_header_payload is not None
     assert window._optical_burst is False
@@ -85,14 +85,14 @@ def test_qr_pixmap_cache_is_bounded_and_keeps_complete_burst_page(tmp_path):
         assert "qr-0" not in window._optical_pixmaps
         assert all(f"qr-{index}" in window._optical_pixmaps
                    for index in range(84, 100))
-        # A tight byte budget must not evict the 16 symbols that can be
+        # A tight byte budget must not evict the 32 symbols that can be
         # simultaneously displayed on a single HDMI burst page.
         window._OPTICAL_PIXMAP_CACHE_BYTES = 200
         for index in range(100, 145):
             window._cache_optical_pixmap(f"qr-{index}", pixmap)
         assert len(window._optical_pixmaps) == window._OPTICAL_BURST_SLOTS
         assert all(f"qr-{index}" in window._optical_pixmaps
-                   for index in range(129, 145))
+                   for index in range(113, 145))
     finally:
         window.close()
         app.processEvents()
@@ -119,11 +119,11 @@ def test_machine_mode_reuses_cached_qr_pixmaps(tmp_path):
 
 
 
-def test_optical_burst_pads_final_page_to_all_16_visible_slots(tmp_path):
+def test_optical_burst_pads_final_page_to_all_32_visible_slots(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
     window.show(); app.processEvents()
-    window._optical_payloads = [f"payload-{index}" for index in range(18)]
+    window._optical_payloads = [f"payload-{index}" for index in range(40)]
     window._optical_burst = True
     window._optical_page = 1
     window._render_optical_page()
@@ -150,7 +150,7 @@ def test_five_chunk_result_enters_single_page_burst_with_redundancy(tmp_path, mo
     assert window._optical_burst is True
     assert window._optical_timer.isActive() is False
     assert len(window._optical_payloads) == 5
-    assert sum(1 for label in window.machine_qrs if label.pixmap() and not label.pixmap().isNull()) == 16
+    assert sum(1 for label in window.machine_qrs if label.pixmap() and not label.pixmap().isNull()) == 32
     window.close(); app.processEvents()
 
 def test_optical_recovery_renders_original_packets_without_nested_envelope(tmp_path):
@@ -230,24 +230,24 @@ def test_burst_header_remains_visible_on_every_page(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
     window.show(); app.processEvents()
-    window._optical_payloads = [f"payload-{index}" for index in range(31)]
+    window._optical_payloads = [f"payload-{index}" for index in range(65)]
     window._optical_header_payload = '{"p":"EC2H","s":"QPLAN","n":31}'
     window._optical_burst = True
 
     window._optical_page = 0
     slots, page_count, start, data_slots, include_header = window._optical_page_plan()
-    assert slots == 16
+    assert slots == 32
     assert page_count == 3
     assert start == 0
-    assert data_slots == 15
+    assert data_slots == 31
     assert include_header is True
 
     window._optical_page = 1
     slots, page_count, start, data_slots, include_header = window._optical_page_plan()
-    assert slots == 16
+    assert slots == 32
     assert page_count == 3
-    assert start == 15
-    assert data_slots == 15
+    assert start == 31
+    assert data_slots == 31
     assert include_header is True
     window.close(); app.processEvents()
 
@@ -420,8 +420,12 @@ def test_optical_transport_controls_are_explicit_and_drive_timer(tmp_path):
 
 
 def test_machine_mode_large_result_broadcast_is_one_page():
-    assert MainWindow._OPTICAL_BROADCAST_MAX_CHUNKS == 15
-    assert MainWindow._OPTICAL_BURST_SLOTS == 16
+    assert MainWindow._OPTICAL_BROADCAST_MAX_CHUNKS == 31
+    assert MainWindow._OPTICAL_BURST_SLOTS == 32
+    assert MainWindow._OPTICAL_BURST_COLUMNS == 8
+    assert MainWindow._burst_qr_size_for_screen(1920, 1080) == 210
+    assert 8 * 210 + 7 * 4 <= 1920 - 160
+    assert 4 * 210 + 3 * 4 <= 1080 - 200
 
 
 
@@ -487,9 +491,10 @@ def test_optical_qr_size_switches_between_compact_and_burst(tmp_path):
     )
 
     window._set_optical_burst(True)
+    available = window.screen().availableGeometry()
+    burst_side = window._burst_qr_size_for_screen(available.width(), available.height())
     assert all(
-        label.width() == window._OPTICAL_BURST_QR_SIZE
-        and label.height() == window._OPTICAL_BURST_QR_SIZE
+        label.width() == burst_side and label.height() == burst_side
         for label in window.machine_qrs
     )
     window.close(); app.processEvents()

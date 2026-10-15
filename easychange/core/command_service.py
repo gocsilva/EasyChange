@@ -3528,7 +3528,7 @@ class CommandService:
                     "capability_manifest": manifest,
                     "capabilities": {"workspace": True, "git": "GIT" in self.workspace.adapters,
                     "build_test": self.workspace.adapters, "index": True, "symbols": True,
-                    "ai_machine": {"optical_protocol": "EC2", "qr_slots": 16, "chunked_results": True,
+                    "ai_machine": {"optical_protocol": "EC2", "qr_slots": 32, "chunked_results": True,
                                    "optical_burst": True, "composite_study": True, "read_many": True,
                                    "mass_discovery": True, "mass_discovery_max_terms": 32,
                                    "cold_discovery": "single-git-grep-multi-pattern",

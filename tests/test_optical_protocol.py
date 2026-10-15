@@ -686,8 +686,8 @@ def test_ec2_does_not_erase_boolean_vs_integer_differences():
 
     result={
         "ok":True,"sequence":"QTYPESTRICT1",
-        "data":{"results":[{"value":1,"nested":[False,2]}],
-                "primary":{"value":True,"nested":[0,2]}}
+        "data":{"results":[{"value":1,"nested":[0,2]}],
+                "primary":{"value":True,"nested":[False,2]}}
     }
     # Python compares True == 1 and False == 0. The wire format must not.
     assert _compact_transport_value(result) is result

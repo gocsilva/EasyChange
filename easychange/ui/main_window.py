@@ -63,29 +63,28 @@ def _direct_recovery_optical_payloads(result) -> list[str] | None:
 
 
 class MainWindow(QMainWindow):
-    # Small results keep the editor visible. Large results temporarily turn
-    # the HDMI surface into a reliable 4x4 optical modem. Physical HDMI testing
-    # showed 16 larger cells outperforms 32 dense cells because decode success
-    # matters more than theoretical QR count.
+    # Full-HD HDMI landscape: eight columns by four rows, each QR still
+    # up to 210 logical pixels. No dense 32-cell reduction to tiny QRs.
+    # The optical reader uses QR contours rather than fixed pixel positions.
     _OPTICAL_NORMAL_SLOTS = 4
-    _OPTICAL_BURST_SLOTS = 16
+    _OPTICAL_BURST_SLOTS = 32
     _OPTICAL_PIXMAP_CACHE_ENTRIES = 48
     _OPTICAL_PIXMAP_CACHE_BYTES = 32 * 1024 * 1024
-    _OPTICAL_BURST_COLUMNS = 4
+    _OPTICAL_BURST_COLUMNS = 8
     _OPTICAL_COMPACT_QR_SIZE = 220
-    _OPTICAL_BURST_QR_SIZE = 160
+    _OPTICAL_BURST_QR_SIZE = 210  # maximum per-symbol side; scale down on smaller DPI-adjusted desktops
     # A burst page must remain visible for more than two typical HDMI capture
     # periods. This reduces missed pages under paint/capture/decode jitter.
     _OPTICAL_BURST_INTERVAL_MS = 900
-    # Bound the initial optical broadcast to one 4x4 page: one EC2H header
-    # plus up to 15 data packets. Large results are durable in ResultStore and
+    # Bound the initial optical broadcast to one 8x4 page: one EC2H header
+    # plus up to 31 data packets. Large results are durable in ResultStore and
     # MCP switches to result_meta/result_chunks after this first page. Rotating
     # a second initial page only added ~1 dwell interval and more QR decode work
     # before the same durable handoff.
-    _OPTICAL_BROADCAST_MAX_CHUNKS = 15
+    _OPTICAL_BROADCAST_MAX_CHUNKS = 31
     _OPTICAL_OVERFLOW_BROADCAST_CHUNKS = 3
     # More than one 4-QR row should not rotate in compact mode.
-    # Switch to the 16-slot canvas so 5-16 chunks are visible simultaneously
+    # Switch to the 32-slot canvas so 5-32 chunks are visible simultaneously
     # and duplicated padding adds optical redundancy.
     _OPTICAL_BURST_THRESHOLD = 4
 
@@ -732,21 +731,39 @@ class MainWindow(QMainWindow):
                 self.output.setPlainText(f"ERROR: {exc}")
         self.focus_command()
 
+    @classmethod
+    def _burst_qr_size_for_screen(cls, screen_width: int, screen_height: int) -> int:
+        """Largest uniform square fitting an 8x4 QR grid on a logical display.
+
+        Reserve 200 logical pixels vertically for the command/controls/header
+        and 160 horizontally for window chrome. The QR cells remain >=160
+        on small screens to preserve minimum decode legibility.
+        """
+        side_by_width = (max(0, int(screen_width) - 160) - 7 * 4) // 8
+        side_by_height = (max(0, int(screen_height) - 200) - 3 * 4) // 4
+        return max(160, min(cls._OPTICAL_BURST_QR_SIZE, side_by_width, side_by_height))
+
     def _set_optical_burst(self, enabled: bool) -> None:
         enabled = bool(enabled and self._machine)
         self._optical_burst = enabled
+        screen = self.screen()
+        available = screen.availableGeometry() if screen is not None else None
         qr_size = (
-            self._OPTICAL_BURST_QR_SIZE
-            if enabled
+            self._burst_qr_size_for_screen(available.width(), available.height())
+            if enabled and available is not None
+            else self._OPTICAL_BURST_QR_SIZE if enabled
             else self._OPTICAL_COMPACT_QR_SIZE
         )
+        if any(label.width() != qr_size or label.height() != qr_size for label in self.machine_qrs):
+            # Old-size pixmaps must never be reused after a DPI/mode change.
+            self._optical_pixmaps.clear()
         for label in self.machine_qrs:
             if label.width() != qr_size or label.height() != qr_size:
                 label.setFixedSize(qr_size, qr_size)
         if enabled:
             self.split.setVisible(False)
             self.output.setVisible(False)
-            self.result_panel.setMinimumHeight(660)
+            self.result_panel.setMinimumHeight(qr_size * 4 + 3 * 4 + 16)
             self.result_panel.setMaximumHeight(16777215)
             # Capture p95 is ~200ms on the physical HDMI path. Keep every
             # page visible for >2 capture periods so repaint/capture/QR decode
@@ -976,6 +993,13 @@ class MainWindow(QMainWindow):
                 self._optical_render_pending = None
                 self._optical_payloads = []
                 self._optical_timer.stop()
+                # A pending bundle from the previous render generation is no
+                # longer deliverable. Release it so the next optical page
+                # does not wait forever on an orphaned encoding Future.
+                previous = self._optical_encode_future
+                if previous is not None and not previous.done():
+                    previous.cancel()
+                self._optical_encode_future = None
                 self._set_optical_burst(False)
                 self.optical_status.setText(f"EC2 RENDER ERROR: {type(exc).__name__}")
                 return
@@ -999,9 +1023,11 @@ class MainWindow(QMainWindow):
             pixels, width, height, width, QImage.Format.Format_Grayscale8
         ).copy()
         label = self.machine_qrs[0]
-        scale = max(1, min(label.width() // width, label.height() // height))
+        # Version-dependent QR matrices previously produced variable actual
+        # pixmap sizes inside equal labels. Uniform maximum-size squares with
+        # nearest-neighbor scaling stabilize contour/slot geometry.
         return QPixmap.fromImage(image).scaled(
-            width * scale, height * scale,
+            label.width(), label.height(),
             Qt.AspectRatioMode.IgnoreAspectRatio,
             Qt.TransformationMode.FastTransformation,
         )
