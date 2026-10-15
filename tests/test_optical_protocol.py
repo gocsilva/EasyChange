@@ -623,6 +623,7 @@ def test_adaptive_chunk_sizing_reduces_small_payload_chunk_count():
     )
     adaptive = encode_result_chunks(result)
     fixed = encode_result_chunks(result, chunk_chars=180)
+    assert adaptive_chunk_chars(600) == 200
     assert adaptive_chunk_chars(1000) == 260
     assert adaptive_chunk_chars(3000) == 220
     assert adaptive_chunk_chars(8000) == 180
