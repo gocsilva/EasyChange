@@ -240,8 +240,13 @@ class MainWindow(QMainWindow):
         self._optical_burst = False
         self._optical_render_generation = 0
         self._optical_render_pending: dict | None = None
+        # A running QR encoder Future cannot be cancelled. With one worker,
+        # a stale/large result blocks the current command's EC2 payload until
+        # the old work completes, leaving the previous QR page visible.
+        # Two bounded workers let the latest result encode independently;
+        # _optical_render_generation already drops stale completions.
         self._optical_encode_executor = ThreadPoolExecutor(
-            max_workers=1,
+            max_workers=2,
             thread_name_prefix="easychange-ec2",
         )
         self._optical_encode_future = None
