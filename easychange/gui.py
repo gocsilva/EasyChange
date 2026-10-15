@@ -4,11 +4,12 @@ import argparse
 from collections.abc import Sequence
 
 from easychange.ui.main_window import run
+from easychange.ui.recent_project import last_project
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("workspace", nargs="?", default=".")
+    parser.add_argument("workspace", nargs="?", default=None)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--machine",
@@ -39,7 +40,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         machine_mode = False
     else:
         machine_mode = None
-    return run(args.workspace, machine_mode=machine_mode, hid_mode=args.hid)
+    return run(args.workspace if args.workspace is not None else (last_project() or "."), machine_mode=machine_mode, hid_mode=args.hid)
 
 
 if __name__ == "__main__":
