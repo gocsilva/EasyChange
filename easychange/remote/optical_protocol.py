@@ -223,8 +223,13 @@ def _encode_raw(value: dict[str, Any]) -> tuple[bytes, bytes, str]:
 
 
 def adaptive_chunk_chars(token_chars: int) -> int:
-    """Conservative QR chunk sizing: denser only for small/medium payloads."""
+    """Keep compact EC2 QR symbols legible without adding a fifth cell."""
     size = max(0, int(token_chars))
+    # At most four packets fit the compact row. Smaller QR versions preserve
+    # module edges better after Windows DPI and HDMI resampling; <=800 token
+    # chars still fits in the existing compact row with 200-char fragments.
+    if size <= 800:
+        return 200
     if size <= 1200:
         return 260
     if size <= 4000:
