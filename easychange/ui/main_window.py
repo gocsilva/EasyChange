@@ -71,7 +71,8 @@ class MainWindow(QMainWindow):
     _OPTICAL_PIXMAP_CACHE_ENTRIES = 48
     _OPTICAL_PIXMAP_CACHE_BYTES = 32 * 1024 * 1024
     _OPTICAL_BURST_COLUMNS = 8
-    _OPTICAL_COMPACT_QR_SIZE = 220
+    # Larger modules improve dense compact EC2 readability after HDMI scaling.
+    _OPTICAL_COMPACT_QR_SIZE = 260
     _OPTICAL_BURST_QR_SIZE = 210  # maximum per-symbol side; scale down on smaller DPI-adjusted desktops
     # A burst page must remain visible for more than two typical HDMI capture
     # periods. This reduces missed pages under paint/capture/decode jitter.
