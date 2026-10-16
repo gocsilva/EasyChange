@@ -740,16 +740,27 @@ class CommandService:
             self._persist_state()
 
         try:
-            result = (
-                self._execute_structured(
+            if structured is not None:
+                result = self._execute_structured(
                     structured,
                     persist=False,
                     sequence=sequence,
                     external_env=external_env,
                 )
-                if structured is not None
-                else self.execute(command)
-            )
+            elif command.casefold().startswith(":read "):
+                # The sequenced read persists RUNNING before dispatch and DONE
+                # after its durable result. Executing the native read through
+                # the generic wrapper adds an unnecessary third session.json
+                # save before the GUI can display the first QR response.
+                tokens = self.parser.parse(command)
+                if len(tokens) == 4 and tokens[0].lstrip(":").casefold() == "read":
+                    result = self.execute_tokens(
+                        tokens[0], tokens[1:], raw=command, persist=False
+                    )
+                else:
+                    result = self.execute(command)
+            else:
+                result = self.execute(command)
         except Exception as exc:
             # A catastrophic exception during a mutating transaction must be
             # converted into an explicit rollback receipt instead of UNKNOWN.
