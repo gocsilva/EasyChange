@@ -124,7 +124,7 @@ def ensure_gui(
         log_handle.flush()
         process = popen_factory(
             [str(python if python.exists() else pythonw),
-             "-m", "easychange.gui", ".", "--human"],
+             "-m", "easychange.gui", "--human"],
             cwd=str(root),
             stdin=subprocess.DEVNULL,
             stdout=log_handle,
