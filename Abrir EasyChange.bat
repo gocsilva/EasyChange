@@ -18,7 +18,7 @@ rem IMPORTANT: %~dp0 ends with a backslash. Passing it quoted as the last
 rem character of a Windows argv value can escape/merge the closing quote,
 rem causing "--machine --hid" to become part of the workspace path.
 rem pushd already places us at the workspace, so pass "." as a separate argv.
-"%EASYCHANGE_PYTHON%" -m easychange.gui "." --machine --hid
+"%EASYCHANGE_PYTHON%" -m easychange.gui --machine --hid
 set "EASYCHANGE_EXIT=%ERRORLEVEL%"
 popd
 exit /b %EASYCHANGE_EXIT%
