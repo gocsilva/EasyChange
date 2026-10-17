@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QGridLayout
 from easychange.core.command_service import CommandService
 from easychange.core.maintenance_service import MaintenanceService
 from easychange.core.workspace import Workspace
+from easychange.ui.recent_project import remember_project
 from easychange.ui.editor import BasicHighlighter, CodeEditor
 
 
@@ -408,6 +409,10 @@ class MainWindow(QMainWindow):
             self._load_human_text()
             self.setWindowTitle(f"EasyChange — {new_workspace.name}")
             self._refresh_header()
+            try:
+                remember_project(selected_path)
+            except (OSError, ValueError):
+                pass
             self._run_command(":remote")
         except (OSError, ValueError, PermissionError) as exc:
             QMessageBox.critical(self, "Não foi possível abrir o projeto", str(exc))
@@ -1178,6 +1183,10 @@ def run(workspace_path: str = ".", *, machine_mode: bool | None = None, hid_mode
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Workspace.open(Path(workspace_path)), machine_mode=machine_mode, hid_mode=hid_mode)
     window.show()
+    try:
+        remember_project(workspace_path)
+    except (OSError, ValueError):
+        pass
     if window._machine:
         QTimer.singleShot(0, window.focus_command)
     else:
