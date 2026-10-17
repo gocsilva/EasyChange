@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_primary_launcher_does_not_pass_trailing_backslash_root_as_workspace():
+def test_primary_launcher_restores_last_project():
     text = (ROOT / "Abrir EasyChange.bat").read_text(encoding="utf-8")
 
     assert 'pushd "%EASYCHANGE_ROOT%"' in text
@@ -36,3 +36,9 @@ def test_gui_cli_human_flag_is_explicit_and_mutually_exclusive():
     assert args.human is True
     assert args.machine is False
     assert args.hid is False
+
+
+def test_gui_cli_without_workspace_can_restore_recent_project():
+    from easychange.gui import build_parser
+    args = build_parser().parse_args(["--human"])
+    assert args.workspace is None
