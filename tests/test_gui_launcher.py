@@ -66,7 +66,7 @@ def test_gui_launcher_waits_for_real_window_and_focuses_it(tmp_path, monkeypatch
     assert result["action"] == "launched"
     assert result["hwnd"] == 9876
     assert result["pid"] == 4321
-    assert captured["argv"][-3:] == ["easychange.gui", ".", "--human"]
+    assert captured["argv"][-3:] == ["-m", "easychange.gui", "--human"]
     assert captured["focused"] == 9876
 
 
