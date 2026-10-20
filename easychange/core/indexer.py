@@ -197,7 +197,11 @@ class Indexer:
         skipped = (relative, size, mtime_ns, "", None, [])
         try:
             if trusted_root is not None:
-                root = trusted_root.resolve()
+                # Callers pass the canonical root computed once per scan.
+                # Resolving it again for each file turns large refreshes into
+                # repeated filesystem metadata work without strengthening the
+                # per-candidate symlink and containment checks below.
+                root = trusted_root
                 # The directory walker checked this earlier, but a file or
                 # ancestor may have become a symlink while waiting for a read
                 # worker. Check immediately before opening the candidate.
@@ -354,11 +358,12 @@ class Indexer:
         self._sync_protected_paths()
         target = self.root / Path(relative)
         try:
+            trusted_root = self.root.resolve()
             # A symlink within the workspace is also handled by the regular
             # scan, which deliberately excludes links to avoid duplicate or
             # externally remapped source records.
             if (self._has_symlink_component(relative) or
-                    not target.resolve().is_relative_to(self.root.resolve())):
+                    not target.resolve().is_relative_to(trusted_root)):
                 raise ValueError("INVALID_PROTECTED_INDEX_PATH")
         except (OSError, RuntimeError) as exc:
             raise ValueError("INVALID_PROTECTED_INDEX_PATH") from exc
@@ -373,7 +378,7 @@ class Indexer:
                     metadata = target.stat()
                     candidate = self._read_candidate(
                         (target, relative, metadata.st_size, metadata.st_mtime_ns),
-                        trusted_root=self.root,
+                        trusted_root=trusted_root,
                     )
             except (OSError, RuntimeError):
                 candidate = None
