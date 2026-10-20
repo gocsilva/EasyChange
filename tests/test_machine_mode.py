@@ -186,6 +186,8 @@ def test_optical_recovery_renders_original_packets_without_nested_envelope(tmp_p
     assert all(item["s"] == "QORIGINAL1" for item in decoded)
     assert all(item["s"] != "QRECOVERY1" for item in decoded)
     assert window._optical_header_payload is None
+    # Duplicate original QR packets only in free physical display cells.
+    assert sum(bool(label.pixmap() and not label.pixmap().isNull()) for label in window.machine_qrs) == window._OPTICAL_NORMAL_SLOTS
     window.close()
     app.processEvents()
 

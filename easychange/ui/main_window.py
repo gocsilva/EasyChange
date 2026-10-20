@@ -874,6 +874,7 @@ class MainWindow(QMainWindow):
             return
 
         direct_payloads = _direct_recovery_optical_payloads(result)
+        self._optical_direct_recovery = direct_payloads is not None
         if direct_payloads is not None:
             self._optical_encode_future = None
             self._optical_payloads = direct_payloads
@@ -1028,7 +1029,9 @@ class MainWindow(QMainWindow):
         payloads = self._optical_payloads[start:start + data_slots]
         if include_header and self._optical_header_payload:
             payloads = [self._optical_header_payload, *payloads]
-        if self._optical_burst and payloads and len(payloads) < slots:
+        if (self._optical_burst or getattr(self, '_optical_direct_recovery', False)) and payloads and len(payloads) < slots:
+            # Redundancy is display-only, preserving unique EC2 indices and
+            # the transport's existing logical fragment contract.
             original = list(payloads)
             index = 0
             while len(payloads) < slots:
