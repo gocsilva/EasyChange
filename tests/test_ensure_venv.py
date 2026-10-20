@@ -173,3 +173,9 @@ def test_updater_invokes_venv_helper_instead_of_git_diff_heuristic():
     assert "if not exist" not in updater or ".venv" not in updater.split("if not exist", 1)[-1]
     assert ":python_error" in updater
     assert ":dependency_error" in updater
+    assert "git status --porcelain --untracked-files=all" in updater
+    assert "git branch --show-current" in updater
+    assert "git merge-base --is-ancestor" in updater
+    assert "git merge --ff-only origin/main" in updater
+    assert 'git reset --keep "%OLD_VERSION%"' in updater
+    assert "git reset --hard" not in updater

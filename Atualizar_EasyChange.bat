@@ -17,12 +17,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem Nao sobrescreve alteracoes locais rastreadas.
-git diff --quiet
-if errorlevel 1 goto :local_changes
+rem Refuse every local change, including staged and untracked files.
+for /f "delims=" %%S in ('git status --porcelain --untracked-files=all') do set "LOCAL_CHANGE=1"
+if defined LOCAL_CHANGE goto :local_changes
 
-git diff --cached --quiet
-if errorlevel 1 goto :local_changes
+for /f "delims=" %%B in ('git branch --show-current') do set "CURRENT_BRANCH=%%B"
+if /i not "%CURRENT_BRANCH%"=="main" goto :wrong_branch
 
 for /f %%V in ('git rev-parse HEAD') do set "OLD_VERSION=%%V"
 
@@ -30,10 +30,10 @@ echo Atualizando EasyChange pela branch main...
 git fetch --prune origin main
 if errorlevel 1 goto :git_error
 
-git switch main
-if errorlevel 1 goto :git_error
+git merge-base --is-ancestor "%OLD_VERSION%" origin/main
+if errorlevel 1 goto :diverged_history
 
-git pull --ff-only origin main
+git merge --ff-only origin/main
 if errorlevel 1 goto :git_error
 
 for /f %%V in ('git rev-parse HEAD') do set "NEW_VERSION=%%V"
@@ -73,33 +73,70 @@ if defined BOOTSTRAP_PY (
     if errorlevel 1 goto :dependency_error
 )
 
+"%VENV_PY%" -c "from easychange import __version__; from easychange.remote.optical_protocol import PROTOCOL; assert PROTOCOL == 'EC2'; print('EASYCHANGE_ACTIVE=' + __version__ + ' PROTOCOL=' + PROTOCOL)"
+if errorlevel 1 goto :dependency_error
+
 echo.
 echo EasyChange atualizado com sucesso. Versao Git: %VERSION%
 exit /b 0
 
 :local_changes
 echo.
-echo [ERRO] Existem alteracoes locais rastreadas.
+echo [ERRO] Existem alteracoes locais, staged ou nao rastreadas.
 echo O atualizador nao vai sobrescrever seu trabalho.
-echo Faca commit/stash antes de atualizar.
+echo Salve seu trabalho e execute a atualizacao novamente.
 pause
 exit /b 2
 
+:wrong_branch
+echo.
+echo [ERRO] O atualizador exige a branch main e nao vai trocar sua branch ativa.
+pause
+exit /b 2
+
+:diverged_history
+echo.
+echo [ERRO] A main local nao e ancestral da origin/main; atualizacao recusada.
+echo O atualizador nao vai descartar commits locais nem reescrever historico.
+pause
+exit /b 3
+
 :python_error
 echo.
-echo [ERRO] O Git foi atualizado, mas nenhum Python 3.10+ funcional foi encontrado.
+echo [ERRO] Nenhum Python 3.10+ funcional foi encontrado.
 echo Instale/corrija o Python e execute Atualizar_EasyChange.bat novamente.
 echo A .venv existente nao foi apagada.
+call :rollback_update
 pause
 exit /b 5
 
 :dependency_error
 echo.
-echo [ERRO] O Git foi atualizado, mas a criacao/reparo/sincronizacao da .venv falhou.
-echo A atualizacao de codigo foi preservada e nenhum arquivo de projeto foi apagado.
-echo Versao Git atual: %VERSION%
+echo [ERRO] A criacao/reparo/sincronizacao da .venv ou a verificacao do protocolo falhou.
+call :rollback_update
 pause
 exit /b 4
+
+:rollback_update
+git status --porcelain --untracked-files=all >nul
+if errorlevel 1 (
+    echo [AVISO] Nao foi possivel verificar o estado para rollback; codigo permanece em %VERSION%.
+    exit /b 0
+)
+for /f "delims=" %%S in ('git status --porcelain --untracked-files=all') do set "ROLLBACK_BLOCKED=1"
+if defined ROLLBACK_BLOCKED (
+    echo [AVISO] Arquivos locais mudaram durante a atualizacao; rollback recusado para preserva-los.
+    echo Versao Git atual: %VERSION%
+    exit /b 0
+)
+git reset --keep "%OLD_VERSION%"
+if errorlevel 1 (
+    echo [AVISO] Rollback Git falhou; codigo permanece em %VERSION%.
+    exit /b 0
+)
+echo Rollback Git concluido para %OLD_VERSION%.
+echo Dependencias da .venv nao sao revertidas automaticamente; execute o atualizador apos corrigir o erro.
+exit /b 0
 
 :git_error
 echo.
