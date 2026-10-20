@@ -43,8 +43,12 @@ def test_large_lock_fingerprint_streams_without_loading_whole_file(tmp_path, mon
     for manifest in ensure_venv.dependency_manifests(tmp_path):
         expected.update(manifest.relative_to(tmp_path).as_posix().encode("utf-8"))
         expected.update(b"\0")
-        expected.update(payload if manifest==lock else
-                        manifest.read_text(encoding="utf-8").encode("utf-8"))
+        if manifest == lock:
+            expected.update(payload)
+        else:
+            with manifest.open("rb") as stream:
+                for block in iter(lambda: stream.read(128 * 1024), b""):
+                    expected.update(block)
         expected.update(b"\0")
 
     def unbounded_read(_path):
