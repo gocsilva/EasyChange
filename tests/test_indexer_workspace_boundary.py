@@ -9,11 +9,6 @@ import pytest
 from easychange.core.indexer import Indexer
 
 
-@pytest.mark.parametrize("name", [
-    "../private.py", "nested/../../private.py", "/tmp/outside.py",
-    r"C:\Users\someone\secret.cs", "nested/../secret.py",
-    "./", "a//b.py",
-])
 def test_case_variant_protection_is_durable_and_scrubs_legacy_rows(tmp_path):
     root=tmp_path/"project"
     root.mkdir()
@@ -309,6 +304,11 @@ def test_corrupt_persisted_protection_metadata_fails_closed(tmp_path):
         Indexer(root)
 
 
+@pytest.mark.parametrize("name", [
+    "../private.py", "nested/../../private.py", "/tmp/outside.py",
+    r"C:\Users\someone\secret.cs", "nested/../secret.py",
+    "./", "a//b.py",
+])
 def test_update_path_rejects_absolute_or_traversing_names(tmp_path, name):
     project=tmp_path/"project"
     project.mkdir()

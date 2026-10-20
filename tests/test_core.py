@@ -378,12 +378,16 @@ def test_dotnet_adapter_uses_no_restore_when_assets_exist(tmp_path):
     (tmp_path / "Example.csproj").write_text("<Project />", encoding="utf-8")
     workspace = Workspace.open(tmp_path)
     adapter = DotnetAdapter()
-    assert adapter.build(workspace) == ["dotnet", "build"]
+    assert adapter.build(workspace) == ["dotnet", "build", "Example.csproj"]
     assets = tmp_path / "obj" / "project.assets.json"
     assets.parent.mkdir()
     assets.write_text("{}", encoding="utf-8")
-    assert adapter.build(workspace) == ["dotnet", "build", "--no-restore"]
-    assert adapter.test(workspace) == ["dotnet", "test", "--no-restore"]
+    assert adapter.build(workspace) == [
+        "dotnet", "build", "Example.csproj", "--no-restore"
+    ]
+    assert adapter.test(workspace) == [
+        "dotnet", "test", "Example.csproj", "--no-restore"
+    ]
 
 
 def test_large_journal_snapshots_are_content_addressed_and_restart_safe(tmp_path):
@@ -998,15 +1002,15 @@ def test_file_write_reads_existing_file_only_once(tmp_path, monkeypatch):
     service = FileService(Workspace.open(tmp_path))
     service.remember("one.txt", replace=True)
 
-    original = Path.read_bytes
+    original = Path.open
     calls = {"target": 0}
 
-    def counted_read_bytes(path):
-        if path == target:
+    def counted_open(path, mode="r", *args, **kwargs):
+        if path == target and "r" in mode:
             calls["target"] += 1
-        return original(path)
+        return original(path, mode, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    monkeypatch.setattr(Path, "open", counted_open)
     result = service.write("one.txt", "after\n")
     assert result["created"] is False
     # One baseline read plus one mandatory post-write hash verification read.

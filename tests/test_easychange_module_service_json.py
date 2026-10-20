@@ -132,6 +132,10 @@ def test_unicode_encoder_budget_never_encodes_huge_intermediate_fragment():
     codepoint_windows=[]
 
     class ObservedText(str):
+        def __getitem__(self, key):
+            value=super().__getitem__(key)
+            return ObservedText(value) if isinstance(value,str) else value
+
         def encode(self,encoding="utf-8",errors="strict"):
             codepoint_windows.append(len(self))
             assert len(self)<=4096

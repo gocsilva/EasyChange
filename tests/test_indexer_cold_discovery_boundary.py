@@ -104,7 +104,7 @@ def test_cold_git_output_has_bounded_disk_spool_and_explicit_truncation(
     called.assert_called_once()
     assert report["truncated"] is True
     assert report["files"] == ["source.py"]
-    assert len(report["by_term"]["CANARY"]["references"]) == 1
+    assert len(report["by_term"]["CANARY"]["definitions"]) == 1
 
 
 def test_cold_git_bounds_number_of_retained_match_rows(tmp_path, monkeypatch):
@@ -123,7 +123,7 @@ def test_cold_git_bounds_number_of_retained_match_rows(tmp_path, monkeypatch):
                    ["git", "grep"], 0, matches, "")):
         report = index.discover_many(["CANARY"])
     assert report["truncated"] is True
-    assert len(report["by_term"]["CANARY"]["references"]) == 2
+    assert len(report["by_term"]["CANARY"]["definitions"]) == 2
     assert report["by_term"]["CANARY"]["occurrences"] == 2
 
 
