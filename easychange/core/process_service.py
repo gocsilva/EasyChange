@@ -753,6 +753,9 @@ class ProcessService:
             else self.root / f"{job_id}.{('out' if stream == 'stdout' else 'err')}"
         )
         redact_values = item.redact_values if item is not None else ()
+        terminal = bool(
+            current and current.get("state") not in {"QUEUED", "RUNNING"}
+        )
         if path.exists():
             try:
                 with path.open("rb") as handle:
@@ -779,7 +782,7 @@ class ProcessService:
                 "complete": complete,
                 "text": text,
                 "durable_file": True,
-                "terminal": bool(current and current.get("state") != "RUNNING"),
+                "terminal": terminal,
             }
 
         # Compatibility fallback for old durable job records that only retained a tail.
@@ -801,7 +804,7 @@ class ProcessService:
             "text": chunk.decode("utf-8", errors="replace"),
             "durable_file": False,
             "tail_fallback": True,
-            "terminal": bool(current and current.get("state") != "RUNNING"),
+            "terminal": terminal,
         }
 
     def job_tail(
