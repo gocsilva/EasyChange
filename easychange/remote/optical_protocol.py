@@ -8,6 +8,7 @@ import json
 import math
 import zlib
 from collections.abc import Collection
+from dataclasses import dataclass
 from typing import Any
 
 PROTOCOL = "EC2"
@@ -25,6 +26,41 @@ MAX_EC2_PACKET_SET_CHARS = 64 * 1024 * 1024
 MAX_EC2_TOKEN_CHARS = 16 * 1024 * 1024
 MAX_EC2_COMPRESSED_BYTES = 12 * 1024 * 1024
 MAX_EC2_RESULT_BYTES = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedOpticalResult:
+    """Immutable EC2 source reused while selectively recovering one result."""
+
+    token: str
+    chunk_chars: int
+    total: int
+    digest: str
+    crc: str
+    sequence: str
+    literal_marker: bool
+
+    @property
+    def cache_bytes(self) -> int:
+        return len(self.token) + 128
+
+
+def prepare_optical_result(
+    result: Any, *, chunk_chars: int | None = None
+) -> PreparedOpticalResult:
+    """Serialize/compress a result once for one or more selective page reads."""
+    _value, _raw, token, size, total, digest, crc, sequence, literal_marker = (
+        _transport_components(result, chunk_chars=chunk_chars)
+    )
+    return PreparedOpticalResult(
+        token=token,
+        chunk_chars=size,
+        total=total,
+        digest=digest,
+        crc=crc,
+        sequence=sequence,
+        literal_marker=literal_marker,
+    )
 
 
 def valid_ec2_identity(packet: dict) -> bool:
@@ -395,6 +431,7 @@ def encode_result_chunks(
     chunk_chars: int | None = None,
     max_packets: int | None = None,
     indexes: list[int] | tuple[int, ...] | None = None,
+    prepared: PreparedOpticalResult | None = None,
 ) -> list[str]:
     """Encode only the EC2 packet window/indexes that are actually needed."""
     # Remote retransmission parameters can be invalid even for an otherwise
@@ -404,9 +441,19 @@ def encode_result_chunks(
             not isinstance(indexes,(list,tuple))
             or len(indexes)>MAX_EC2_PACKETS):
         raise ValueError("OPTICAL_CHUNK_INDEX_REQUEST_TOO_LARGE")
-    _value, _raw, token, size, total, digest, crc, sequence, literal_marker = _transport_components(
-        result, chunk_chars=chunk_chars
-    )
+    if prepared is None:
+        prepared = prepare_optical_result(result, chunk_chars=chunk_chars)
+    elif not isinstance(prepared, PreparedOpticalResult):
+        raise TypeError("prepared optical result required")
+    elif chunk_chars is not None and int(chunk_chars) != prepared.chunk_chars:
+        raise ValueError("prepared optical chunk size does not match request")
+    token = prepared.token
+    size = prepared.chunk_chars
+    total = prepared.total
+    digest = prepared.digest
+    crc = prepared.crc
+    sequence = prepared.sequence
+    literal_marker = prepared.literal_marker
     if indexes is None:
         materialized = total if max_packets is None else max(1, min(total, int(max_packets)))
         selected = list(range(materialized))

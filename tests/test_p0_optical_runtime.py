@@ -3,6 +3,7 @@ from __future__ import annotations
 import binascii
 import json
 
+from easychange.remote import optical_protocol
 from easychange.core.command_service import CommandService
 from easychange.core.process_service import ProcessService
 from easychange.core.result_store import DurableResultStore
@@ -51,6 +52,53 @@ def test_optical_chunks_returns_only_requested_indexes_with_crc(tmp_path):
             expected = f"{binascii.crc32(piece.encode('ascii')) & 0xffffffff:08x}"
             assert packet["x"] == expected
             assert data["chunk_crc32"][str(packet["i"])] == expected
+    finally:
+        service.close()
+
+
+def test_selective_optical_recovery_reuses_prepared_result(tmp_path, monkeypatch):
+    service = CommandService(Workspace.open(tmp_path))
+    try:
+        sequence = "QOPTICALCACHE1"
+        result = {
+            "ok": True,
+            "command": "read",
+            "data": {"text": "public source line\n" * 8000},
+            "error": None,
+            "code": None,
+            "command_id": "C-CACHE",
+            "duration_ms": 2,
+            "sequence": sequence,
+        }
+        service.result_store.mark_running(
+            sequence, "d" * 64, ":read sample.txt", mutation=False
+        )
+        service.result_store.complete(
+            sequence, "d" * 64, ":read sample.txt", result
+        )
+        original_prepare = optical_protocol.prepare_optical_result
+        calls = 0
+
+        def counted_prepare(value, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original_prepare(value, **kwargs)
+
+        monkeypatch.setattr(optical_protocol, "prepare_optical_result", counted_prepare)
+        responses = []
+        for index in (0, 1, 2):
+            responses.append(service._execute_structured({
+                "op": "operation",
+                "type": "optical_chunk",
+                "target_sequence": sequence,
+                "chunk_index": index,
+            }))
+
+        assert all(response.ok for response in responses)
+        assert [response.data["packet"]["i"] for response in responses] == [0, 1, 2]
+        assert calls == 1
+        assert len(service._optical_encoding_cache) == 1
+        assert sum(service._optical_encoding_cache_sizes.values()) <= 8 * 1024 * 1024
     finally:
         service.close()
 

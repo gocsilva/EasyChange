@@ -22,6 +22,7 @@ import secrets
 import binascii
 import hashlib
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -191,6 +192,14 @@ class CommandService:
         self._ec_result_cache_sizes: dict[str, int] = {}
         self._ec_result_cache_max_items = 8
         self._ec_result_cache_max_bytes = 8 * 1024 * 1024
+        # Selective EC2 retries commonly ask for different indexes of the same
+        # durable result. Keep only the compressed source token, with a strict
+        # byte bound, so retries do not repeat JSON serialization and zlib.
+        self._optical_encoding_cache: OrderedDict[str, object] = OrderedDict()
+        self._optical_encoding_cache_sizes: dict[str, int] = {}
+        self._optical_encoding_cache_max_items = 8
+        self._optical_encoding_cache_max_bytes = 8 * 1024 * 1024
+        self._optical_encoding_guard = threading.RLock()
         self.result_store = DurableResultStore(workspace.root_path / ".easychange" / "results")
         self.inbound_transfers = InboundCommandStore(
             workspace.root_path / ".easychange" / "inbound"
@@ -256,6 +265,10 @@ class CommandService:
                 "ec_result_cache_bytes": sum(self._ec_result_cache_sizes.values()),
                 "ec_result_cache_item_limit": self._ec_result_cache_max_items,
                 "ec_result_cache_byte_limit": self._ec_result_cache_max_bytes,
+                "optical_recovery_cache_items": len(self._optical_encoding_cache),
+                "optical_recovery_cache_bytes": sum(self._optical_encoding_cache_sizes.values()),
+                "optical_recovery_cache_item_limit": self._optical_encoding_cache_max_items,
+                "optical_recovery_cache_byte_limit": self._optical_encoding_cache_max_bytes,
                 "navigation_results": len(self.results),
                 "navigation_results_limit": 512,
             }
@@ -278,6 +291,10 @@ class CommandService:
                 "ec_result_cache_bytes": sum(self._ec_result_cache_sizes.values()),
                 "ec_result_cache_item_limit": self._ec_result_cache_max_items,
                 "ec_result_cache_byte_limit": self._ec_result_cache_max_bytes,
+                "optical_recovery_cache_items": len(self._optical_encoding_cache),
+                "optical_recovery_cache_bytes": sum(self._optical_encoding_cache_sizes.values()),
+                "optical_recovery_cache_item_limit": self._optical_encoding_cache_max_items,
+                "optical_recovery_cache_byte_limit": self._optical_encoding_cache_max_bytes,
                 "navigation_results": len(self.results),
                 "navigation_results_limit": 512,
             },
@@ -880,6 +897,55 @@ class CommandService:
                 break
             self._ec_result_cache.pop(oldest, None)
             self._ec_result_cache_sizes.pop(oldest, None)
+
+    def _optical_recovery_packets(
+        self,
+        sequence: str,
+        result: dict,
+        *,
+        indexes: list[int] | None = None,
+        max_packets: int | None = None,
+    ) -> list[str]:
+        from ..remote.optical_protocol import (
+            encode_result_chunks,
+            prepare_optical_result,
+        )
+
+        key = str(sequence)
+        with self._optical_encoding_guard:
+            prepared = self._optical_encoding_cache.get(key)
+            if prepared is None:
+                prepared = prepare_optical_result(result)
+                size = int(prepared.cache_bytes)
+                if size <= self._optical_encoding_cache_max_bytes:
+                    self._optical_encoding_cache[key] = prepared
+                    self._optical_encoding_cache_sizes[key] = size
+                    while (
+                        len(self._optical_encoding_cache)
+                        > self._optical_encoding_cache_max_items
+                        or sum(self._optical_encoding_cache_sizes.values())
+                        > self._optical_encoding_cache_max_bytes
+                    ):
+                        oldest = next(iter(self._optical_encoding_cache), None)
+                        if oldest is None:
+                            break
+                        self._optical_encoding_cache.pop(oldest, None)
+                        self._optical_encoding_cache_sizes.pop(oldest, None)
+                else:
+                    return encode_result_chunks(
+                        result,
+                        indexes=indexes,
+                        max_packets=max_packets,
+                        prepared=prepared,
+                    )
+            else:
+                self._optical_encoding_cache.move_to_end(key)
+            return encode_result_chunks(
+                result,
+                indexes=indexes,
+                max_packets=max_packets,
+                prepared=prepared,
+            )
 
     def _remember_journal_metadata(self, change: Change) -> None:
         self.journal.append(Change(
@@ -2053,10 +2119,11 @@ class CommandService:
                     if original_result is None:
                         data = None
                     else:
-                        from ..remote.optical_protocol import encode_result_chunks
                         if query_kind == "optical_meta":
                             first = json.loads(
-                                encode_result_chunks(original_result, max_packets=1)[0]
+                                self._optical_recovery_packets(
+                                    target_sequence, original_result, max_packets=1
+                                )[0]
                             )
                             data = {
                                 "target_sequence": target_sequence,
@@ -2082,8 +2149,8 @@ class CommandService:
                                         indexes.append(index)
                                 selected_packets = [
                                     json.loads(packet)
-                                    for packet in encode_result_chunks(
-                                        original_result, indexes=indexes
+                                    for packet in self._optical_recovery_packets(
+                                        target_sequence, original_result, indexes=indexes
                                     )
                                 ]
                                 data = {
@@ -2108,8 +2175,8 @@ class CommandService:
                                     raise ValueError("INVALID_CHUNK_INDEX")
                                 chunk_index = int(raw_index)
                                 packet = json.loads(
-                                    encode_result_chunks(
-                                        original_result, indexes=[chunk_index]
+                                    self._optical_recovery_packets(
+                                        target_sequence, original_result, indexes=[chunk_index]
                                     )[0]
                                 )
                                 data = {
