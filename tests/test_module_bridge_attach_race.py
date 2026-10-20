@@ -24,6 +24,11 @@ def test_delayed_attach_cannot_reinstall_bearer_after_concurrent_detach():
     def attaching():
         try:
             results.append(bridge.attach_hub(candidate,bridge.CANONICAL_MODULE_ID))
+        except RuntimeError as exc:
+            if str(exc) == "HUB_ATTACH_SUPERSEDED":
+                results.append({"superseded":True})
+            else:
+                failures.append(exc)
         except BaseException as exc:
             failures.append(exc)
 
@@ -37,8 +42,8 @@ def test_delayed_attach_cannot_reinstall_bearer_after_concurrent_detach():
             finished.set()
 
     with patch.object(bridge.MCPBridge,"peers",blocked_peers), \
-         patch.object(bridge,"_runtime_token",""), \
-         patch.object(bridge,"_runtime_detached",True):
+         patch.object(bridge,"_runtime_token",candidate), \
+         patch.object(bridge,"_runtime_detached",False):
         a=threading.Thread(target=attaching,daemon=True)
         b=threading.Thread(target=detaching,daemon=True)
         a.start()
@@ -46,18 +51,16 @@ def test_delayed_attach_cannot_reinstall_bearer_after_concurrent_detach():
             assert entered.wait(timeout=3), "attach did not begin"
             b.start()
             assert detach_attempted.wait(timeout=3)
-            # Detach must be queued behind the outstanding verification.
-            assert not finished.wait(timeout=.05)
+            # Revocation must not wait for the network verification.
+            assert finished.wait(timeout=.5)
+            assert results==[{"connected":False}]
         finally:
             release.set()
         a.join(timeout=3)
         b.join(timeout=3)
         assert not a.is_alive() and not b.is_alive()
         assert not failures, failures
-        assert results == [
-            {"connected":True,"id":bridge.CANONICAL_MODULE_ID},
-            {"connected":False},
-        ]
+        assert results == [{"connected":False},{"superseded":True}]
         assert bridge._runtime_token==""
         assert bridge._runtime_detached is True
         # Already-instantiated implicit bridges must remain revoked.
