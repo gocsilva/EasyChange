@@ -41,6 +41,7 @@ _runtime_state_epoch=0
 # Slow hub probes must not exhaust the standalone HTTP service's workers.
 _attach_probe_slots=threading.BoundedSemaphore(4)
 CANONICAL_MODULE_ID="easychange"
+MAX_HUB_JSON_NESTING=128
 _PEEK_LIMIT_PATHS=frozenset(
     "/v1/inbox/peek?limit="+str(n) for n in range(1,21))
 
@@ -60,10 +61,36 @@ def _hub_unique_fields(pairs):
     return result
 
 
+def _check_hub_json_nesting(raw):
+    """Bound container depth before json.loads, independent of Python version."""
+    depth=0
+    in_string=False
+    escaped=False
+    for unit in raw:
+        char=chr(unit) if isinstance(raw,(bytes,bytearray)) else unit
+        if in_string:
+            if escaped:
+                escaped=False
+            elif char=="\\":
+                escaped=True
+            elif char=='"':
+                in_string=False
+            continue
+        if char=='"':
+            in_string=True
+        elif char in "[{":
+            depth+=1
+            if depth>MAX_HUB_JSON_NESTING:
+                raise ValueError("MCP_HUB_JSON_NESTING_LIMIT")
+        elif char in "]}":
+            depth-=1
+
+
 def _decode_hub_response(raw):
     # Ambiguous accepted/retryable fields must never authorize replay of a
     # potentially mutating call, even when received from a local TCP port.
     try:
+        _check_hub_json_nesting(raw)
         return json.loads(raw,parse_constant=_finite_hub_json_number,
                           parse_float=_finite_hub_json_number,
                           object_pairs_hook=_hub_unique_fields)
@@ -286,6 +313,10 @@ class MCPBridge:
                 # A lone surrogate cannot be sent as UTF-8 JSON. Keep this
                 # a deterministic input error, never attempt network I/O.
                 raise ValueError("MCP_BUS_INVALID_UNICODE") from exc
+            except ValueError as exc:
+                if str(exc) == "Circular reference detected":
+                    raise ValueError("MCP_BUS_REQUEST_TOO_LARGE") from exc
+                raise
             payload=bytes(encoded)
             headers["Content-Type"]="application/json"
         req=Request(BUS+path,data=payload,method="POST" if payload is not None else "GET",headers=headers)
