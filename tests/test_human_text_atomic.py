@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import os
 import threading
 from unittest.mock import patch
 
@@ -76,6 +77,28 @@ def test_simultaneous_writers_use_unique_staging_paths(tmp_path):
     assert not list(service.root.glob(".*.tmp"))
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Win32 replace sharing violations")
+def test_atomic_write_retries_transient_windows_replace_failure(tmp_path):
+    target=tmp_path/"buffer.txt"
+    real_replace=human_module.os.replace
+    attempts=[]
+
+    def transient_once(source,destination):
+        attempts.append(1)
+        if len(attempts)==1:
+            error=PermissionError("temporary sharing violation")
+            error.winerror=5
+            raise error
+        return real_replace(source,destination)
+
+    with patch.object(human_module.os,"replace",side_effect=transient_once):
+        HumanTextService._atomic_write(target,b"atomic payload")
+
+    assert len(attempts)==2
+    assert target.read_bytes()==b"atomic payload"
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
 def test_failed_text_replace_preserves_existing_buffer(tmp_path):
     service=HumanTextService(tmp_path)
     service.save("old content")
@@ -134,20 +157,29 @@ def test_paginated_read_validates_utf8_boundary_on_open_file(tmp_path):
 
 def test_scan_rejects_atomic_replacement_during_hashing(tmp_path):
     from pathlib import Path
+    from types import SimpleNamespace
 
     service=HumanTextService(tmp_path)
     service.save("AAAA")
-    original_stat=Path.stat
-    checks=[]
-    def concurrent_swap(self,*args,**kwargs):
-        if self==service.path:
-            checks.append(1)
-            if len(checks)==2:
-                service._atomic_write(service.path,b"BBBB")
-        return original_stat(self,*args,**kwargs)
-    with patch.object(Path,"stat",concurrent_swap):
+    original_lstat=Path.lstat
+
+    def replaced_generation(path,*args,**kwargs):
+        current=original_lstat(path,*args,**kwargs)
+        if path==service.path:
+            return SimpleNamespace(
+                st_dev=current.st_dev,
+                st_ino=current.st_ino+1,
+                st_size=current.st_size,
+                st_mtime_ns=current.st_mtime_ns,
+                st_mode=current.st_mode,
+                st_nlink=current.st_nlink,
+            )
+        return current
+
+    with patch.object(Path,"lstat",replaced_generation):
         with pytest.raises(ValueError,match="HUMAN_TEXT_FILE_CHANGED_RETRY"):
             service._scan_info()
+    service._atomic_write(service.path,b"BBBB")
     assert service.load()=="BBBB"
     assert service.info()["sha256"]==hashlib.sha256(b"BBBB").hexdigest()
 
@@ -413,20 +445,28 @@ def test_human_text_matching_cached_metadata_never_trusts_symlink(tmp_path):
 
 def test_human_text_regular_file_swap_during_safe_open_is_retryable(tmp_path,monkeypatch):
     from pathlib import Path
+    from types import SimpleNamespace
 
     service=HumanTextService(tmp_path)
     service.save("old content")
     actual_lstat=Path.lstat
-    checks=[]
-    def replace_after_open(path,*args,**kwargs):
+    def replaced_generation(path,*args,**kwargs):
+        current=actual_lstat(path,*args,**kwargs)
         if path==service.path:
-            checks.append(True)
-            if len(checks)==2:
-                service._atomic_write(service.path,b"new content")
-        return actual_lstat(path,*args,**kwargs)
-    monkeypatch.setattr(Path,"lstat",replace_after_open)
+            return SimpleNamespace(
+                st_dev=current.st_dev,
+                st_ino=current.st_ino+1,
+                st_size=current.st_size,
+                st_mtime_ns=current.st_mtime_ns,
+                st_mode=current.st_mode,
+                st_nlink=current.st_nlink,
+            )
+        return current
+    monkeypatch.setattr(Path,"lstat",replaced_generation)
     with pytest.raises(ValueError,match="HUMAN_TEXT_FILE_CHANGED_RETRY"):
         service.load()
+    monkeypatch.setattr(Path,"lstat",actual_lstat)
+    service.save("new content")
     assert service.load()=="new content"
 
 

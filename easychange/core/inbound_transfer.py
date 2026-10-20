@@ -20,6 +20,7 @@ import zlib
 from pathlib import Path
 from typing import Any
 
+from .atomic_files import replace_with_retry
 
 class InboundTransferError(RuntimeError):
     def __init__(self, code: str, message: str | None = None, *, data: dict[str, Any] | None = None) -> None:
@@ -168,7 +169,7 @@ class InboundCommandStore:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
+            replace_with_retry(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
 

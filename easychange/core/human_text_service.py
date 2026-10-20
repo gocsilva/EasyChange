@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .atomic_files import replace_with_retry
 
 MAX_HUMAN_TEXT_METADATA_BYTES = 65_536
 
@@ -159,7 +160,7 @@ class HumanTextService:
                 handle.flush()
                 os.fsync(handle.fileno())
                 written_stat=os.fstat(handle.fileno())
-            os.replace(temporary, path)
+            replace_with_retry(temporary, path)
             return written_stat
         finally:
             temporary.unlink(missing_ok=True)

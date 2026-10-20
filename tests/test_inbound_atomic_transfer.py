@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import threading
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -544,7 +545,9 @@ def test_oversized_persisted_part_rejected_before_loading_whole_file(tmp_path, m
                 chunk_count=1,sha256=hashlib.sha256(raw).hexdigest())
     target=store._dir(transfer_id)/"0000.part"
     target.write_bytes(b"X"*(store.MAX_CHUNK_BYTES+10))
-    original_open=type(target).open
+    original_os_open=inbound_module.os.open
+    original_fdopen=inbound_module.os.fdopen
+    target_fds=set()
     requests=[]
     class Observed:
         def __init__(self,stream):self._stream=stream
@@ -553,12 +556,19 @@ def test_oversized_persisted_part_rejected_before_loading_whole_file(tmp_path, m
         def read(self,length=-1):
             requests.append(length)
             return self._stream.read(length)
-    def monitored_open(path,mode="r",*args,**kwargs):
-        stream=original_open(path,mode,*args,**kwargs)
-        if path==target and mode=="rb":
+        def __getattr__(self,name):return getattr(self._stream,name)
+    def monitored_os_open(path,flags,*args,**kwargs):
+        fd=original_os_open(path,flags,*args,**kwargs)
+        if Path(path)==target:
+            target_fds.add(fd)
+        return fd
+    def monitored_fdopen(fd,mode="r",*args,**kwargs):
+        stream=original_fdopen(fd,mode,*args,**kwargs)
+        if fd in target_fds and mode=="rb":
             return Observed(stream)
         return stream
-    monkeypatch.setattr(type(target),"open",monitored_open)
+    monkeypatch.setattr(inbound_module.os,"open",monitored_os_open)
+    monkeypatch.setattr(inbound_module.os,"fdopen",monitored_fdopen)
     with pytest.raises(InboundTransferError,match="INBOUND_CHUNK_SIZE_LIMIT"):
         store.assemble(transfer_id)
     assert requests==[store.MAX_CHUNK_BYTES+1]
