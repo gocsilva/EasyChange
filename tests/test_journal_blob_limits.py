@@ -173,9 +173,9 @@ def test_untrusted_journal_jsonl_record_must_be_object(tmp_path):
 def test_journal_rejects_write_oversize_before_publishing_unreadable_record(tmp_path,monkeypatch):
     target=tmp_path/".easychange"/"journal.jsonl"
     journal=Journal(target,"S1")
-    monkeypatch.setattr(journal_module,"_MAX_JOURNAL_RECORD_CHARS",256)
+    monkeypatch.setattr(journal_module,"_MAX_JOURNAL_RECORD_CHARS",512)
     with pytest.raises(ValueError,match="JOURNAL_RECORD_TOO_LARGE"):
-        journal.record("A"*400,"sample.txt","before","after")
+        journal.record("A"*800,"sample.txt","before","after")
     assert journal.count==0
     assert journal._counter==0
     assert not target.exists()
