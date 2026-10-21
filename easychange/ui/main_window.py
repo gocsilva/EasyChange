@@ -836,6 +836,12 @@ class MainWindow(QMainWindow):
         early_read_optics = bool(
             self._machine and result.sequence and result.command == "read"
         )
+        sequenced_compact_state_optics = bool(
+            self._machine
+            and result.sequence
+            and result.command == "state"
+            and "--compact" in text.split()
+        )
         if early_read_optics:
             self._update_machine_qr(result)
         self._refresh_header()
@@ -846,10 +852,14 @@ class MainWindow(QMainWindow):
             # Appending GUI focus diagnostics afterwards changes the optical
             # EC2 payload and digest relative to the durable result, and
             # needlessly inflates a 1-line answer into several dense QR cells.
-            # Keep focus diagnostics for unsequenced prepare/state and all
-            # other existing consumers; only compact the proven read path.
+            # Keep verbose focus diagnostics for human/unsequenced commands.
+            # Sequenced native reads persist their payload before the GUI adds
+            # optical-only fields; sequenced compact state keeps the essential
+            # confirmation boolean but omits the verbose focus object so its
+            # QR payload stays small enough for reliable HDMI delivery.
             if not is_self_update and not (result.sequence and result.command == "read"):
-                result.data["easychange_focus"] = focus
+                if not sequenced_compact_state_optics:
+                    result.data["easychange_focus"] = focus
                 result.data["command_focus_confirmed"] = bool(
                     focus.get("command_focus_confirmed")
                 )
