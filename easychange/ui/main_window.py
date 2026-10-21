@@ -1157,6 +1157,15 @@ class MainWindow(QMainWindow):
                 completed.set_result((payloads, header))
                 self._optical_encode_future = completed
                 self._poll_optical_bundle(generation, completed)
+                if inline_compact_state:
+                    # Complete the bounded 1–4-symbol state page before this
+                    # GUI callback returns. Merely scheduling paint work left
+                    # the previous command's QR visible during fresh remote
+                    # MCP captures even though state execution had finished.
+                    for _ in range(len(self.machine_qrs) + 1):
+                        if self._optical_render_pending is None:
+                            break
+                        self._render_next_optical_symbol()
                 return
         try:
             future = self._optical_encode_executor.submit(

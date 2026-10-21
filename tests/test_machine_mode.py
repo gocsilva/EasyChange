@@ -107,8 +107,9 @@ def test_compact_state_encodes_optical_receipt_on_gui_thread(tmp_path, monkeypat
         window._update_machine_qr(result)
         assert encoder_threads == [gui_thread]
         assert window._optical_payloads == ["ec2-state-packet"]
-        _drain_optical(window, app)
         assert window.machine_qr.isVisible()
+        assert window.machine_qr.pixmap() is not None
+        _drain_optical(window, app)
     finally:
         window.close(); app.processEvents()
 
