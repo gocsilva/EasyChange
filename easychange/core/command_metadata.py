@@ -22,7 +22,7 @@ COMMAND_NAMES = [
     "clear", "status", "health", "maintenance", "diff", "branch", "log",
     "build", "test", "run", "processes", "stop", "errors", "next-error",
     "previous-error", "remote", "remote-guide", "remote-profile",
-    "prepare-hid", "set", "machine", "human", "help", "capabilities",
+    "prepare-hid", "set", "machine", "human", "switch-project", "self-update", "help", "capabilities",
     "command-schema", "quit",
 ]
 
@@ -102,6 +102,21 @@ _RICH: dict[str, dict[str, Any]] = {
             {"name": "--workspace-temps", "required": False, "type": "flag"},
         ],
         "examples": ["maintenance --dry-run", "maintenance"],
+    },
+    "self-update": {
+        "description": "Fetch and fast-forward EasyChange from GitHub main, then restart Machine Mode in the same workspace.",
+        "syntax": "self-update",
+        "arguments": [],
+        "examples": ["self-update"],
+    },
+    "switch-project": {
+        "description": "Switch the open EasyChange window to another existing project workspace.",
+        "syntax": "switch-project <workspace_path>",
+        "arguments": [{"name": "workspace_path", "required": True, "type": "directory_path"}],
+        "examples": [
+            'switch-project "C:\\sources\\EasyPay\\bs2.core2.pix.cambio"',
+            'switch-project "C:\\path\\to\\another project"',
+        ],
     },
 }
 

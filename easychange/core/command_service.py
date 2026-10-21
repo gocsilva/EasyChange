@@ -3635,6 +3635,25 @@ class CommandService:
                 dry_run=dry_run,
                 scan_workspace_temps=scan_workspace_temps,
             )
+        if name == "self-update":
+            if args:
+                raise ValueError("self-update accepts no arguments")
+            return {
+                "update_request": "github_main",
+                "workspace": str(self.workspace.root_path),
+                "restart_mode": "machine_hid",
+            }
+        if name == "switch-project":
+            if len(args) != 1:
+                raise ValueError("switch-project requires exactly one quoted workspace path")
+            target = Path(args[0]).expanduser().resolve(strict=True)
+            if not target.is_dir():
+                raise NotADirectoryError(str(target))
+            return {
+                "switch_project": str(target),
+                "workspace_name": target.name,
+                "restart_mode": "same_window",
+            }
         if name == "health":
             compact = "--compact" in args or "compact" in args
             index = self.indexer.status()

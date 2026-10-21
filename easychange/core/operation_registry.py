@@ -35,6 +35,7 @@ STRUCTURED_CONDITIONAL_SIDE_EFFECT_TYPES = frozenset({
 TEXT_MUTATION_COMMANDS = frozenset({
     "write", "save", "force-write", "append", "insert", "replace", "replace-line",
     "replace-range", "delete", "rename", "move", "mkdir", "new", "batch",
+    "self-update", "switch-project",
 })
 STRUCTURED_CONTINUE_SAFE_TYPES = frozenset({
     "read", "search", "locate", "study", "definition", "references",

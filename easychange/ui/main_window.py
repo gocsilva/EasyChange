@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -16,7 +17,9 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QGridLayout
 
 from easychange.core.command_service import CommandService
 from easychange.core.maintenance_service import MaintenanceService
+from easychange.core.result import Result
 from easychange.core.workspace import Workspace
+from easychange.self_update import RESTART_GRACE_SECONDS, schedule_self_update
 from easychange.ui.recent_project import remember_project
 from easychange.ui.editor import BasicHighlighter, CodeEditor
 
@@ -98,6 +101,7 @@ class MainWindow(QMainWindow):
         )
         self.service.browser.set_focus_window_handle_provider(lambda: int(self.winId()))
         self._machine = self.service.machine if machine_mode is None else machine_mode
+        self._update_restart_scheduled = False
         self.service.machine = self._machine
         self._workspace_dialog_open = False
 
@@ -386,39 +390,51 @@ class MainWindow(QMainWindow):
                     self.save_editor()
                     if self.editor.document().isModified():
                         return
-
-            self._flush_human_text()
-            new_workspace = Workspace.open(selected_path)
-            old_service = self.service
-            new_service = CommandService(new_workspace)
-            new_service.machine = self._machine
-            new_service.output = old_service.output
-            new_service.state_store.data["machine_mode"] = self._machine
-            new_service.state_store.data["output_mode"] = new_service.output
-            new_service._persist_state()
-            self.service = new_service
-            self.service.browser.set_focus_window_handle_provider(lambda: int(self.winId()))
-            old_service.close()
-
-            self._active_path = None
-            self.editor.clear()
-            self.editor.document().setModified(False)
-            self.tree.clear()
-            if not self._machine:
-                self._populate_tree()
-            self._load_human_text()
-            self.setWindowTitle(f"EasyChange — {new_workspace.name}")
-            self._refresh_header()
-            try:
-                remember_project(selected_path)
-            except (OSError, ValueError):
-                pass
-            self._run_command(":remote")
+            self._switch_workspace_path(selected_path, show_remote=True)
         except (OSError, ValueError, PermissionError) as exc:
             QMessageBox.critical(self, "Não foi possível abrir o projeto", str(exc))
         finally:
             self._workspace_dialog_open = False
             self.focus_command()
+
+    def _switch_workspace_path(self, selected_path: str | Path, *, show_remote: bool) -> None:
+        selected_path = Path(selected_path).resolve(strict=True)
+        if not selected_path.is_dir():
+            raise NotADirectoryError(str(selected_path))
+        if selected_path == Path(self.service.workspace.root_path).resolve():
+            return
+
+        self._flush_human_text()
+        new_workspace = Workspace.open(selected_path)
+        old_service = self.service
+        new_service = CommandService(new_workspace, defer_initial_maintenance=True)
+        new_service.machine = self._machine
+        new_service.output = old_service.output
+        new_service.state_store.data["mode"] = "machine" if self._machine else "human"
+        new_service.state_store.data["transport"] = (
+            "hid" if self._machine else old_service.state_store.data.get("transport", "local")
+        )
+        new_service.state_store.data["output_mode"] = new_service.output
+        new_service._persist_state()
+        self.service = new_service
+        self.service.browser.set_focus_window_handle_provider(lambda: int(self.winId()))
+        old_service.close()
+
+        self._active_path = None
+        self.editor.clear()
+        self.editor.document().setModified(False)
+        self.tree.clear()
+        if not self._machine:
+            self._populate_tree()
+        self._load_human_text()
+        self.setWindowTitle(f"EasyChange — {new_workspace.name}")
+        self._refresh_header()
+        try:
+            remember_project(selected_path)
+        except (OSError, ValueError):
+            pass
+        if show_remote:
+            self._run_command(":remote")
 
     def cleanup_easychange_data(self) -> None:
         """Fully remove EasyChange-owned state from the open workspace."""
@@ -716,7 +732,57 @@ class MainWindow(QMainWindow):
         self._run_command(text)
 
     def _run_command(self, text: str) -> None:
-        result = self.service.execute(text)
+        raw = text.strip()
+        sequence = None
+        if raw.casefold().startswith(":ec "):
+            parts = raw.split(maxsplit=2)
+            if len(parts) == 3:
+                sequence, raw = parts[1], parts[2]
+        is_self_update = raw.lstrip(":").strip().casefold() == "self-update"
+        if is_self_update and self.editor.document().isModified():
+            result = Result(
+                False,
+                "self-update",
+                error="Save the current editor buffer before updating EasyChange.",
+                code="UNSAVED_EDITOR_CHANGES",
+                sequence=sequence,
+            )
+        elif (
+            raw.lstrip(":").strip().casefold().startswith("switch-project ")
+            and self.editor.document().isModified()
+        ):
+            result = Result(
+                False,
+                "switch-project",
+                error="Save the current editor buffer before switching projects.",
+                code="UNSAVED_EDITOR_CHANGES",
+                sequence=sequence,
+            )
+        else:
+            result = self.service.execute(text)
+        if result.ok and result.data.get("update_request") == "github_main":
+            if getattr(self, "_update_restart_scheduled", False):
+                result.data["scheduled"] = True
+                result.data["duplicate_request"] = True
+            else:
+                handoff = schedule_self_update(
+                    self.service.workspace.root_path,
+                    parent_pid=os.getpid(),
+                )
+                if handoff.get("ok"):
+                    self._update_restart_scheduled = True
+                    result.data.update(handoff)
+                else:
+                    result.ok = False
+                    result.code = str(handoff.get("error") or "SELF_UPDATE_FAILED")
+                    result.error = str(handoff.get("detail") or handoff.get("error"))
+        if result.ok and result.data.get("switch_project"):
+            try:
+                self._switch_workspace_path(result.data["switch_project"], show_remote=False)
+            except (OSError, ValueError, PermissionError) as exc:
+                result.ok = False
+                result.code = "PROJECT_SWITCH_FAILED"
+                result.error = str(exc)
         if self._machine != self.service.machine:
             self._machine = self.service.machine
             self._apply_machine_style()
@@ -758,6 +824,8 @@ class MainWindow(QMainWindow):
             except (OSError, ValueError, PermissionError) as exc:
                 self.output.setPlainText(f"ERROR: {exc}")
         self.focus_command()
+        if getattr(self, "_update_restart_scheduled", False):
+            QTimer.singleShot(RESTART_GRACE_SECONDS * 1000, self.close)
 
     @classmethod
     def _burst_qr_size_for_screen(cls, screen_width: int, screen_height: int) -> int:

@@ -6,14 +6,14 @@ cd /d "%~dp0"
 where git >nul 2>nul
 if errorlevel 1 (
     echo [ERRO] Git nao foi encontrado no PATH.
-    pause
+    call :pause_if_interactive
     exit /b 1
 )
 
 git rev-parse --is-inside-work-tree >nul 2>nul
 if errorlevel 1 (
     echo [ERRO] Esta pasta nao e um repositorio Git.
-    pause
+    call :pause_if_interactive
     exit /b 1
 )
 
@@ -85,20 +85,20 @@ echo.
 echo [ERRO] Existem alteracoes locais, staged ou nao rastreadas.
 echo O atualizador nao vai sobrescrever seu trabalho.
 echo Salve seu trabalho e execute a atualizacao novamente.
-pause
+call :pause_if_interactive
 exit /b 2
 
 :wrong_branch
 echo.
 echo [ERRO] O atualizador exige a branch main e nao vai trocar sua branch ativa.
-pause
+call :pause_if_interactive
 exit /b 2
 
 :diverged_history
 echo.
 echo [ERRO] A main local nao e ancestral da origin/main; atualizacao recusada.
 echo O atualizador nao vai descartar commits locais nem reescrever historico.
-pause
+call :pause_if_interactive
 exit /b 3
 
 :python_error
@@ -107,14 +107,14 @@ echo [ERRO] Nenhum Python 3.10+ funcional foi encontrado.
 echo Instale/corrija o Python e execute Atualizar_EasyChange.bat novamente.
 echo A .venv existente nao foi apagada.
 call :rollback_update
-pause
+call :pause_if_interactive
 exit /b 5
 
 :dependency_error
 echo.
 echo [ERRO] A criacao/reparo/sincronizacao da .venv ou a verificacao do protocolo falhou.
 call :rollback_update
-pause
+call :pause_if_interactive
 exit /b 4
 
 :rollback_update
@@ -138,9 +138,13 @@ echo Rollback Git concluido para %OLD_VERSION%.
 echo Dependencias da .venv nao sao revertidas automaticamente; execute o atualizador apos corrigir o erro.
 exit /b 0
 
+:pause_if_interactive
+if not defined EASYCHANGE_NONINTERACTIVE pause
+exit /b 0
+
 :git_error
 echo.
 echo [ERRO] Nao foi possivel atualizar o EasyChange.
 echo Nenhuma alteracao local foi apagada.
-pause
+call :pause_if_interactive
 exit /b 3
