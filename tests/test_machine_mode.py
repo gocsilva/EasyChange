@@ -1,5 +1,7 @@
 import json
 import os
+from types import SimpleNamespace
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
@@ -12,6 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 from easychange.core.workspace import Workspace
 from easychange.ui.main_window import MainWindow
+import easychange.ui.main_window as main_window_module
 
 
 def _drain_optical(window, app, limit: int = 512) -> None:
@@ -210,6 +213,56 @@ def test_machine_mode_focus_command_never_promotes_inactive_window(tmp_path, mon
     assert result["focus_restore_attempted"] is False
     assert result["focus_restore_skipped"] == "WINDOW_NOT_ACTIVE"
     assert result["user_focus_override"] is True
+    window.close(); app.processEvents()
+
+
+def test_machine_startup_enters_fullscreen_and_activates_command(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    calls = []
+    scheduled = []
+    monkeypatch.setattr(window, "showFullScreen", lambda: calls.append("fullscreen"))
+    monkeypatch.setattr(window, "raise_", lambda: calls.append("raise"))
+    monkeypatch.setattr(window, "activateWindow", lambda: calls.append("activate"))
+    monkeypatch.setattr(
+        main_window_module.QTimer, "singleShot",
+        lambda delay, callback: scheduled.append((delay, callback)),
+    )
+
+    window._start_machine_display()
+
+    assert calls == ["fullscreen", "raise", "activate"]
+    assert window._startup_focus_pending is True
+    assert len(scheduled) == 1 and scheduled[0][0] == 0
+    window.close(); app.processEvents()
+
+
+def test_machine_startup_retries_command_focus_until_confirmed(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    scheduled = []
+    active_states = iter([False, True, True, True])
+    focus_states = iter([False, False, True])
+    focus_calls = []
+    monkeypatch.setattr(window, "isActiveWindow", lambda: next(active_states))
+    monkeypatch.setattr(window, "focus_command", lambda: focus_calls.append(True) or {})
+    window.command = SimpleNamespace(hasFocus=lambda: next(focus_states))
+    monkeypatch.setattr(
+        main_window_module.QTimer, "singleShot",
+        lambda delay, callback: scheduled.append((delay, callback)),
+    )
+    window._startup_focus_pending = True
+
+    window._focus_command_at_startup()
+    assert scheduled[-1][0] == window._STARTUP_FOCUS_RETRY_MS
+    scheduled[-1][1]()
+    assert scheduled[-1][0] == window._STARTUP_FOCUS_RETRY_MS
+    scheduled[-1][1]()
+    assert scheduled[-1][0] == window._STARTUP_FOCUS_RETRY_MS
+    scheduled[-1][1]()
+
+    assert focus_calls == [True, True, True]
+    assert window._startup_focus_pending is False
     window.close(); app.processEvents()
 
 

@@ -88,6 +88,8 @@ class MainWindow(QMainWindow):
     # before the same durable handoff.
     _OPTICAL_BROADCAST_MAX_CHUNKS = 31
     _OPTICAL_OVERFLOW_BROADCAST_CHUNKS = 3
+    _STARTUP_FOCUS_RETRY_MS = 100
+    _STARTUP_FOCUS_MAX_ATTEMPTS = 30
     # More than one 4-QR row should not rotate in compact mode.
     # Switch to the 32-slot canvas so 5-32 chunks are visible simultaneously
     # and duplicated padding adds optical redundancy.
@@ -104,6 +106,8 @@ class MainWindow(QMainWindow):
         self._update_restart_scheduled = False
         self.service.machine = self._machine
         self._workspace_dialog_open = False
+        self._startup_focus_pending = False
+        self._startup_focus_attempts = 0
 
         # An explicit human launch is a mode override, not merely a visual hint.
         # The persisted session is commonly left in machine/HID/compact mode by
@@ -364,6 +368,34 @@ class MainWindow(QMainWindow):
         ):
             return
         self.focus_command()
+
+    def _start_machine_display(self) -> None:
+        """Enter the dedicated remote-operator display and acquire command focus."""
+        self._startup_focus_pending = True
+        self._startup_focus_attempts = 0
+        self.showFullScreen()
+        self.raise_()
+        self.activateWindow()
+        QTimer.singleShot(0, self._focus_command_at_startup)
+
+    def _focus_command_at_startup(self) -> None:
+        if not self._startup_focus_pending:
+            return
+
+        self._startup_focus_attempts += 1
+        if self.isActiveWindow():
+            self.focus_command()
+            if self.command.hasFocus():
+                self._startup_focus_pending = False
+                return
+
+        if self._startup_focus_attempts >= self._STARTUP_FOCUS_MAX_ATTEMPTS:
+            self._startup_focus_pending = False
+            return
+        QTimer.singleShot(
+            self._STARTUP_FOCUS_RETRY_MS,
+            self._focus_command_at_startup,
+        )
 
     def select_workspace(self) -> None:
         self._workspace_dialog_open = True
@@ -1253,14 +1285,15 @@ class MainWindow(QMainWindow):
 def run(workspace_path: str = ".", *, machine_mode: bool | None = None, hid_mode: bool = False) -> int:
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Workspace.open(Path(workspace_path)), machine_mode=machine_mode, hid_mode=hid_mode)
-    window.show()
+    if window._machine:
+        window._start_machine_display()
+    else:
+        window.show()
     try:
         remember_project(workspace_path)
     except (OSError, ValueError):
         pass
-    if window._machine:
-        QTimer.singleShot(0, window.focus_command)
-    else:
+    if not window._machine:
         # Let Qt paint the human GUI before enumerating workspace files.
         window._schedule_tree_population(delay_ms=75)
     # Automatic cleanup is housekeeping, not a precondition for showing the
