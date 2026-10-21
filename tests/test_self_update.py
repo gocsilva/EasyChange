@@ -158,6 +158,30 @@ def test_self_update_rejects_non_windows(tmp_path):
     assert result == {"ok": False, "error": "SELF_UPDATE_REQUIRES_WINDOWS"}
 
 
+def test_unsaved_editor_guard_ignores_only_an_empty_unbound_buffer():
+    from easychange.ui.main_window import MainWindow
+
+    def window(*, modified, text, active_path=None):
+        editor = SimpleNamespace(
+            document=lambda: SimpleNamespace(isModified=lambda: modified),
+            toPlainText=lambda: text,
+        )
+        return SimpleNamespace(editor=editor, _active_path=active_path)
+
+    assert MainWindow._has_unsaved_editor_changes(
+        window(modified=True, text="")
+    ) is False
+    assert MainWindow._has_unsaved_editor_changes(
+        window(modified=True, text="pending text")
+    ) is True
+    assert MainWindow._has_unsaved_editor_changes(
+        window(modified=True, text="", active_path="src/Example.cs")
+    ) is True
+    assert MainWindow._has_unsaved_editor_changes(
+        window(modified=False, text="saved text")
+    ) is False
+
+
 def test_machine_command_queues_update_and_keeps_receipt_visible(monkeypatch, tmp_path):
     from easychange.core.result import Result
     from easychange.ui import main_window as ui
@@ -185,10 +209,15 @@ def test_machine_command_queues_update_and_keeps_receipt_visible(monkeypatch, tm
         lambda delay, callback: calls["timers"].append((delay, callback)),
     )
     output = SimpleNamespace(setPlainText=lambda _value: None)
+    editor = SimpleNamespace(
+        document=lambda: SimpleNamespace(isModified=lambda: True),
+        toPlainText=lambda: "",
+    )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     window = SimpleNamespace(
-        editor=SimpleNamespace(document=lambda: SimpleNamespace(isModified=lambda: False)),
+        editor=editor,
+        _active_path=None,
         service=SimpleNamespace(
             execute=lambda _text: result,
             workspace=SimpleNamespace(root_path=workspace),
@@ -204,6 +233,7 @@ def test_machine_command_queues_update_and_keeps_receipt_visible(monkeypatch, tm
         _update_machine_qr=lambda _result: None,
         close=lambda: None,
     )
+    window._has_unsaved_editor_changes = lambda: ui.MainWindow._has_unsaved_editor_changes(window)
 
     ui.MainWindow._run_command(window, ":ec QUPDATE999 self-update")
 

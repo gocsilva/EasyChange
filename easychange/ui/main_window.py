@@ -771,7 +771,7 @@ class MainWindow(QMainWindow):
             if len(parts) == 3:
                 sequence, raw = parts[1], parts[2]
         is_self_update = raw.lstrip(":").strip().casefold() == "self-update"
-        if is_self_update and self.editor.document().isModified():
+        if is_self_update and self._has_unsaved_editor_changes():
             result = Result(
                 False,
                 "self-update",
@@ -781,7 +781,7 @@ class MainWindow(QMainWindow):
             )
         elif (
             raw.lstrip(":").strip().casefold().startswith("switch-project ")
-            and self.editor.document().isModified()
+            and self._has_unsaved_editor_changes()
         ):
             result = Result(
                 False,
@@ -858,6 +858,12 @@ class MainWindow(QMainWindow):
         self.focus_command()
         if getattr(self, "_update_restart_scheduled", False):
             QTimer.singleShot(RESTART_GRACE_SECONDS * 1000, self.close)
+
+    def _has_unsaved_editor_changes(self) -> bool:
+        """Return true only when a dirty editor contains user project content."""
+        if not self.editor.document().isModified():
+            return False
+        return bool(self._active_path) or bool(self.editor.toPlainText())
 
     @classmethod
     def _burst_qr_size_for_screen(cls, screen_width: int, screen_height: int) -> int:
