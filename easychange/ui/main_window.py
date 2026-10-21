@@ -1166,6 +1166,13 @@ class MainWindow(QMainWindow):
                         if self._optical_render_pending is None:
                             break
                         self._render_next_optical_symbol()
+                    # QLabel.setPixmap schedules a paint for the next event
+                    # loop turn. The MCP starts observing as soon as the HID
+                    # submission is acknowledged, so flush the compact state
+                    # cells while this GUI callback still owns the event loop.
+                    for label in self.machine_qrs:
+                        if label.isVisible():
+                            label.repaint()
                 return
         try:
             future = self._optical_encode_executor.submit(
