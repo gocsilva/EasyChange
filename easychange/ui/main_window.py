@@ -1120,7 +1120,28 @@ class MainWindow(QMainWindow):
             and 1 <= len(lines) <= 12
             and all(isinstance(line, str) and len(line) <= 180 for line in lines)
         )
-        if inline_small_read:
+        state_data = result.data if isinstance(getattr(result, "data", None), dict) else None
+        inline_compact_state = False
+        if (
+            getattr(result, "ok", False)
+            and getattr(result, "sequence", None)
+            and getattr(result, "command", "") == "state"
+            and isinstance(state_data, dict)
+            and isinstance(state_data.get("state"), str)
+        ):
+            try:
+                # Compact state is a bounded health response. Encoding it on
+                # the GUI thread avoids leaving the previous EC2 sequence on
+                # screen while the MCP's direct observer is waiting for this
+                # command's original optical receipt.
+                inline_compact_state = (
+                    len(json.dumps(
+                        state_data, ensure_ascii=False, separators=(",", ":")
+                    ).encode("utf-8")) <= 4096
+                )
+            except (TypeError, ValueError, UnicodeEncodeError):
+                inline_compact_state = False
+        if inline_small_read or inline_compact_state:
             try:
                 payloads, header = encode_result_bundle(
                     result,

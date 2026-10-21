@@ -80,6 +80,39 @@ def test_compact_sequenced_state_publishes_persisted_qr_before_focus_events(
     window.close(); app.processEvents()
 
 
+def test_compact_state_encodes_optical_receipt_on_gui_thread(tmp_path, monkeypatch):
+    import threading
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    window.show(); app.processEvents()
+    result = Result(
+        True,
+        "state",
+        data={"state": "READY", "workspace": str(tmp_path)},
+        sequence="QGUISTATEINLINE1",
+    )
+    encoder_threads = []
+
+    def encode_inline(value, **_kwargs):
+        encoder_threads.append(threading.get_ident())
+        assert value is result
+        return ["ec2-state-packet"], None
+
+    monkeypatch.setattr(
+        main_window_module, "encode_result_bundle", encode_inline
+    )
+    try:
+        gui_thread = threading.get_ident()
+        window._update_machine_qr(result)
+        assert encoder_threads == [gui_thread]
+        assert window._optical_payloads == ["ec2-state-packet"]
+        _drain_optical(window, app)
+        assert window.machine_qr.isVisible()
+    finally:
+        window.close(); app.processEvents()
+
+
 
 def test_machine_mode_uses_compact_overflow_handoff_for_large_results(tmp_path):
     app = QApplication.instance() or QApplication([])
