@@ -22,7 +22,8 @@ COMMAND_NAMES = [
     "clear", "status", "health", "maintenance", "diff", "branch", "log",
     "build", "test", "run", "processes", "stop", "errors", "next-error",
     "previous-error", "remote", "remote-guide", "remote-profile",
-    "prepare-hid", "set", "machine", "human", "switch-project", "self-update", "help", "capabilities",
+    "prepare-hid", "set", "machine", "human", "switch-project", "self-update",
+    "self-update-status", "help", "capabilities",
     "command-schema", "quit",
 ]
 
@@ -109,6 +110,12 @@ _RICH: dict[str, dict[str, Any]] = {
         "arguments": [],
         "examples": ["self-update"],
     },
+    "self-update-status": {
+        "description": "Inspect the latest EasyChange self-update receipt and verify the installed Git revision.",
+        "syntax": "self-update-status",
+        "arguments": [],
+        "examples": ["self-update-status"],
+    },
     "switch-project": {
         "description": "Switch the open EasyChange window to another existing project workspace.",
         "syntax": "switch-project <workspace_path>",
@@ -129,6 +136,7 @@ _READ_ONLY = {
     "journal", "locks", "history", "status", "health", "diff", "branch", "log",
     "processes", "errors", "next-error", "previous-error", "remote-guide",
     "help", "capabilities", "command-schema", "db-connections", "db-schema",
+    "self-update-status",
 }
 
 

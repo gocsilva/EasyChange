@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,12 @@ def test_self_update_is_documented_as_a_sequenced_mutation():
     assert schema["mutating"] is True
     assert schema["syntax"] == "self-update"
     assert "self-update" in TEXT_MUTATION_COMMANDS
+
+
+def test_self_update_status_is_documented_as_read_only():
+    schema = command_schema("self-update-status")
+    assert schema["mutating"] is False
+    assert schema["syntax"] == "self-update-status"
 
 
 def test_switch_project_schema_is_generic_and_includes_recovery_example():
@@ -117,7 +124,18 @@ def test_update_worker_runs_github_updater_then_reopens_same_workspace(tmp_path,
     workspace = tmp_path / "target project"
     workspace.mkdir()
     log_path = tmp_path / "logs" / "update.log"
+    receipt_path = tmp_path / "logs" / "update-receipt.json"
     monkeypatch.setattr(self_update, "update_log_path", lambda: log_path)
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(
+        self_update,
+        "_read_git_revisions",
+        lambda _root: {
+            "head_sha": "c" * 40,
+            "origin_main_sha": "c" * 40,
+            "matches_origin_main": True,
+        },
+    )
     monkeypatch.setenv("COMSPEC", "cmd-test.exe")
     calls = {}
 
@@ -151,6 +169,86 @@ def test_update_worker_runs_github_updater_then_reopens_same_workspace(tmp_path,
     ]
     assert calls["restart_kwargs"]["cwd"] == str(repo.resolve())
     assert "updater_return_code=0" in log_path.read_text(encoding="utf-8")
+
+
+def test_update_worker_persists_verifiable_git_receipt(tmp_path, monkeypatch):
+    repo = tmp_path / "EasyChange"
+    repo.mkdir()
+    (repo / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "update.log"
+    receipt_path = tmp_path / "logs" / "update-receipt.json"
+    monkeypatch.setattr(self_update, "update_log_path", lambda: log_path)
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    sha = "a" * 40
+    monkeypatch.setattr(
+        self_update,
+        "_read_git_revisions",
+        lambda _root: {
+            "head_sha": sha,
+            "origin_main_sha": sha,
+            "matches_origin_main": True,
+        },
+    )
+    monkeypatch.setenv("COMSPEC", "cmd-test.exe")
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: SimpleNamespace(pid=99),
+    )
+
+    result = self_update.run_update_worker(
+        repo_root=repo,
+        workspace=workspace,
+        parent_pid=123,
+        executable="pythonw.exe",
+        run=lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+        wait_parent=lambda _pid: True,
+        sleep=lambda _seconds: None,
+    )
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    status = self_update.read_update_status(repo_root=repo)
+    assert result == 0
+    assert receipt["state"] == "UPDATED"
+    assert receipt["installed_git_sha"] == sha
+    assert receipt["origin_main_sha"] == sha
+    assert receipt["relaunch_state"] == "PROCESS_STARTED"
+    assert status["current_matches_receipt"] is True
+    assert status["current_matches_origin_main"] is True
+    assert status["updater_return_code"] == 0
+
+
+def test_self_update_status_text_command_reads_receipt_without_mutating(tmp_path, monkeypatch):
+    receipt_path = tmp_path / "update-receipt.json"
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(
+        self_update,
+        "_read_git_revisions",
+        lambda _root: {"head_sha": "b" * 40, "origin_main_sha": "b" * 40,
+                       "matches_origin_main": True},
+    )
+    receipt_path.write_text(json.dumps({
+        "schema": self_update.UPDATE_RECEIPT_SCHEMA,
+        "state": "UPDATED",
+        "updater_return_code": 0,
+        "installed_git_sha": "b" * 40,
+        "origin_main_sha": "b" * 40,
+        "relaunch_state": "PROCESS_STARTED",
+        "workspace": str(tmp_path),
+        "finished_at_utc": "2026-10-20T00:00:00+00:00",
+    }), encoding="utf-8")
+    service = CommandService(Workspace.open(tmp_path), defer_initial_maintenance=True)
+    try:
+        result = service.execute(":ec QSTATUS123 self-update-status")
+        assert result.ok is True
+        assert result.data["state"] == "UPDATED"
+        assert result.data["installed_git_sha"] == "b" * 40
+        assert result.data["current_matches_receipt"] is True
+        assert result.sequence == "QSTATUS123"
+    finally:
+        service.close()
 
 
 def test_self_update_rejects_non_windows(tmp_path):

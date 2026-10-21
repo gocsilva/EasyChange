@@ -3643,6 +3643,12 @@ class CommandService:
                 "workspace": str(self.workspace.root_path),
                 "restart_mode": "machine_hid",
             }
+        if name == "self-update-status":
+            if args:
+                raise ValueError("self-update-status accepts no arguments")
+            from ..self_update import read_update_status
+
+            return read_update_status()
         if name == "switch-project":
             if len(args) != 1:
                 raise ValueError("switch-project requires exactly one quoted workspace path")

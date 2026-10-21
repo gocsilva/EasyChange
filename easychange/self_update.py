@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from datetime import datetime, timezone
+import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable, Sequence
@@ -15,6 +18,7 @@ from typing import Callable, Sequence
 # receipt visible long enough for the MCP caller to read it before shutdown.
 RESTART_GRACE_SECONDS = 45
 UPDATE_TIMEOUT_SECONDS = 900
+UPDATE_RECEIPT_SCHEMA = "easychange.update_receipt.v1"
 
 
 def installation_root() -> Path:
@@ -24,6 +28,93 @@ def installation_root() -> Path:
 def update_log_path() -> Path:
     base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
     return base / "EasyChange" / "update-restart.log"
+
+
+def update_receipt_path() -> Path:
+    base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    return base / "EasyChange" / "update-receipt.json"
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _write_update_receipt(receipt: dict) -> None:
+    """Atomically persist a small receipt outside the disposable Git checkout."""
+    path = update_receipt_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".update-receipt-", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(receipt, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.write("\n")
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _read_git_revisions(repo_root: str | Path) -> dict:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(Path(repo_root).resolve()), "rev-parse", "HEAD", "origin/main"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        revisions = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+        if len(revisions) != 2:
+            raise ValueError("EXPECTED_HEAD_AND_ORIGIN_MAIN")
+        head, origin_main = revisions
+        return {
+            "head_sha": head,
+            "origin_main_sha": origin_main,
+            "matches_origin_main": head == origin_main,
+        }
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return {"revision_error": f"{type(exc).__name__}:{str(exc)[:120]}"}
+
+
+def read_update_status(*, repo_root: str | Path | None = None) -> dict:
+    """Return the latest self-update receipt and compare it with the checkout."""
+    path = update_receipt_path()
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"receipt_available": False, "state": "NO_UPDATE_RECEIPT"}
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return {
+            "receipt_available": False,
+            "state": "UPDATE_RECEIPT_UNREADABLE",
+            "error": f"{type(exc).__name__}:{str(exc)[:120]}",
+        }
+    if not isinstance(receipt, dict) or receipt.get("schema") != UPDATE_RECEIPT_SCHEMA:
+        return {"receipt_available": False, "state": "UPDATE_RECEIPT_INVALID"}
+
+    revisions = _read_git_revisions(repo_root or installation_root())
+    current_sha = revisions.get("head_sha")
+    origin_main_sha = revisions.get("origin_main_sha")
+    installed_sha = receipt.get("installed_git_sha")
+    return {
+        "receipt_available": True,
+        "state": receipt.get("state"),
+        "updater_return_code": receipt.get("updater_return_code"),
+        "installed_git_sha": installed_sha,
+        "origin_main_sha": origin_main_sha or receipt.get("origin_main_sha"),
+        "current_git_sha": current_sha,
+        "current_matches_receipt": bool(installed_sha and current_sha == installed_sha),
+        "current_matches_origin_main": revisions.get("matches_origin_main"),
+        "revision_error": revisions.get("revision_error") or receipt.get("revision_error"),
+        "relaunch_state": receipt.get("relaunch_state"),
+        "workspace": receipt.get("workspace"),
+        "finished_at_utc": receipt.get("finished_at_utc"),
+    }
 
 
 def schedule_self_update(
@@ -127,11 +218,36 @@ def run_update_worker(
     updater = root / "Atualizar_EasyChange.bat"
     log_path = update_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        "schema": UPDATE_RECEIPT_SCHEMA,
+        "state": "RUNNING",
+        "updater_return_code": None,
+        "installed_git_sha": None,
+        "origin_main_sha": None,
+        "relaunch_state": "PENDING",
+        "workspace": str(target_workspace),
+        "started_at_utc": _utc_now(),
+        "finished_at_utc": None,
+    }
+
+    def persist_receipt(log=None):
+        try:
+            _write_update_receipt(receipt)
+        except OSError as exc:
+            if log is not None:
+                log.write(f"[SELF_UPDATE] receipt_write_failed={type(exc).__name__}\n")
 
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"\n[SELF_UPDATE] repo={root} workspace={target_workspace}\n")
+        persist_receipt(log)
         if not wait_parent(parent_pid):
             log.write("[SELF_UPDATE] GUI did not exit before timeout; update cancelled.\n")
+            receipt.update(
+                state="CANCELLED_PARENT_TIMEOUT",
+                updater_return_code=6,
+                finished_at_utc=_utc_now(),
+            )
+            persist_receipt(log)
             return 6
 
         env = os.environ.copy()
@@ -153,6 +269,26 @@ def run_update_worker(
             return_code = 7
 
         log.write(f"[SELF_UPDATE] updater_return_code={return_code}\n")
+        revisions = _read_git_revisions(root)
+        receipt.update(
+            state=(
+                "UPDATED"
+                if return_code == 0 and revisions.get("matches_origin_main") is True
+                else "UPDATED_UNVERIFIED"
+                if return_code == 0
+                else "UPDATE_FAILED"
+            ),
+            updater_return_code=return_code,
+            installed_git_sha=revisions.get("head_sha"),
+            origin_main_sha=revisions.get("origin_main_sha"),
+            revision_error=revisions.get("revision_error"),
+            finished_at_utc=_utc_now(),
+        )
+        persist_receipt(log)
+        if revisions.get("head_sha"):
+            log.write(f"[SELF_UPDATE] installed_git_sha={revisions['head_sha']}\n")
+        if revisions.get("origin_main_sha"):
+            log.write(f"[SELF_UPDATE] origin_main_sha={revisions['origin_main_sha']}\n")
         log.write("[SELF_UPDATE] relaunching GUI in Machine/HID mode\n")
 
     # A short delay lets the previous console batch flush its final output.
@@ -183,9 +319,17 @@ def run_update_worker(
             creationflags=flags,
         )
     except (OSError, ValueError) as exc:
+        receipt["relaunch_state"] = "FAILED"
+        receipt["relaunch_error"] = f"{type(exc).__name__}:{str(exc)[:120]}"
+        try:
+            _write_update_receipt(receipt)
+        except OSError:
+            pass
         with log_path.open("a", encoding="utf-8") as log:
             log.write(f"[SELF_UPDATE] GUI relaunch failed: {exc}\n")
         return 8
+    receipt["relaunch_state"] = "PROCESS_STARTED"
+    persist_receipt()
     return return_code
 
 
