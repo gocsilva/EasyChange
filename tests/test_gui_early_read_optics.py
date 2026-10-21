@@ -60,8 +60,9 @@ def test_sequenced_compact_state_omits_verbose_focus_but_keeps_confirmation():
     )
 
     assert "easychange_focus" not in result.data
-    assert result.data["command_focus_confirmed"] is True
-    assert events.index("focus") < events.index("optics")
+    # Compact sequenced state must match the previously durable EC2 payload.
+    assert "command_focus_confirmed" not in result.data
+    assert events.index("optics") < events.index("focus")
 
 
 def test_unsequenced_compact_state_keeps_focus_diagnostics():

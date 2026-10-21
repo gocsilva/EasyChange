@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
@@ -101,7 +101,11 @@ class MainWindow(QMainWindow):
             workspace,
             defer_initial_maintenance=True,
         )
-        self.service.browser.set_focus_window_handle_provider(lambda: int(self.winId()))
+        # Capture native handle on Qt thread (the worker must not call QWidget.winId).
+        native_window_handle = int(self.winId())
+        self.service.browser.set_focus_window_handle_provider(
+            lambda handle=native_window_handle: handle
+        )
         self._machine = self.service.machine if machine_mode is None else machine_mode
         self._update_restart_scheduled = False
         self.service.machine = self._machine
@@ -259,6 +263,16 @@ class MainWindow(QMainWindow):
             thread_name_prefix="easychange-ec2",
         )
         self._optical_encode_future = None
+        # A dedicated serial command worker keeps slow HID requests off Qt's
+        # paint/event thread without reordering EC1 sequence execution.
+        self._command_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="easychange-commands")
+        self._command_future = None
+        self._active_command = None
+        self._machine_command_queue = deque()
+        self._close_when_idle = False
+        self._command_poll_timer = QTimer(self)
+        self._command_poll_timer.setInterval(30)
+        self._command_poll_timer.timeout.connect(self._poll_machine_command)
         self._optical_timer = QTimer(self)
         self._optical_timer.setInterval(420)
         self._optical_timer.timeout.connect(self._render_optical_page)
@@ -449,7 +463,9 @@ class MainWindow(QMainWindow):
         new_service.state_store.data["output_mode"] = new_service.output
         new_service._persist_state()
         self.service = new_service
-        self.service.browser.set_focus_window_handle_provider(lambda: int(self.winId()))
+        self.service.browser.set_focus_window_handle_provider(
+            lambda handle=int(self.winId()): handle
+        )
         old_service.close()
 
         self._active_path = None
@@ -521,7 +537,9 @@ class MainWindow(QMainWindow):
             new_service.state_store.data["output_mode"] = previous_output
             new_service._persist_state()
             self.service = new_service
-            self.service.browser.set_focus_window_handle_provider(lambda: int(self.winId()))
+            self.service.browser.set_focus_window_handle_provider(
+            lambda handle=int(self.winId()): handle
+        )
             self._machine = False
 
             if active_path:
@@ -761,9 +779,60 @@ class MainWindow(QMainWindow):
 
     def execute_command(self) -> None:
         text = self.command.text(); self.command.clear()
-        self._run_command(text)
+        if self._machine:
+            self._queue_machine_command(text)
+        else:
+            self._run_command(text)
 
-    def _run_command(self, text: str) -> None:
+    def _queue_machine_command(self, text: str) -> None:
+        """Keep Qt responsive while preserving sequential HID execution."""
+        if not text.strip():
+            return
+        if len(self._machine_command_queue) >= 128:
+            # Do not execute or silently reassign an untracked EC1 sequence.
+            self.optical_status.setText("EC1 COMMAND QUEUE FULL - RETRY")
+            return
+        self._machine_command_queue.append(text)
+        self._start_next_machine_command()
+
+    def _start_next_machine_command(self) -> None:
+        if self._command_future is not None:
+            return
+        if not self._machine_command_queue:
+            self._command_poll_timer.stop()
+            if self._close_when_idle:
+                QTimer.singleShot(0, self.close)
+            return
+        self._active_command = self._machine_command_queue.popleft()
+        self._command_future = self._command_executor.submit(
+            self.service.execute, self._active_command
+        )
+        self._command_poll_timer.start()
+
+    def _poll_machine_command(self) -> None:
+        future = self._command_future
+        if future is None or not future.done():
+            return
+        self._command_poll_timer.stop()
+        text = self._active_command or ""
+        self._active_command = None
+        self._command_future = None
+        try:
+            result = future.result()
+        except Exception as exc:
+            # The durable result journal controls recovery of unknown writes.
+            parts = text.split(maxsplit=2)
+            sequence = parts[1] if len(parts) == 3 and parts[0].casefold() == ":ec" else None
+            result = Result(
+                False, "ec", error=f"{type(exc).__name__}: {str(exc)[:256]}",
+                code="COMMAND_EXECUTION_FAILED", sequence=sequence,
+            )
+        try:
+            self._run_command(text, precomputed_result=result)
+        finally:
+            self._start_next_machine_command()
+
+    def _run_command(self, text: str, *, precomputed_result=None) -> None:
         raw = text.strip()
         sequence = None
         if raw.casefold().startswith(":ec "):
@@ -771,7 +840,9 @@ class MainWindow(QMainWindow):
             if len(parts) == 3:
                 sequence, raw = parts[1], parts[2]
         is_self_update = raw.lstrip(":").strip().casefold() == "self-update"
-        if is_self_update and self._has_unsaved_editor_changes(discard_easychange=True):
+        if precomputed_result is not None:
+            result = precomputed_result
+        elif is_self_update and self._has_unsaved_editor_changes(discard_easychange=True):
             result = Result(
                 False,
                 "self-update",
@@ -1318,6 +1389,14 @@ class MainWindow(QMainWindow):
         future = self._optical_encode_future
         if future is not None and not future.done():
             future.cancel()
+        # A background command may still be persisting a durable mutation
+        # receipt. Never close its service underneath the worker.
+        if self._command_future is not None or self._machine_command_queue:
+            self._close_when_idle = True
+            event.ignore()
+            return
+        self._command_poll_timer.stop()
+        self._command_executor.shutdown(wait=False, cancel_futures=True)
         self._optical_encode_executor.shutdown(wait=False, cancel_futures=True)
         self.service.close()
         super().closeEvent(event)
