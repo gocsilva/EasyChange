@@ -19,7 +19,7 @@ from easychange.core.command_service import CommandService
 from easychange.core.maintenance_service import MaintenanceService
 from easychange.core.result import Result
 from easychange.core.workspace import Workspace
-from easychange.self_update import RESTART_GRACE_SECONDS, schedule_self_update
+from easychange.self_update import RESTART_GRACE_SECONDS, installation_root, schedule_self_update
 from easychange.ui.recent_project import remember_project
 from easychange.ui.editor import BasicHighlighter, CodeEditor
 
@@ -771,7 +771,7 @@ class MainWindow(QMainWindow):
             if len(parts) == 3:
                 sequence, raw = parts[1], parts[2]
         is_self_update = raw.lstrip(":").strip().casefold() == "self-update"
-        if is_self_update and self._has_unsaved_editor_changes():
+        if is_self_update and self._has_unsaved_editor_changes(discard_easychange=True):
             result = Result(
                 False,
                 "self-update",
@@ -859,11 +859,24 @@ class MainWindow(QMainWindow):
         if getattr(self, "_update_restart_scheduled", False):
             QTimer.singleShot(RESTART_GRACE_SECONDS * 1000, self.close)
 
-    def _has_unsaved_editor_changes(self) -> bool:
-        """Return true only when a dirty editor contains user project content."""
+    def _has_unsaved_editor_changes(self, *, discard_easychange: bool = False) -> bool:
+        """Return true when a dirty editor has content that differs from disk."""
         if not self.editor.document().isModified():
             return False
-        return bool(self._active_path) or bool(self.editor.toPlainText())
+        text = self.editor.toPlainText()
+        if not self._active_path:
+            return bool(text)
+
+        try:
+            target = self.service.workspace.resolve(self._active_path, must_exist=True)
+            if discard_easychange:
+                install_root = installation_root().resolve()
+                if target.resolve().is_relative_to(install_root):
+                    return False
+            return target.read_text(encoding="utf-8-sig") != text
+        except (OSError, UnicodeError, ValueError, PermissionError):
+            # If the active file cannot be compared safely, keep the edit guard.
+            return True
 
     @classmethod
     def _burst_qr_size_for_screen(cls, screen_width: int, screen_height: int) -> int:

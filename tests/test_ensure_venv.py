@@ -181,7 +181,7 @@ def test_updater_force_syncs_remote_main_and_invokes_venv_helper():
     assert "git remote get-url origin" in updater
     assert "git fetch --prune origin main" in updater
     assert "git reset --hard origin/main" in updater
-    assert "git clean -fd" in updater
+    assert "git clean -fdx -e .venv/" in updater
     assert 'set /p OLD_VERSION=<"%OLD_VERSION_FILE%"' in updater
     assert "git merge-base --is-ancestor" not in updater
     assert "git merge --ff-only origin/main" not in updater

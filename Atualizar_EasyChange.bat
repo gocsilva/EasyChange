@@ -46,11 +46,11 @@ git rev-parse --verify origin/main >nul 2>nul
 if errorlevel 1 goto :git_error
 
 rem The remote EasyChange checkout is disposable: sync it exactly to GitHub main.
-rem This intentionally discards tracked local edits and removes untracked,
-rem non-ignored files. Ignored data such as .venv is preserved.
+rem Discard tracked, untracked, and ignored local EasyChange changes, while
+rem preserving only .venv so the existing Python environment can be repaired.
 git reset --hard origin/main
 if errorlevel 1 goto :git_error
-git clean -fd
+git clean -fdx -e .venv/
 if errorlevel 1 goto :git_error
 
 for /f "delims=" %%R in ('git rev-parse --short HEAD') do set "VERSION=%%R"

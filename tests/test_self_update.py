@@ -158,15 +158,35 @@ def test_self_update_rejects_non_windows(tmp_path):
     assert result == {"ok": False, "error": "SELF_UPDATE_REQUIRES_WINDOWS"}
 
 
-def test_unsaved_editor_guard_ignores_only_an_empty_unbound_buffer():
-    from easychange.ui.main_window import MainWindow
+def test_unsaved_editor_guard_compares_disk_and_can_discard_easychange(tmp_path, monkeypatch):
+    from easychange.ui import main_window as ui
+    MainWindow = ui.MainWindow
+
+    project = tmp_path / "project"
+    project.mkdir()
+    same_file = project / "same.cs"
+    same_file.write_text("same text", encoding="utf-8")
+    changed_file = project / "changed.cs"
+    changed_file.write_text("disk text", encoding="utf-8")
+    install = tmp_path / "EasyChange"
+    install_file = install / "easychange.py"
+    install_file.parent.mkdir(parents=True)
+    install_file.write_text("disk version", encoding="utf-8")
+    monkeypatch.setattr(ui, "installation_root", lambda: install)
 
     def window(*, modified, text, active_path=None):
         editor = SimpleNamespace(
             document=lambda: SimpleNamespace(isModified=lambda: modified),
             toPlainText=lambda: text,
         )
-        return SimpleNamespace(editor=editor, _active_path=active_path)
+        workspace = SimpleNamespace(
+            resolve=lambda path, must_exist=False: Path(path).resolve(strict=must_exist)
+        )
+        return SimpleNamespace(
+            editor=editor,
+            _active_path=active_path,
+            service=SimpleNamespace(workspace=workspace),
+        )
 
     assert MainWindow._has_unsaved_editor_changes(
         window(modified=True, text="")
@@ -175,7 +195,17 @@ def test_unsaved_editor_guard_ignores_only_an_empty_unbound_buffer():
         window(modified=True, text="pending text")
     ) is True
     assert MainWindow._has_unsaved_editor_changes(
-        window(modified=True, text="", active_path="src/Example.cs")
+        window(modified=True, text="same text", active_path=same_file)
+    ) is False
+    assert MainWindow._has_unsaved_editor_changes(
+        window(modified=True, text="memory text", active_path=changed_file)
+    ) is True
+    assert MainWindow._has_unsaved_editor_changes(
+        window(modified=True, text="memory version", active_path=install_file),
+        discard_easychange=True,
+    ) is False
+    assert MainWindow._has_unsaved_editor_changes(
+        window(modified=True, text="memory version", active_path=install_file)
     ) is True
     assert MainWindow._has_unsaved_editor_changes(
         window(modified=False, text="saved text")
@@ -233,7 +263,9 @@ def test_machine_command_queues_update_and_keeps_receipt_visible(monkeypatch, tm
         _update_machine_qr=lambda _result: None,
         close=lambda: None,
     )
-    window._has_unsaved_editor_changes = lambda: ui.MainWindow._has_unsaved_editor_changes(window)
+    window._has_unsaved_editor_changes = lambda **kwargs: ui.MainWindow._has_unsaved_editor_changes(
+        window, **kwargs
+    )
 
     ui.MainWindow._run_command(window, ":ec QUPDATE999 self-update")
 
