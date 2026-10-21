@@ -167,7 +167,7 @@ def test_manifest_change_triggers_single_sync_and_updates_stamp(tmp_path, monkey
     assert not any("install" in argv for argv in calls)
 
 
-def test_updater_invokes_venv_helper_instead_of_git_diff_heuristic():
+def test_updater_force_syncs_remote_main_and_invokes_venv_helper():
     root = Path(__file__).resolve().parents[1]
     updater = (root / "Atualizar_EasyChange.bat").read_text(
         encoding="utf-8", errors="replace"
@@ -177,9 +177,11 @@ def test_updater_invokes_venv_helper_instead_of_git_diff_heuristic():
     assert "if not exist" not in updater or ".venv" not in updater.split("if not exist", 1)[-1]
     assert ":python_error" in updater
     assert ":dependency_error" in updater
-    assert "git status --porcelain --untracked-files=all" in updater
     assert "git branch --show-current" in updater
-    assert "git merge-base --is-ancestor" in updater
-    assert "git merge --ff-only origin/main" in updater
-    assert 'git reset --keep "%OLD_VERSION%"' in updater
-    assert "git reset --hard" not in updater
+    assert "git remote get-url origin" in updater
+    assert "git fetch --prune origin main" in updater
+    assert "git reset --hard origin/main" in updater
+    assert "git clean -fd" in updater
+    assert 'set /p OLD_VERSION=<"%OLD_VERSION_FILE%"' in updater
+    assert "git merge-base --is-ancestor" not in updater
+    assert "git merge --ff-only origin/main" not in updater

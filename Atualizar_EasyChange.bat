@@ -17,27 +17,43 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem Refuse every local change, including staged and untracked files.
-for /f "delims=" %%S in ('git status --porcelain --untracked-files=all') do set "LOCAL_CHANGE=1"
-if defined LOCAL_CHANGE goto :local_changes
-
 for /f "delims=" %%B in ('git branch --show-current') do set "CURRENT_BRANCH=%%B"
 if /i not "%CURRENT_BRANCH%"=="main" goto :wrong_branch
 
-for /f %%V in ('git rev-parse HEAD') do set "OLD_VERSION=%%V"
+rem Capture the current revision through a file so CMD FOR-variable escaping
+rem cannot turn the revision into a literal %%V/%V argument.
+set "OLD_VERSION_FILE=%TEMP%\easychange-old-version-%RANDOM%-%RANDOM%.txt"
+git rev-parse HEAD > "%OLD_VERSION_FILE%"
+if errorlevel 1 goto :git_error
+set /p OLD_VERSION=<"%OLD_VERSION_FILE%"
+del /q "%OLD_VERSION_FILE%" >nul 2>nul
+if not defined OLD_VERSION goto :git_error
+
+for /f "delims=" %%R in ('git remote get-url origin 2^>nul') do set "ORIGIN_URL=%%R"
+if /i "%ORIGIN_URL%"=="https://github.com/gocsilva/EasyChange.git" goto :origin_ok
+if /i "%ORIGIN_URL%"=="https://github.com/gocsilva/EasyChange" goto :origin_ok
+if /i "%ORIGIN_URL%"=="git@github.com:gocsilva/EasyChange.git" goto :origin_ok
+if /i "%ORIGIN_URL%"=="ssh://git@github.com/gocsilva/EasyChange.git" goto :origin_ok
+goto :wrong_remote
+
+:origin_ok
 
 echo Atualizando EasyChange pela branch main...
 git fetch --prune origin main
 if errorlevel 1 goto :git_error
 
-git merge-base --is-ancestor "%OLD_VERSION%" origin/main
-if errorlevel 1 goto :diverged_history
-
-git merge --ff-only origin/main
+git rev-parse --verify origin/main >nul 2>nul
 if errorlevel 1 goto :git_error
 
-for /f %%V in ('git rev-parse HEAD') do set "NEW_VERSION=%%V"
-for /f %%V in ('git rev-parse --short HEAD') do set "VERSION=%%V"
+rem The remote EasyChange checkout is disposable: sync it exactly to GitHub main.
+rem This intentionally discards tracked local edits and removes untracked,
+rem non-ignored files. Ignored data such as .venv is preserved.
+git reset --hard origin/main
+if errorlevel 1 goto :git_error
+git clean -fd
+if errorlevel 1 goto :git_error
+
+for /f "delims=" %%R in ('git rev-parse --short HEAD') do set "VERSION=%%R"
 
 echo.
 echo Verificando se o ambiente virtual .venv precisa ser criado, reparado ou atualizado...
@@ -80,26 +96,18 @@ echo.
 echo EasyChange atualizado com sucesso. Versao Git: %VERSION%
 exit /b 0
 
-:local_changes
-echo.
-echo [ERRO] Existem alteracoes locais, staged ou nao rastreadas.
-echo O atualizador nao vai sobrescrever seu trabalho.
-echo Salve seu trabalho e execute a atualizacao novamente.
-call :pause_if_interactive
-exit /b 2
-
 :wrong_branch
 echo.
 echo [ERRO] O atualizador exige a branch main e nao vai trocar sua branch ativa.
 call :pause_if_interactive
 exit /b 2
 
-:diverged_history
+:wrong_remote
 echo.
-echo [ERRO] A main local nao e ancestral da origin/main; atualizacao recusada.
-echo O atualizador nao vai descartar commits locais nem reescrever historico.
+echo [ERRO] O remote origin nao aponta para gocsilva/EasyChange.
+echo O atualizador recusou alterar este repositorio.
 call :pause_if_interactive
-exit /b 3
+exit /b 2
 
 :python_error
 echo.
@@ -145,6 +153,6 @@ exit /b 0
 :git_error
 echo.
 echo [ERRO] Nao foi possivel atualizar o EasyChange.
-echo Nenhuma alteracao local foi apagada.
+echo O codigo pode ter sido sincronizado parcialmente; execute o atualizador novamente.
 call :pause_if_interactive
 exit /b 3
