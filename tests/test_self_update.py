@@ -87,7 +87,9 @@ def test_schedule_self_update_starts_worker_for_same_workspace(tmp_path, monkeyp
     workspace = tmp_path / "project with spaces"
     workspace.mkdir()
     log_path = tmp_path / "logs" / "update.log"
+    receipt_path = tmp_path / "logs" / "update-receipt.json"
     monkeypatch.setattr(self_update, "update_log_path", lambda: log_path)
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
     captured = {}
 
     def popen(argv, **kwargs):
@@ -108,12 +110,48 @@ def test_schedule_self_update_starts_worker_for_same_workspace(tmp_path, monkeyp
     assert result["workspace"] == str(workspace.resolve())
     assert result["restart_mode"] == "machine_hid"
     assert result["restart_grace_seconds"] == 45
+    assert result["worker_pid"] == 42
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["state"] == "SCHEDULED"
+    assert receipt["worker_pid"] == 42
+    assert receipt["workspace"] == str(workspace.resolve())
     assert captured["argv"][-6:] == [
         "--workspace", str(workspace.resolve()), "--parent-pid", "12",
         "--executable", "pythonw.exe",
     ]
     assert captured["kwargs"]["cwd"] == str(repo.resolve())
     assert log_path.exists()
+
+
+def test_schedule_self_update_records_worker_start_failure(tmp_path, monkeypatch):
+    repo = tmp_path / "EasyChange"
+    repo.mkdir()
+    (repo / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "update.log"
+    receipt_path = tmp_path / "logs" / "update-receipt.json"
+    monkeypatch.setattr(self_update, "update_log_path", lambda: log_path)
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+
+    def fail_to_start(*_args, **_kwargs):
+        raise OSError("worker launch failed")
+
+    result = self_update.schedule_self_update(
+        workspace,
+        repo_root=repo,
+        executable="pythonw.exe",
+        parent_pid=12,
+        platform_name="nt",
+        popen_factory=fail_to_start,
+    )
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert result["ok"] is False
+    assert result["error"] == "UPDATE_WORKER_START_FAILED"
+    assert receipt["state"] == "SCHEDULE_FAILED"
+    assert receipt["relaunch_state"] == "NOT_STARTED"
+    assert receipt["schedule_error"].startswith("OSError:")
 
 
 def test_update_worker_runs_github_updater_then_reopens_same_workspace(tmp_path, monkeypatch):

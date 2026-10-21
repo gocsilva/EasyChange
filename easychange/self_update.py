@@ -113,6 +113,8 @@ def read_update_status(*, repo_root: str | Path | None = None) -> dict:
         "revision_error": revisions.get("revision_error") or receipt.get("revision_error"),
         "relaunch_state": receipt.get("relaunch_state"),
         "workspace": receipt.get("workspace"),
+        "worker_pid": receipt.get("worker_pid"),
+        "schedule_error": receipt.get("schedule_error"),
         "finished_at_utc": receipt.get("finished_at_utc"),
     }
 
@@ -138,11 +140,35 @@ def schedule_self_update(
     python = executable or sys.executable
     target_workspace = Path(workspace).resolve()
     log_path = update_log_path()
+    scheduled_at = _utc_now()
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = log_path.open("a", encoding="utf-8")
     except OSError as exc:
         return {"ok": False, "error": "UPDATE_LOG_UNAVAILABLE", "detail": str(exc)}
+
+    # Persist handoff intent before spawning the detached worker. If Windows
+    # accepts Popen but the child cannot import/start (or the GUI restarts
+    # before it writes its RUNNING receipt), status must still distinguish an
+    # accepted handoff from a command that never scheduled an update.
+    revisions = _read_git_revisions(root)
+    scheduled_receipt = {
+        "schema": UPDATE_RECEIPT_SCHEMA,
+        "state": "SCHEDULED",
+        "updater_return_code": None,
+        "installed_git_sha": revisions.get("head_sha"),
+        "origin_main_sha": revisions.get("origin_main_sha"),
+        "relaunch_state": "PENDING",
+        "workspace": str(target_workspace),
+        "worker_pid": None,
+        "started_at_utc": scheduled_at,
+        "finished_at_utc": None,
+    }
+    try:
+        _write_update_receipt(scheduled_receipt)
+    except OSError as exc:
+        log.close()
+        return {"ok": False, "error": "UPDATE_RECEIPT_UNAVAILABLE", "detail": str(exc)}
 
     argv = [
         python,
@@ -162,7 +188,7 @@ def schedule_self_update(
         subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
     )
     try:
-        popen_factory(
+        worker = popen_factory(
             argv,
             cwd=str(root),
             stdin=subprocess.DEVNULL,
@@ -172,13 +198,43 @@ def schedule_self_update(
             creationflags=flags,
         )
     except (OSError, ValueError) as exc:
+        scheduled_receipt.update(
+            state="SCHEDULE_FAILED",
+            relaunch_state="NOT_STARTED",
+            schedule_error=f"{type(exc).__name__}:{str(exc)[:120]}",
+            finished_at_utc=_utc_now(),
+        )
+        try:
+            _write_update_receipt(scheduled_receipt)
+        except OSError:
+            pass
         log.close()
         return {"ok": False, "error": "UPDATE_WORKER_START_FAILED", "detail": str(exc)}
 
+    scheduled_receipt["worker_pid"] = int(getattr(worker, "pid", 0) or 0) or None
+    try:
+        receipt_path = update_receipt_path()
+        latest = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if (
+            isinstance(latest, dict)
+            and latest.get("schema") == UPDATE_RECEIPT_SCHEMA
+            and latest.get("state") == "SCHEDULED"
+            and latest.get("started_at_utc") == scheduled_at
+        ):
+            latest["worker_pid"] = scheduled_receipt["worker_pid"]
+            _write_update_receipt(latest)
+    except OSError:
+        # The pre-spawn receipt is already durable. The worker will replace it
+        # with RUNNING and its final update outcome when it begins. Do not
+        # overwrite a newer worker receipt if the detached child started fast.
+        pass
+    except (UnicodeError, json.JSONDecodeError):
+        pass
     log.close()
     return {
         "ok": True,
         "scheduled": True,
+        "worker_pid": scheduled_receipt["worker_pid"],
         "workspace": str(target_workspace),
         "restart_mode": "machine_hid",
         "restart_grace_seconds": RESTART_GRACE_SECONDS,
