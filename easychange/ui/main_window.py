@@ -842,7 +842,10 @@ class MainWindow(QMainWindow):
             and result.command == "state"
             and "--compact" in text.split()
         )
-        if early_read_optics:
+        early_result_optics = bool(
+            early_read_optics or sequenced_compact_state_optics
+        )
+        if early_result_optics:
             self._update_machine_qr(result)
         self._refresh_header()
         self._sync_optical_transport_controls()
@@ -853,18 +856,20 @@ class MainWindow(QMainWindow):
             # EC2 payload and digest relative to the durable result, and
             # needlessly inflates a 1-line answer into several dense QR cells.
             # Keep verbose focus diagnostics for human/unsequenced commands.
-            # Sequenced native reads persist their payload before the GUI adds
-            # optical-only fields; sequenced compact state keeps the essential
-            # confirmation boolean but omits the verbose focus object so its
-            # QR payload stays small enough for reliable HDMI delivery.
-            if not is_self_update and not (result.sequence and result.command == "read"):
-                if not sequenced_compact_state_optics:
-                    result.data["easychange_focus"] = focus
+            # Sequenced reads and compact state persist their payload before
+            # this UI callback. Keep their QR bytes identical to the durable
+            # result instead of appending GUI-only focus fields.
+            if (
+                not is_self_update
+                and not (result.sequence and result.command == "read")
+                and not sequenced_compact_state_optics
+            ):
+                result.data["easychange_focus"] = focus
                 result.data["command_focus_confirmed"] = bool(
                     focus.get("command_focus_confirmed")
                 )
         self.output.setPlainText(result.render(self.service.output))
-        if not early_read_optics:
+        if not early_result_optics:
             self._update_machine_qr(result)
         if result.ok and (result.data.get("path") or result.data.get("file")) and text.lstrip(":").split(maxsplit=1)[0] in {"open", "read", "context", "goto", "reload"}:
             try:

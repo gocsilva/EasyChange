@@ -12,6 +12,7 @@ pytest.importorskip("qrcode")
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from easychange.core.result import Result
 from easychange.core.workspace import Workspace
 from easychange.ui.main_window import MainWindow
 import easychange.ui.main_window as main_window_module
@@ -42,6 +43,40 @@ def test_machine_mode_keeps_command_focus_and_renders_sequence_qr(tmp_path):
     window.editor.setFocus(); app.processEvents()
     app.processEvents()
     assert window.command.hasFocus()
+    window.close(); app.processEvents()
+
+
+def test_compact_sequenced_state_publishes_persisted_qr_before_focus_events(
+    tmp_path, monkeypatch
+):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    result = Result(
+        True,
+        "state",
+        data={"state": "READY"},
+        sequence="QGUISTATE1",
+    )
+    events = []
+    optical_data = []
+    monkeypatch.setattr(window.service, "execute", lambda _text: result)
+    monkeypatch.setattr(
+        window,
+        "_update_machine_qr",
+        lambda value: (events.append("qr"), optical_data.append(dict(value.data))),
+    )
+    monkeypatch.setattr(
+        window,
+        "focus_command",
+        lambda: events.append("focus") or {"command_focus_confirmed": True},
+    )
+
+    window._run_command(":ec QGUISTATE1 :state --compact")
+
+    assert events[0:2] == ["qr", "focus"]
+    assert optical_data == [{"state": "READY"}]
+    assert "command_focus_confirmed" not in result.data
+    assert "easychange_focus" not in result.data
     window.close(); app.processEvents()
 
 
