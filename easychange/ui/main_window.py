@@ -794,8 +794,11 @@ class MainWindow(QMainWindow):
             result = self.service.execute(text)
         if result.ok and result.data.get("update_request") == "github_main":
             if getattr(self, "_update_restart_scheduled", False):
-                result.data["scheduled"] = True
-                result.data["duplicate_request"] = True
+                result.data = {
+                    "scheduled": True,
+                    "duplicate_request": True,
+                    "restart_mode": "machine_hid",
+                }
             else:
                 handoff = schedule_self_update(
                     self.service.workspace.root_path,
@@ -803,7 +806,15 @@ class MainWindow(QMainWindow):
                 )
                 if handoff.get("ok"):
                     self._update_restart_scheduled = True
-                    result.data.update(handoff)
+                    # Keep the restart receipt to one optical packet where
+                    # possible. A multi-page result can outlive the handoff
+                    # grace period and lose its final HDMI acknowledgement.
+                    result.data = {
+                        "scheduled": True,
+                        "restart_mode": str(
+                            handoff.get("restart_mode") or "machine_hid"
+                        ),
+                    }
                 else:
                     result.ok = False
                     result.code = str(handoff.get("error") or "SELF_UPDATE_FAILED")
@@ -837,7 +848,7 @@ class MainWindow(QMainWindow):
             # needlessly inflates a 1-line answer into several dense QR cells.
             # Keep focus diagnostics for unsequenced prepare/state and all
             # other existing consumers; only compact the proven read path.
-            if not (result.sequence and result.command == "read"):
+            if not is_self_update and not (result.sequence and result.command == "read"):
                 result.data["easychange_focus"] = focus
                 result.data["command_focus_confirmed"] = bool(
                     focus.get("command_focus_confirmed")

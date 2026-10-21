@@ -213,7 +213,9 @@ def test_unsaved_editor_guard_compares_disk_and_can_discard_easychange(tmp_path,
 
 
 def test_machine_command_queues_update_and_keeps_receipt_visible(monkeypatch, tmp_path):
+    import json
     from easychange.core.result import Result
+    from easychange.remote.optical_protocol import encode_result_bundle
     from easychange.ui import main_window as ui
 
     result = Result(
@@ -230,6 +232,8 @@ def test_machine_command_queues_update_and_keeps_receipt_visible(monkeypatch, tm
         or {
             "ok": True,
             "scheduled": True,
+            "workspace": str(workspace),
+            "restart_mode": "machine_hid",
             "restart_grace_seconds": self_update.RESTART_GRACE_SECONDS,
         },
     )
@@ -272,4 +276,10 @@ def test_machine_command_queues_update_and_keeps_receipt_visible(monkeypatch, tm
     assert calls["scheduled"][0][0] == workspace
     assert window._update_restart_scheduled is True
     assert calls["timers"] == [(45_000, window.close)]
-    assert result.data["scheduled"] is True
+    assert result.data == {
+        "scheduled": True,
+        "restart_mode": "machine_hid",
+    }
+    packets, _header = encode_result_bundle(result.to_wire_dict())
+    assert len(packets) == 1
+    assert len(json.dumps(result.to_wire_dict(), separators=(",", ":"))) < 180
