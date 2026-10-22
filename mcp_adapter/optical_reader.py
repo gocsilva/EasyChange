@@ -271,6 +271,34 @@ def decode_hdmi_qr(frame) -> list[str]:
         if not decoded:
             single,_points,_rectified=detector.detectAndDecode(frame)
             if isinstance(single,str) and single:decoded=[single]
+
+        # OpenCV multi-detection may see only 3/4 QR cells on a compact
+        # EasyChange footer at 1080p. Decode four overlapping footer crops
+        # individually without changing the EC2 integrity-verification path.
+        height, width = shape[:2]
+        if 0 < len(decoded) < 4 and width >= 1000 and height >= 600 and width >= height:
+            left = int(width * 0.305)
+            top = int(height * 0.63)
+            column = (width - left) / 4
+            overlap = max(8, int(column * 0.045))
+            seen = set(decoded)
+            for slot in range(4):
+                x0 = max(0, int(left + slot * column) - overlap)
+                x1 = min(width, int(left + (slot + 1) * column) + overlap)
+                if x1 <= x0:
+                    continue
+                try:
+                    crop = frame[top:height, x0:x1]
+                    value, _points, _rectified = detector.detectAndDecode(crop)
+                except (TypeError, AttributeError, IndexError, cv2.error):
+                    # A minimal/non-sliceable frame must preserve the QR
+                    # symbols already decoded from its full-frame content.
+                    continue
+                if isinstance(value, str) and value and value not in seen:
+                    seen.add(value)
+                    decoded.append(value)
+                    if len(decoded) == 4:
+                        break
         return decoded
     except (cv2.error, TypeError, ValueError):
         # A transient invalid image or interrupted capture cannot imply
