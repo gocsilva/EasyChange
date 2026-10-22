@@ -227,10 +227,14 @@ def test_small_mutation_and_recovery_results_encode_inline(tmp_path, monkeypatch
     )
     window._update_machine_qr(Result(True, command, {"x": 1}, sequence="QX"))
     _drain_optical(window, app)
-    assert window._optical_burst is True
-    assert window._optical_timer.isActive() is False
+    assert window._optical_burst is False
+    assert window._optical_timer.isActive() is True
     assert len(window._optical_payloads) == 5
-    assert sum(1 for label in window.machine_qrs if label.pixmap() and not label.pixmap().isNull()) == 32
+    assert sum(1 for label in window.machine_qrs if label.pixmap() and not label.pixmap().isNull()) == 4
+    assert all(
+        label.width() == window._OPTICAL_COMPACT_QR_SIZE
+        for label in window.machine_qrs
+    )
     window.close(); app.processEvents()
 
 

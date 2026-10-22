@@ -95,10 +95,10 @@ class MainWindow(QMainWindow):
     _OPTICAL_OVERFLOW_BROADCAST_CHUNKS = 3
     _STARTUP_FOCUS_RETRY_MS = 100
     _STARTUP_FOCUS_MAX_ATTEMPTS = 30
-    # More than one 4-QR row should not rotate in compact mode.
-    # Switch to the 32-slot canvas so 5-32 chunks are visible simultaneously
-    # and duplicated padding adds optical redundancy.
-    _OPTICAL_BURST_THRESHOLD = 4
+    # Medium results rotate through the normal 4-slot layout so each QR stays
+    # large enough for HDMI decoding. Reserve the dense 32-slot canvas for
+    # larger results where a carousel would take too long.
+    _OPTICAL_BURST_THRESHOLD = 31
 
     def __init__(self, workspace: Workspace, *, machine_mode: bool | None = None, hid_mode: bool = False) -> None:
         super().__init__()
