@@ -57,3 +57,18 @@ WinRT signature before resorting to an unfiltered enumeration that must prove
 scanner when paired-device enumeration itself cannot run. No unpaired item
 from an unfiltered enumeration may be used for GATT. These alternatives are
 read-only OS discovery, and don't unpair HID, flash the ESP, or bypass SAS.
+
+
+### Paired device connected as HID but absent from discovery
+
+Windows Bluetooth paired-device AQS selectors identify
+`DeviceInformationKind.ASSOCIATION_ENDPOINT`, not the default device
+interface kind. The EasyChange client now requests the association endpoint
+explicitly via the three-argument WinRT enumeration API, falling back only
+when the binding lacks that overload.
+
+If no device was discovered, the displayed BUSCA_BLE error includes counts
+`paired` (Windows paired BLE association records), `named` (records
+matching our ESP HID device name), `matched` (records with verified pairing
+status), and `scan` (raw advertisements seen by Bleak). These counters do
+not identify a device by name alone or bypass secure SAS verification.

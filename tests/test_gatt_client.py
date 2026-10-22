@@ -338,3 +338,67 @@ def test_winrt_two_argument_iterable_conversion_error_tries_no_arg(monkeypatch):
     assert isinstance(target, FakeBLEDevice)
     assert target.address == "A1:B2:C3:D4:E5:F6"
     assert [len(call) for call in calls] == [1, 2, 0]
+
+
+
+def test_winrt_paired_le_query_must_specify_association_endpoint(monkeypatch):
+    devices, FakeBLEDevice = _fake_winrt_pair(monkeypatch, entries=[
+        ("BT KeyboardMouse E", "esp", 0xA1B2C3D4E5F6),
+    ])
+    module = sys.modules["winrt.windows.devices.enumeration"]
+    module.DeviceInformationKind = types.SimpleNamespace(
+        ASSOCIATION_ENDPOINT=5, DEVICE_INTERFACE=1)
+    calls = []
+
+    async def enumerate_endpoint(*args):
+        calls.append(args)
+        if len(args) != 3 or args[2] != 5:
+            return []   # Windows default DeviceInterface would miss the bond
+        return [types.SimpleNamespace(
+            name="BT KeyboardMouse E", id="esp",
+            pairing=types.SimpleNamespace(is_paired=True))]
+    monkeypatch.setattr(module.DeviceInformation, "find_all_async", enumerate_endpoint)
+    info = {}
+    device = asyncio.run(gatt_client._paired_windows_ble_target(info))
+    assert isinstance(device, FakeBLEDevice)
+    assert device.address == "A1:B2:C3:D4:E5:F6"
+    assert calls == [("PAIRED_LE_ONLY", [], 5)]
+    assert info == {"paired_records": 1, "named_records": 1, "matching_records": 1}
+    assert devices["esp"].closed is True
+
+
+def test_empty_paired_aep_and_advertisement_reports_counts(monkeypatch):
+    _fake_winrt_pair(monkeypatch, entries=[])
+    module = sys.modules["winrt.windows.devices.enumeration"]
+    module.DeviceInformationKind = types.SimpleNamespace(
+        ASSOCIATION_ENDPOINT=5)
+    monkeypatch.delenv("EASYCHANGE_BLE_DEVICE_ADDRESS", raising=False)
+
+    class NoAdvertisements:
+        @staticmethod
+        async def discover(timeout):
+            assert timeout == 4
+            return []
+    with pytest.raises(RuntimeError, match=r"paired=0, named=0, matched=0, scan=0"):
+        asyncio.run(gatt_client.EasyChangeGattClient()._resolve_target(NoAdvertisements))
+
+
+def test_named_unpaired_aep_cannot_be_selected(monkeypatch):
+    _fake_winrt_pair(monkeypatch, entries=[
+        ("BT KeyboardMouse E", "esp", 0xA1B2C3D4E5F6),
+    ])
+    module = sys.modules["winrt.windows.devices.enumeration"]
+    module.DeviceInformationKind = types.SimpleNamespace(
+        ASSOCIATION_ENDPOINT=5)
+
+    async def enumerate_aep(*args):
+        assert args[2] == 5
+        return [types.SimpleNamespace(
+            name="BT KeyboardMouse E", id="esp",
+            pairing=types.SimpleNamespace(is_paired=False))]
+    monkeypatch.setattr(module.DeviceInformation, "find_all_async", enumerate_aep)
+    counts = {}
+    device = asyncio.run(gatt_client._paired_windows_ble_target(counts))
+    assert device is None
+    assert counts["named_records"] == 1
+    assert counts["matching_records"] == 0

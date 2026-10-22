@@ -39,7 +39,7 @@ def _ble_address(value: int) -> str:
     return ":".join(text[i:i + 2] for i in range(0, 12, 2))
 
 
-async def _paired_windows_device_infos(device_information, selector):
+async def _paired_windows_device_infos(device_information, selector, kind=None):
     """Handle PyWinRT FindAllAsync overload differences safely.
 
     Some Windows Python WinRT bindings reject the AQS-only overload with
@@ -47,11 +47,18 @@ async def _paired_windows_device_infos(device_information, selector):
     then the no-argument enumerator as a final compatibility fallback. An
     unfiltered list MUST be checked for pairing before selecting a device.
     """
-    for args, paired_filter_from_windows in (
+    # Paired BluetoothLEDevice selectors describe ASSOCIATION_ENDPOINT
+    # objects, not the default DEVICE_INTERFACE kind. Without this
+    # explicit kind, Windows can return zero matches for an active HID bond.
+    variants = []
+    if kind is not None:
+        variants.append(((selector, [], kind), True))
+    variants.extend((
         ((selector,), True),
         ((selector, []), True),
         ((), False),
-    ):
+    ))
+    for args, paired_filter_from_windows in variants:
         try:
             devices = await device_information.find_all_async(*args)
             return devices, paired_filter_from_windows
@@ -63,13 +70,14 @@ async def _paired_windows_device_infos(device_information, selector):
     raise RuntimeError("WINRT_FIND_ALL_ASYNC_OVERLOADS_UNSUPPORTED")
 
 
-async def _paired_windows_ble_target():
+async def _paired_windows_ble_target(diagnostic=None):
     """Find an already paired HID device even when it stops advertising."""
     if not _on_windows():
         return None
     from bleak.backends.device import BLEDevice
     from winrt.windows.devices.bluetooth import BluetoothLEDevice
     from winrt.windows.devices.enumeration import DeviceInformation
+    from winrt.windows.devices import enumeration as enumeration_module
 
     # Some WinRT projections reject selectors or overloads at runtime.
     # Never let an optional paired-device lookup prevent ordinary BLE scan.
@@ -79,19 +87,29 @@ async def _paired_windows_ble_target():
     except TypeError:
         selector = BluetoothLEDevice.get_device_selector()
         selector_is_paired = False
+    kind_type = getattr(enumeration_module, "DeviceInformationKind", None)
+    endpoint_kind = getattr(kind_type, "ASSOCIATION_ENDPOINT", None)
     items, paired_filter_from_windows = await _paired_windows_device_infos(
-        DeviceInformation, selector)
+        DeviceInformation, selector, kind=endpoint_kind)
     paired_filter_from_windows = paired_filter_from_windows and selector_is_paired
     matched = []
+    if isinstance(diagnostic, dict):
+        diagnostic["paired_records"] = min(9999, len(items))
+        diagnostic["named_records"] = 0
+        diagnostic["matching_records"] = 0
     for item in items:
-        if str(getattr(item, "name", "")).strip() != DEVICE_NAME:
+        if str(getattr(item, "name", "")).strip().casefold() != DEVICE_NAME.casefold():
             continue
+        if isinstance(diagnostic, dict):
+            diagnostic["named_records"] += 1
         pairing = getattr(item, "pairing", None)
         if not paired_filter_from_windows and getattr(pairing, "is_paired", False) is not True:
             continue
         if pairing is not None and getattr(pairing, "is_paired", True) is False:
             continue
         matched.append(item)
+    if isinstance(diagnostic, dict):
+        diagnostic["matching_records"] = len(matched)
     if not matched:
         return None
     addresses = set()
@@ -156,9 +174,10 @@ class EasyChangeGattClient:
                 from bleak.backends.device import BLEDevice
                 return BLEDevice(address.upper(), DEVICE_NAME, None)
             return address
+        discovery = {}
         if _on_windows():
             try:
-                target = await _paired_windows_ble_target()
+                target = await _paired_windows_ble_target(discovery)
             except (ImportError, OSError) as exc:
                 self._last_error = "PAIRED_LOOKUP_UNAVAILABLE: " + type(exc).__name__
                 target = None
@@ -177,7 +196,11 @@ class EasyChangeGattClient:
         if len(matches) > 1:
             raise RuntimeError("ESP_BLE_ADVERTISING_MULTIPLE_SAME_NAME")
         if not matches:
-            raise RuntimeError("ESP_BLE_NOT_DISCOVERABLE_OR_NOT_PAIRED")
+            stats = (f"paired={discovery.get('paired_records', '?')}, "
+                     f"named={discovery.get('named_records', '?')}, "
+                     f"matched={discovery.get('matching_records', '?')}, "
+                     f"scan={len(results)}")
+            raise RuntimeError("ESP_BLE_NOT_DISCOVERABLE_OR_NOT_PAIRED [" + stats + "]")
         return matches[0]
 
     def _emit(self, event: dict) -> None:
