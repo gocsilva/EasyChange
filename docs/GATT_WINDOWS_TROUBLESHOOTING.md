@@ -186,3 +186,23 @@ transporte e autorizacao. Nao afirma reparar permissoes do servidor GATT:
 a causa fisica da recusa continua necessitando verificacao caso persista.
 O QR/HID ja existente permanece funcional, mas nao e necessario para ler
 a janela Diagnostico GATT por HDMI.
+
+
+### Diagnostico independente do CCCD
+
+O firmware opcional 880de95+diagnostico inclui uma caracteristica de leitura
+somente leitura `c24c1e20-9b28-4e07-9c29-20167e20a4e4`. O valor
+publico fixo `BMO-GATT-DIAG-1` nao contem chave, numero de serie,
+comando nem endereco. Ao abrir o link BLE, antes de `start_notify`,
+EasyChange faz exatamente uma leitura GATT sem cache, com timeout.
+
+O log `GATT_LEITURA_TESTE` informa:
+- `DIAG_CHARACTERISTIC_ABSENT`: firmware antigo, sem experimento;
+- `DIAG_READ_OK`: leitura da caracteristica personalizada permitida,
+  podendo o problema estar restrito ao CCCD;
+- `DIAG_READ_FAILED:...Access Denied`: leitura do servico personalizado
+  tambem foi recusada pelo Windows;
+- outro erro: registrar excecao real, sem supor politica corporativa.
+
+O teste nao ignora autorizacao, nao emparelha dispositivo, nao escreve
+CCCD, nao executa comandos e nao substitui autenticação SAS/AEAD.

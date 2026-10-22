@@ -23,6 +23,7 @@ from .gatt_wire import FramedMessages, frame_object, fragments, seal_json, open_
 SERVICE_UUID = "c24c1e20-9b28-4e07-9c29-20167e20a4e1"
 HOST_TO_REMOTE_UUID = "c24c1e20-9b28-4e07-9c29-20167e20a4e2"
 REMOTE_TO_HOST_UUID = "c24c1e20-9b28-4e07-9c29-20167e20a4e3"
+DIAGNOSTIC_READ_UUID = "c24c1e20-9b28-4e07-9c29-20167e20a4e4"
 DEVICE_NAME = "BT KeyboardMouse E"
 SEQUENCE_RE = re.compile(r"Q[A-Z0-9_-]{4,40}\Z")
 
@@ -228,6 +229,32 @@ def _is_cccd_write_denied(exc: BaseException) -> bool:
     return ("write not permitted" in message and
             ("gatt" in message or "protocol error" in message or
              "0x03" in message or "(3," in message))
+
+
+async def _custom_service_read_probe(client) -> str:
+    """Optional, safe read of public diagnostic marker (never commands or keys).
+
+    Distinguishes custom-service read access from CCCD subscription access.
+    Firmware before the read-only diagnostic characteristic reports ABSENT.
+    """
+    services = getattr(client, "services", None)
+    if services is None:
+        return "DIAG_SERVICES_UNAVAILABLE"
+    try:
+        char = services.get_characteristic(DIAGNOSTIC_READ_UUID)
+        if char is None:
+            return "DIAG_CHARACTERISTIC_ABSENT"
+        properties = {str(p).lower() for p in (getattr(char, "properties", ()) or ())}
+        if "read" not in properties:
+            return "DIAG_CHARACTERISTIC_NOT_READABLE"
+        raw = bytes(await asyncio.wait_for(
+            client.read_gatt_char(char, use_cached=False), timeout=4))
+        # Do not expose peripheral data in log; compare against one fixed
+        # public protocol marker only.
+        return ("DIAG_READ_OK" if raw == b"BMO-GATT-DIAG-1"
+                else "DIAG_READ_UNEXPECTED_LENGTH:" + str(len(raw)))
+    except Exception as exc:
+        return "DIAG_READ_FAILED:" + type(exc).__name__ + ":" + str(exc)[:110]
 
 
 async def _cccd_readonly_probe(client) -> str:
@@ -483,6 +510,12 @@ class EasyChangeGattClient:
                                 _gatt_attribute_details(getattr(client, "services", None))
                                 if getattr(client, "services", None) is not None
                                 else "Servicos BLE indisponiveis")
+                    # Readable characteristic is independent of CCCD (0x2902).
+                    # Perform one bounded read while the same BLE link is open.
+                    # Firmware without this optional characteristic is valid.
+                    read_result = await _custom_service_read_probe(client)
+                    self._trace("GATT_LEITURA_TESTE",
+                                f"Servico personalizado, acesso somente leitura: {read_result}")
                     self._trace("INSCRICAO_GATT", "Solicitando notificacoes da "
                                 f"caracteristica {HOST_TO_REMOTE_UUID}; {gatt_metadata}")
                     try:

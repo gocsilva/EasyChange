@@ -786,3 +786,38 @@ def test_att03_cccd_read_runs_while_ble_link_is_still_connected(monkeypatch):
     assert "CCCD_READ_OK:0x0000" in probe[0]
     assert "conectado=True" in probe[0]
     assert bridge._accepted is False
+
+
+def test_custom_gatt_probe_is_read_only_without_cccd_or_secret_payload():
+    from easychange.remote import gatt_client
+    import types
+    characteristic = types.SimpleNamespace(properties=["read"], handle=116)
+    class Services:
+        def get_characteristic(self, uuid):
+            assert uuid == gatt_client.DIAGNOSTIC_READ_UUID
+            return characteristic
+    class Client:
+        services = Services()
+        async def read_gatt_char(self, specifier, *, use_cached):
+            assert specifier is characteristic and use_cached is False
+            return b"BMO-GATT-DIAG-1"
+        async def write_gatt_char(self, *_args, **_kwargs):
+            raise AssertionError("Read-only diagnostic must never write")
+        async def start_notify(self, *_args, **_kwargs):
+            raise AssertionError("Probe must not subscribe to notifications")
+    assert asyncio.run(gatt_client._custom_service_read_probe(Client())) == "DIAG_READ_OK"
+
+
+def test_custom_gatt_probe_reports_old_firmware_or_access_denied():
+    from easychange.remote import gatt_client
+    import types
+    class OldClient:
+        services = types.SimpleNamespace(get_characteristic=lambda _: None)
+    assert asyncio.run(gatt_client._custom_service_read_probe(OldClient())) == "DIAG_CHARACTERISTIC_ABSENT"
+    class ReadDenied:
+        services = types.SimpleNamespace(get_characteristic=lambda _: types.SimpleNamespace(
+            properties=["read"]))
+        async def read_gatt_char(self, *_args, **_kwargs):
+            raise PermissionError("Access Denied")
+    result = asyncio.run(gatt_client._custom_service_read_probe(ReadDenied()))
+    assert result == "DIAG_READ_FAILED:PermissionError:Access Denied"
