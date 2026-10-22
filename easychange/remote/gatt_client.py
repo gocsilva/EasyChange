@@ -24,7 +24,7 @@ SERVICE_UUID = "c24c1e20-9b28-4e07-9c29-20167e20a4e1"
 HOST_TO_REMOTE_UUID = "c24c1e20-9b28-4e07-9c29-20167e20a4e2"
 REMOTE_TO_HOST_UUID = "c24c1e20-9b28-4e07-9c29-20167e20a4e3"
 DIAGNOSTIC_READ_UUID = "c24c1e20-9b28-4e07-9c29-20167e20a4e4"
-DEVICE_NAME = "BT KeyboardMouse E"
+DEVICE_NAME = "Easy"
 SEQUENCE_RE = re.compile(r"Q[A-Z0-9_-]{4,40}\Z")
 
 
@@ -95,7 +95,7 @@ async def _paired_windows_device_infos(device_information, selector, kind=None,
 
 
 async def _paired_windows_ble_target(diagnostic=None):
-    """Find an already paired HID device even when it stops advertising."""
+    """Find an already paired generic GATT peripheral named Easy."""
     if not _on_windows():
         return None
     from bleak.backends.device import BLEDevice
@@ -395,7 +395,7 @@ class EasyChangeGattClient:
                 "last_stage": self._last_stage, "last_error": self._last_error}
 
     async def _resolve_target(self, scanner):
-        """Use the paired Windows BLE HID record when advertisements have stopped."""
+        """Discover the generic BLE GATT peripheral Easy (paired or advertising)."""
         address = os.getenv("EASYCHANGE_BLE_DEVICE_ADDRESS", "").strip()
         if address:
             self._trace("DESCOBERTA", "Endereco BLE explicito configurado (valor ocultado)")
@@ -486,7 +486,7 @@ class EasyChangeGattClient:
             cccd_denied = False
             self._attempt += 1
             self._trace("BUSCA_BLE", f"Tentativa #{self._attempt}: iniciando descoberta do "
-                        "ESP Bluetooth HID emparelhado")
+                        "ESP Bluetooth GATT 'Easy' (sem perfil HID)")
             try:
                 target = await self._resolve_target(BleakScanner)
                 stage = "CONEXAO_BLE"
@@ -494,8 +494,8 @@ class EasyChangeGattClient:
                 options = {"winrt": {"use_cached_services": False}} if _on_windows() else {}
                 self._trace("CONEXAO_BLE", "Dispositivo resolvido; abrindo conexao "
                             f"com timeout=12s, cache_servicos_desabilitado={_on_windows()}")
-                # This firmware adds a custom GATT service to an old HID bond.
-                # Windows must read its CURRENT attribute DB, not a cached one.
+                # GATT-only firmware Easy, not a Windows-owned BLE HID profile.
+                # Request fresh GATT attributes rather than stale HID cache.
                 async with BleakClient(target, timeout=12, **options) as client:
                     self._client = client
                     self._sending = asyncio.Lock()

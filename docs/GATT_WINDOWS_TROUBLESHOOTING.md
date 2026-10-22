@@ -206,3 +206,27 @@ O log `GATT_LEITURA_TESTE` informa:
 
 O teste nao ignora autorizacao, nao emparelha dispositivo, nao escreve
 CCCD, nao executa comandos e nao substitui autenticação SAS/AEAD.
+
+
+### Firmware Easy: Bluetooth exclusivamente GATT, USB exclusivamente HID
+
+A nova identidade BLE de anunciante e `Easy`, com appearance generic
+(0x0000) e UUID do nosso servico 128-bit anunciado. Nenhum servico
+Bluetooth HID 0x1812 e exposto nesse firmware. A busca Bleak WinRT
+so tenta o nome `Easy`; registro Bluetooth antigo `BT KeyboardMouse E`
+e legado e nao pode ser reutilizado como Easy para evitar identidade errada.
+
+O ESP tem duas interfaces fisicas distintas:
+- UART USB-serial CH343 (COM4) ligada ao PC **local** controlado pelo MCP;
+- USB nativo TinyUSB HID (teclado e mouse) ligado ao PC **remoto**.
+
+O Bluetooth **nao** e um receptor wireless para a porta USB HID. Um
+dongle sem fio exigiria um receptor separado no PC remoto. Quando o
+USB nativo do ESP nao estiver fisicamente ligado ao PC remoto e
+`USB_HID_CONNECTED=0`, nao gravar o novo firmware: os comandos HID
+deixarao de funcionar porque nao havera rota BLE de teclado/mouse.
+
+No Windows remoto, `Easy` deve aparecer como dispositivo Bluetooth
+LE generico (o Windows determina a rotulagem); emparelhar apenas com
+consentimento do operador e sem direitos de administrador. O controle
+do EasyChange deve usar o GATT criptografado, mantendo SAS/AEAD.
