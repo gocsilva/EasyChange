@@ -20,6 +20,7 @@ from easychange.core.maintenance_service import MaintenanceService
 from easychange.core.operation_registry import (
     STRUCTURED_MUTATION_TYPES,
     STRUCTURED_RECOVERY_TYPES,
+    TEXT_MUTATION_COMMANDS,
 )
 from easychange.core.result import Result
 from easychange.core.workspace import Workspace
@@ -1153,7 +1154,11 @@ class MainWindow(QMainWindow):
             getattr(result, "ok", False)
             and getattr(result, "sequence", None)
             and isinstance(state_data, dict)
-            and inline_command in (STRUCTURED_MUTATION_TYPES | STRUCTURED_RECOVERY_TYPES)
+            and inline_command in (
+                STRUCTURED_MUTATION_TYPES
+                | STRUCTURED_RECOVERY_TYPES
+                | TEXT_MUTATION_COMMANDS
+            )
         ):
             try:
                 inline_small_terminal_result = len(json.dumps(

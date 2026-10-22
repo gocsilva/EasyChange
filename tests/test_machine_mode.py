@@ -205,7 +205,8 @@ def test_optical_burst_pads_final_page_to_all_32_visible_slots(tmp_path):
 
 
 
-def test_five_chunk_result_enters_single_page_burst_with_redundancy(tmp_path, monkeypatch):
+@pytest.mark.parametrize("command", ["delete", "result_chunks"])
+def test_small_mutation_and_recovery_results_encode_inline(tmp_path, monkeypatch, command):
     from easychange.core.result import Result
 
     app = QApplication.instance() or QApplication([])
@@ -224,7 +225,7 @@ def test_five_chunk_result_enters_single_page_burst_with_redundancy(tmp_path, mo
             '{"p":"EC2H","s":"QX","n":5}',
         ),
     )
-    window._update_machine_qr(Result(True, "result_chunks", {"x": 1}, sequence="QX"))
+    window._update_machine_qr(Result(True, command, {"x": 1}, sequence="QX"))
     _drain_optical(window, app)
     assert window._optical_burst is True
     assert window._optical_timer.isActive() is False
