@@ -723,3 +723,66 @@ def test_manual_retry_is_only_a_worker_wakeup_not_windows_policy_change():
     bridge._retry_wakeup = signal
     assert bridge.retry_now() is True
     assert signal.called == 1
+
+
+
+def test_att03_cccd_read_runs_while_ble_link_is_still_connected(monkeypatch):
+    """Regression: async-with exit disconnects before an outer except block."""
+    _fake_winrt_pair(monkeypatch, entries=[])
+    order = []
+    cccd = types.SimpleNamespace(
+        uuid="00002902-0000-1000-8000-00805f9b34fb", handle=113)
+
+    class Services:
+        def get_service(self, uuid):
+            return types.SimpleNamespace()
+        def get_characteristic(self, uuid):
+            return types.SimpleNamespace(
+                descriptors=[cccd], handle=111, properties=["notify"])
+
+    class FailingClient:
+        services = Services()
+        is_connected = True
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            order.append("connect")
+            return self
+
+        async def __aexit__(self, *args):
+            order.append("disconnect")
+            self.is_connected = False
+
+        async def start_notify(self, uuid, callback):
+            order.append("notify")
+            raise RuntimeError("GATT Protocol Error: Write Not Permitted (0x03)")
+
+        async def read_gatt_descriptor(self, descriptor, *, use_cached):
+            assert self.is_connected, "Must read CCCD before client.__aexit__"
+            assert descriptor is cccd and use_cached is False
+            order.append("cccd_read")
+            return b"\x00\x00"
+
+    monkeypatch.setattr(sys.modules["bleak"], "BleakClient", FailingClient, raising=False)
+    monkeypatch.setattr(sys.modules["bleak"], "BleakScanner", object, raising=False)
+    bridge = gatt_client.EasyChangeGattClient()
+
+    async def device(_scanner):
+        return types.SimpleNamespace(address="AA:BB:CC:DD:EE:FF")
+
+    async def end_round(seconds):
+        bridge._stop.set()
+
+    monkeypatch.setattr(bridge, "_resolve_target", device)
+    monkeypatch.setattr(bridge, "_retry_delay", end_round)
+    asyncio.run(bridge._run())
+    assert order == ["connect", "notify", "cccd_read", "disconnect"]
+    events = bridge.diagnostics.snapshot(0, 200)["events"]
+    probe = [event["message"] for event in events
+             if event["stage"] == "CCCD_ATT03_PROBE"]
+    assert len(probe) == 1
+    assert "CCCD_READ_OK:0x0000" in probe[0]
+    assert "conectado=True" in probe[0]
+    assert bridge._accepted is False

@@ -454,6 +454,7 @@ class EasyChangeGattClient:
             stage = "BUSCA_BLE"
             failure = ""
             gatt_metadata = ""
+            cccd_state = "CCCD_READ_NOT_ATTEMPTED"
             self._last_stage = stage
             cccd_denied = False
             self._attempt += 1
@@ -484,7 +485,20 @@ class EasyChangeGattClient:
                                 else "Servicos BLE indisponiveis")
                     self._trace("INSCRICAO_GATT", "Solicitando notificacoes da "
                                 f"caracteristica {HOST_TO_REMOTE_UUID}; {gatt_metadata}")
-                    await client.start_notify(HOST_TO_REMOTE_UUID, self._notify)
+                    try:
+                        await client.start_notify(HOST_TO_REMOTE_UUID, self._notify)
+                    except Exception as notify_exc:
+                        # Must inspect while BleakClient is STILL connected:
+                        # outside the async-with, __aexit__ has disconnected
+                        # and any CCCD read yields a misleading failure.
+                        if _is_cccd_write_denied(notify_exc):
+                            cccd_state = await _cccd_readonly_probe(client)
+                            self._trace(
+                                "CCCD_ATT03_PROBE",
+                                "Leitura somente-leitura do descritor durante "
+                                f"vinculo ativo: {cccd_state}; "
+                                f"conectado={bool(client.is_connected)}")
+                        raise
                     self._trace("INSCRICAO_GATT", "Inscricao confirmada pelo sistema")
                     self._consecutive_cccd_denials = 0
                     stage = "CONECTADO"
@@ -506,7 +520,6 @@ class EasyChangeGattClient:
                     if _is_cccd_write_denied(exc):
                         cccd_denied = True
                         self._consecutive_cccd_denials += 1
-                        cccd_state = await _cccd_readonly_probe(client)
                         self._trace("CCCD_ATT03", "Recusa do servidor BLE ao "
                                     "habilitar notificacoes: ATT 0x03 Write Not Permitted; "
                                     f"recusas={self._consecutive_cccd_denials}; "
