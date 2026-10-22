@@ -7,6 +7,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from easychange.remote.optical_protocol import encode_durable_result_header, encode_result_bundle
+from easychange.remote.gatt_client import EasyChangeGattClient
 
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPixmap, QShortcut
@@ -278,6 +279,14 @@ class MainWindow(QMainWindow):
         self._command_poll_timer = QTimer(self)
         self._command_poll_timer.setInterval(30)
         self._command_poll_timer.timeout.connect(self._poll_machine_command)
+        self._gatt_client = EasyChangeGattClient()
+        self._gatt_status = QLabel('GATT: conectando Bluetooth em segundo plano...')
+        self._gatt_status.setObjectName('easychangeGattStatus')
+        self._gatt_timer = QTimer(self)
+        self._gatt_timer.setInterval(100)
+        self._gatt_timer.timeout.connect(self._poll_gatt_client)
+        self._gatt_timer.start()
+        self._gatt_client.start()
         self._optical_timer = QTimer(self)
         self._optical_timer.setInterval(420)
         self._optical_timer.timeout.connect(self._render_optical_page)
@@ -314,7 +323,7 @@ class MainWindow(QMainWindow):
         self.command.setMaxLength(4 * 1024 * 1024)
         self.command.setPlaceholderText("COMMAND > :remote-guide | Ctrl+K | Enter")
         self.command.installEventFilter(self)
-        layout.addLayout(header_row); layout.addWidget(self.optical_controls); layout.addWidget(self.workspace_split, 1); layout.addWidget(self.result_panel); layout.addWidget(self.command)
+        layout.addLayout(header_row); layout.addWidget(self._gatt_status); layout.addWidget(self.optical_controls); layout.addWidget(self.workspace_split, 1); layout.addWidget(self.result_panel); layout.addWidget(self.command)
         self.setCentralWidget(central)
         self.command.returnPressed.connect(self.execute_command)
         self.tree.itemActivated.connect(self.open_selected)
@@ -789,6 +798,34 @@ class MainWindow(QMainWindow):
         else:
             self._run_command(text)
 
+    def _poll_gatt_client(self) -> None:
+        """Qt-thread adapter for a GATT link; never requests keyboard/window focus."""
+        import queue
+        for _ in range(8):
+            try:
+                item = self._gatt_client.events.get_nowait()
+            except queue.Empty:
+                break
+            if item.get("type") == "pair":
+                self._gatt_status.setText(
+                    "GATT - Compare este codigo no PC local: "
+                    + str(item.get("sas") or "??????")
+                )
+            elif item.get("type") == "status":
+                self._gatt_status.setText(str(item.get("message") or "GATT"))
+        for _ in range(4):
+            try:
+                sequence, text = self._gatt_client.commands.get_nowait()
+            except queue.Empty:
+                break
+            if len(self._machine_command_queue) >= 128:
+                self._gatt_client.publish_result(sequence, {
+                    "ok": False, "command": "ec", "sequence": sequence,
+                    "error": "COMMAND_QUEUE_FULL", "code": "COMMAND_QUEUE_FULL",
+                })
+            else:
+                self._machine_command_queue.append((text, sequence))
+                self._start_next_machine_command()
     def _queue_machine_command(self, text: str) -> None:
         """Keep Qt responsive while preserving sequential HID execution."""
         if not text.strip():
@@ -809,8 +846,10 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self.close)
             return
         self._active_command = self._machine_command_queue.popleft()
+        to_execute = (self._active_command[0] if isinstance(self._active_command, tuple)
+                      else self._active_command)
         self._command_future = self._command_executor.submit(
-            self.service.execute, self._active_command
+            self.service.execute, to_execute
         )
         self._command_poll_timer.start()
 
@@ -819,7 +858,10 @@ class MainWindow(QMainWindow):
         if future is None or not future.done():
             return
         self._command_poll_timer.stop()
-        text = self._active_command or ""
+        pending = self._active_command
+        is_gatt = isinstance(pending, tuple)
+        text = pending[0] if is_gatt else (pending or "")
+        gatt_sequence = pending[1] if is_gatt else None
         self._active_command = None
         self._command_future = None
         try:
@@ -833,7 +875,12 @@ class MainWindow(QMainWindow):
                 code="COMMAND_EXECUTION_FAILED", sequence=sequence,
             )
         try:
-            self._run_command(text, precomputed_result=result)
+            if is_gatt:
+                # No optical rendering and no focus_command(): physical mouse
+                # and keyboard remain entirely under the operator's control.
+                self._gatt_client.publish_result(gatt_sequence, result.to_wire_dict())
+            else:
+                self._run_command(text, precomputed_result=result)
         finally:
             self._start_next_machine_command()
 
@@ -1466,6 +1513,8 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._command_poll_timer.stop()
+        self._gatt_timer.stop()
+        self._gatt_client.stop()
         self._command_executor.shutdown(wait=False, cancel_futures=True)
         self._optical_encode_executor.shutdown(wait=False, cancel_futures=True)
         self.service.close()
