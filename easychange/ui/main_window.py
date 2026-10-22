@@ -1150,6 +1150,7 @@ class MainWindow(QMainWindow):
                 inline_compact_state = False
         inline_small_terminal_result = False
         inline_command = str(getattr(result, "command", "") or "").casefold()
+        inline_limit = 8192 if inline_command in {"locate", "search", "read_many"} else 4096
         if (
             getattr(result, "ok", False)
             and getattr(result, "sequence", None)
@@ -1158,12 +1159,13 @@ class MainWindow(QMainWindow):
                 STRUCTURED_MUTATION_TYPES
                 | STRUCTURED_RECOVERY_TYPES
                 | TEXT_MUTATION_COMMANDS
+                | {"locate", "search", "read_many"}
             )
         ):
             try:
                 inline_small_terminal_result = len(json.dumps(
                     state_data, ensure_ascii=False, separators=(",", ":")
-                ).encode("utf-8")) <= 4096
+                ).encode("utf-8")) <= inline_limit
             except (TypeError, ValueError, UnicodeEncodeError):
                 inline_small_terminal_result = False
         if inline_small_read or inline_compact_state or inline_small_terminal_result:

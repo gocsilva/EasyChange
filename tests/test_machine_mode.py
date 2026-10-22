@@ -233,6 +233,31 @@ def test_small_mutation_and_recovery_results_encode_inline(tmp_path, monkeypatch
     assert sum(1 for label in window.machine_qrs if label.pixmap() and not label.pixmap().isNull()) == 32
     window.close(); app.processEvents()
 
+
+def test_locate_result_up_to_8k_encodes_inline(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    monkeypatch.setattr(
+        window._optical_encode_executor,
+        "submit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bounded locate result must be encoded before returning")
+        ),
+    )
+    monkeypatch.setattr(
+        "easychange.ui.main_window.encode_result_bundle",
+        lambda result, **kwargs: ([
+            json.dumps({"p":"EC2","s":"QL","i":i,"n":4,"d":str(i)}, separators=(",", ":"))
+            for i in range(4)
+        ], '{"p":"EC2H","s":"QL","n":4}'),
+    )
+    window._update_machine_qr(Result(True, "locate", {"matches": ["x" * 5000]}, sequence="QL"))
+    _drain_optical(window, app)
+    assert len(window._optical_payloads) == 4
+    assert window._optical_burst is False
+    assert sum(1 for label in window.machine_qrs if label.pixmap() and not label.pixmap().isNull()) == 4
+    window.close(); app.processEvents()
+
 def test_optical_recovery_renders_original_packets_without_nested_envelope(tmp_path):
     from easychange.core.result import Result
 
