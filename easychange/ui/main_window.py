@@ -281,6 +281,7 @@ class MainWindow(QMainWindow):
         self._command_poll_timer.setInterval(30)
         self._command_poll_timer.timeout.connect(self._poll_machine_command)
         self._gatt_client = EasyChangeGattClient()
+        self.service.gatt_diagnostics_source = self._gatt_client.diagnostics.snapshot
         self._gatt_status = QLabel('GATT: conectando Bluetooth em segundo plano...')
         self._gatt_status.setObjectName('easychangeGattStatus')
         # Show the entire failure stage and error instead of clipping the

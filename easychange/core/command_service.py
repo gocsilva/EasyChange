@@ -113,6 +113,9 @@ class CommandService:
         defer_initial_maintenance: bool = False,
     ) -> None:
         self.workspace = workspace
+        # Bound only by the running GUI. The read-only GATT diagnostic
+        # provider is process-local and never opens a second BLE connection.
+        self.gatt_diagnostics_source = None
         self.state_store = MachineSession(workspace.root_path / ".easychange" / "session.json", str(workspace.root_path))
         self.session_id = self.state_store.data["session_id"]
         self.instance_id = "A" + secrets.token_hex(3).upper()
@@ -1931,6 +1934,21 @@ class CommandService:
         if len(operations) == 1 and isinstance(operations[0], dict):
             query_item = operations[0]
             query_kind = str(query_item.get("type") or "").casefold()
+            if query_kind == "gatt_diagnostics_tail":
+                try:
+                    after = query_item.get("after", 0)
+                    limit = query_item.get("limit", 8)
+                    if type(after) is not int or not 0 <= after <= 1000000000:
+                        raise ValueError("INVALID_GATT_LOG_CURSOR")
+                    if type(limit) is not int or not 1 <= limit <= 24:
+                        raise ValueError("INVALID_GATT_LOG_LIMIT")
+                    data = self._gatt_diagnostic_snapshot(after, limit)
+                    return Result(True, query_kind, data=data,
+                                  command_id=self.ids.next("C"),
+                                  duration_ms=int((time.monotonic() - started) * 1000))
+                except ValueError as exc:
+                    return Result(False, query_kind, error=str(exc),
+                                  code="INVALID_GATT_LOG_REQUEST")
             if query_kind in {"optical_transport_get", "optical_transport_configure"}:
                 try:
                     if query_kind == "optical_transport_configure":
@@ -3578,7 +3596,30 @@ class CommandService:
                 "error": f"{type(exc).__name__}:{str(exc)[:300]}",
             }
 
+    def _gatt_diagnostic_snapshot(self, after=0, limit=8) -> dict:
+        callback = self.gatt_diagnostics_source
+        if not callable(callback):
+            return {"available": False, "reason": "GUI_GATT_LOG_UNAVAILABLE",
+                    "events": [], "cursor": int(after), "oldest": 0, "dropped": 0}
+        data = callback(after=after, limit=limit)
+        if not isinstance(data, dict) or not isinstance(data.get("events"), list):
+            raise ValueError("INVALID_GATT_LOG_SNAPSHOT")
+        # Avoid megabyte EC2 pages: one bounded set with tail cursor.
+        return {"available": True,
+                "cursor": int(data.get("cursor", after)),
+                "oldest": int(data.get("oldest", 0)),
+                "dropped": int(data.get("dropped", 0)),
+                "events": list(data["events"][:limit])}
+
     def _dispatch(self, name: str, args: list[str]) -> dict:
+        if name in {"gatt-log", "gatt-log-tail"}:
+            if len(args) > 2 or any(not item.isdecimal() for item in args):
+                raise ValueError("GATT_LOG_USAGE_:gatt-log_[after]_[limit]")
+            after = int(args[0]) if args else 0
+            limit = int(args[1]) if len(args) > 1 else 8
+            if not 0 <= after <= 1000000000 or not 1 <= limit <= 24:
+                raise ValueError("GATT_LOG_CURSOR_OR_LIMIT_INVALID")
+            return self._gatt_diagnostic_snapshot(after, limit)
         index_sensitive = {
             "search", "locate", "study", "discover-many",
             "symbols", "symbol", "definition", "references",

@@ -140,3 +140,24 @@ do ESP32. Não armazena código SAS, chaves, payloads criptografados nem
 texto dos comandos MCP; os campos de credenciais conhecidos são filtrados.
 A tentativa de \`start_notify\` continua sujeita às permissões normais da
 pilha GATT; a janela é exclusivamente de diagnóstico.
+
+
+### Leitura remota do log GATT via HID/HDMI existente
+
+A GUI EasyChange liga seu proprio buffer de diagnosticos ao CommandService,
+sem abrir outra porta BLE, outra instancia ou filesystem remoto. Pela
+ferramenta MCP ja instalada `easychange_exec`, consulte
+`:gatt-log 0 8`. A resposta `data.events` tem data/hora com
+milissegundos, etapa, mensagem sanitizada, cursor e indicador de eventos
+descartados. Para continuar de onde parou, use o `data.cursor` na proxima
+solicitacao: `:gatt-log 145 8` (substitua 145 pelo cursor retornado).
+Use uma nova sequencia EC1 a cada poll para nao recuperar um snapshot
+anterior do journal de idempotencia. O limite por leitura e 1..24 eventos.
+A alternativa estruturada `:j1 {"op":"operation","type":"gatt_diagnostics_tail",
+"after":0,"limit":8}` tem a mesma semantica e nao exige nova ferramenta MCP.
+
+Estas sao operacoes read-only compatíveis com QR/HDMI existente e
+nao abrem outra conexao BLE. A inicializacao/atualizacao permanece a
+operacao EasyChange existente `:self-update`, com protecao de editor nao salvo.
+Nao executar o reinicio sem verificar o recibo, e evitar reenviar a mesma
+sequencia mutante quando o recibo estiver incerto.
