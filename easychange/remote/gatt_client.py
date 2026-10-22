@@ -11,6 +11,7 @@ import json
 import os
 import queue
 import re
+import sys
 import threading
 
 from .gatt_security import GattHandshake, GattSecureSession
@@ -21,6 +22,50 @@ HOST_TO_REMOTE_UUID = "c24c1e20-9b28-4e07-9c29-20167e20a4e2"
 REMOTE_TO_HOST_UUID = "c24c1e20-9b28-4e07-9c29-20167e20a4e3"
 DEVICE_NAME = "BT KeyboardMouse E"
 SEQUENCE_RE = re.compile(r"Q[A-Z0-9_-]{4,40}\Z")
+
+
+BLE_ADDRESS_RE = re.compile(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\Z")
+
+
+def _on_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _ble_address(value: int) -> str:
+    """Convert WinRT uint64 address to Bleak 6-octet form."""
+    if type(value) is not int or not 0 < value < (1 << 48):
+        raise ValueError("ESP_BLE_WINDOWS_ADDRESS_INVALID")
+    text = f"{value:012X}"
+    return ":".join(text[i:i + 2] for i in range(0, 12, 2))
+
+
+async def _paired_windows_ble_target():
+    """Find an already paired HID device even when it stops advertising."""
+    if not _on_windows():
+        return None
+    from bleak.backends.device import BLEDevice
+    from winrt.windows.devices.bluetooth import BluetoothLEDevice
+    from winrt.windows.devices.enumeration import DeviceInformation
+
+    selector = BluetoothLEDevice.get_device_selector_from_pairing_state(True)
+    items = await DeviceInformation.find_all_async(selector)
+    matched = [item for item in items if str(getattr(item, "name", "")).strip() == DEVICE_NAME]
+    if not matched:
+        return None
+    addresses = set()
+    for item in matched:
+        obj = await BluetoothLEDevice.from_id_async(item.id)
+        if obj is None:
+            continue
+        try:
+            addresses.add(_ble_address(int(obj.bluetooth_address)))
+        finally:
+            obj.close()
+    if len(addresses) > 1:
+        raise RuntimeError("ESP_BLE_PAIRED_MULTIPLE_SAME_NAME")
+    if not addresses:
+        return None
+    return BLEDevice(next(iter(addresses)), DEVICE_NAME, None)
 
 
 class EasyChangeGattClient:
@@ -36,6 +81,8 @@ class EasyChangeGattClient:
         self._session = None
         self._accepted = False
         self._sending = None
+        self._last_error = ""
+        self._last_stage = "IDLE"
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -54,7 +101,33 @@ class EasyChangeGattClient:
     def status(self) -> dict:
         return {"running": self._thread is not None and self._thread.is_alive(),
                 "secure": self._accepted, "bluetooth_connected": bool(
-                    self._client and self._client.is_connected)}
+                    self._client and self._client.is_connected),
+                "last_stage": self._last_stage, "last_error": self._last_error}
+
+    async def _resolve_target(self, scanner):
+        """Use the paired Windows BLE HID record when advertisements have stopped."""
+        address = os.getenv("EASYCHANGE_BLE_DEVICE_ADDRESS", "").strip()
+        if address:
+            if not BLE_ADDRESS_RE.fullmatch(address):
+                raise ValueError("EASYCHANGE_BLE_DEVICE_ADDRESS_INVALID")
+            if _on_windows():
+                from bleak.backends.device import BLEDevice
+                return BLEDevice(address.upper(), DEVICE_NAME, None)
+            return address
+        if _on_windows():
+            try:
+                target = await _paired_windows_ble_target()
+            except (ImportError, OSError):
+                target = None
+            if target is not None:
+                return target
+        results = await scanner.discover(timeout=4)
+        matches = [item for item in results if item.name == DEVICE_NAME]
+        if len(matches) > 1:
+            raise RuntimeError("ESP_BLE_ADVERTISING_MULTIPLE_SAME_NAME")
+        if not matches:
+            raise RuntimeError("ESP_BLE_NOT_DISCOVERABLE_OR_NOT_PAIRED")
+        return matches[0]
 
     def _emit(self, event: dict) -> None:
         try:
@@ -83,30 +156,44 @@ class EasyChangeGattClient:
             self._handshake = None
             self._accepted = False
             self._reader.reset()
+            stage = "BUSCA_BLE"
+            failure = ""
+            self._last_stage = stage
             try:
-                address = os.getenv("EASYCHANGE_BLE_DEVICE_ADDRESS", "").strip()
-                if not address:
-                    results = await BleakScanner.discover(timeout=4)
-                    matches = [item for item in results if item.name == DEVICE_NAME]
-                    if not matches:
-                        raise RuntimeError("ESP_BLE_NOT_DISCOVERABLE_SET_DEVICE_ADDRESS")
-                    target = matches[0]
-                else:
-                    target = address
-                async with BleakClient(target, timeout=12) as client:
+                target = await self._resolve_target(BleakScanner)
+                stage = "CONEXAO_BLE"
+                self._last_stage = stage
+                options = {"winrt": {"use_cached_services": False}} if _on_windows() else {}
+                # This firmware adds a custom GATT service to an old HID bond.
+                # Windows must read its CURRENT attribute DB, not a cached one.
+                async with BleakClient(target, timeout=12, **options) as client:
                     self._client = client
                     self._sending = asyncio.Lock()
+                    stage = "INSCRICAO_GATT"
+                    self._last_stage = stage
                     await client.start_notify(HOST_TO_REMOTE_UUID, self._notify)
+                    stage = "CONECTADO"
+                    self._last_stage = stage
+                    self._last_error = ""
                     self._emit({"type":"status","message":"Bluetooth GATT conectado; aguardando pareamento seguro."})
                     while client.is_connected and not self._stop.is_set():
                         await asyncio.sleep(.15)
+                    if not self._stop.is_set():
+                        failure = "BLE_LINK_DISCONNECTED"
             except Exception as exc:
-                self._emit({"type":"status","message":f"GATT aguardando conexao: {type(exc).__name__}: {str(exc)[:90]}"})
+                failure = f"{type(exc).__name__}: {str(exc)[:160]}"
             finally:
                 self._accepted = False
                 self._session = None
                 self._client = None
-                self._emit({"type":"status","message":"GATT desconectado; QR permanece disponivel."})
+                if not self._stop.is_set():
+                    self._last_error = failure or "BLE_LINK_DISCONNECTED"
+                    self._last_stage = stage
+                    # Do not overwrite the actual error with a generic
+                    # 'disconnected' event on the following Qt timer tick.
+                    self._emit({"type":"status","message":
+                        f"GATT desconectado [{stage}]: {self._last_error[:160]}. "
+                        "Tentando reconectar; QR disponivel."})
             if not self._stop.is_set():
                 await asyncio.sleep(3)
 

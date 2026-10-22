@@ -282,6 +282,10 @@ class MainWindow(QMainWindow):
         self._gatt_client = EasyChangeGattClient()
         self._gatt_status = QLabel('GATT: conectando Bluetooth em segundo plano...')
         self._gatt_status.setObjectName('easychangeGattStatus')
+        # Show the entire failure stage and error instead of clipping the
+        # diagnostic to one line. Keep the text copyable for support.
+        self._gatt_status.setWordWrap(True)
+        self._gatt_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._gatt_timer = QTimer(self)
         self._gatt_timer.setInterval(100)
         self._gatt_timer.timeout.connect(self._poll_gatt_client)
@@ -812,7 +816,9 @@ class MainWindow(QMainWindow):
                     + str(item.get("sas") or "??????")
                 )
             elif item.get("type") == "status":
-                self._gatt_status.setText(str(item.get("message") or "GATT"))
+                message = str(item.get("message") or "GATT")
+                self._gatt_status.setText(message)
+                self._gatt_status.setToolTip(message)
         for _ in range(4):
             try:
                 sequence, text = self._gatt_client.commands.get_nowait()
