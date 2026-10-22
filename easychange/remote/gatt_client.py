@@ -314,6 +314,63 @@ async def _cccd_readonly_probe(client) -> str:
         return "CCCD_READ_FAILED:" + type(exc).__name__ + ":" + str(exc)[:85]
 
 
+def _gatt_verdict(*, stage: str, winrt_status: str, read_probe: str,
+                  cccd_probe: str, notification_error: str,
+                  metadata: str, connected: bool) -> dict[str, str]:
+    """One conservative, actionable diagnosis per attempt.
+
+    A Windows ATT error alone CANNOT prove firmware, pairing or company policy
+    caused the failure. Root cause is labelled CONFIRMED only when its own
+    observation proves it. Cross-device BLE_DIAG is required for the rest.
+    """
+    access = str(winrt_status or "NOT_MEASURED")
+    read = str(read_probe or "NOT_MEASURED")
+    cccd = str(cccd_probe or "NOT_MEASURED")
+    error = str(notification_error or "")
+    meta = str(metadata or "")
+    deny = "DENIED" in access.upper() and "UNAVAILABLE" not in access.upper()
+    att03 = ("0X03" in error.upper() or
+             ("WRITE NOT PERMITTED" in error.upper()))
+    if deny:
+        code = "WINRT_SERVICE_ACCESS_DENIED"
+        confidence = "CONFIRMADO_PELO_WINDOWS"
+        action = "Analisar permissao de acesso ao servico BLE no WinRT; nao alterar firmware sem BLE_DIAG"
+    elif "service=0" in meta or "notify_char=0" in meta or "cccd=0" in meta:
+        code = "GATT_SCHEMA_MISSING_OR_STALE"
+        confidence = "CONFIRMADO_INVENTARIO_INCOMPATIVEL"
+        action = "Comparar handles com GATT_DIAG do ESP e versao do firmware; verificar cache de servicos"
+    elif att03 and "ACCESS DENIED" in (read + " " + cccd).upper():
+        code = "ACCESS_DENIED_READ_AND_ATT03_CCCD"
+        confidence = "CAUSA_AINDA_NAO_ISOLADA"
+        action = ("Comparar contadores ESP BLE_DIAG antes/depois desta tentativa: "
+                  "GATT_DIAG_READ_EVENTS, GATT_CCCD_WRITE_EVENTS, "
+                  "BLE_AUTH_FAILURE_TOTAL; nao culpar firmware ou politica sem prova")
+    elif att03:
+        code = "ATT03_CCCD_WRITE"
+        confidence = "CAUSA_AINDA_NAO_ISOLADA"
+        action = "Confrontar GATT_CCCD_WRITE_EVENTS e permissao efetiva do CCCD no ESP"
+    elif read.startswith("DIAG_READ_OK"):
+        code = "CUSTOM_GATT_READ_CONFIRMED"
+        confidence = "LEITURA_CONFIRMADA"
+        action = "Verificar subscricao/CCCD e handshake aplicativo separadamente"
+    else:
+        code = "GATT_FAILURE_NEEDS_ESP_CORRELATION"
+        confidence = "CAUSA_AINDA_NAO_ISOLADA"
+        action = "Confrontar tentativa do Windows e contadores ESP BLE_DIAG"
+    return {
+        "codigo": code,
+        "certeza": confidence,
+        "etapa": str(stage)[:38],
+        "winrt": access[:110],
+        "leitura": read[:165],
+        "cccd": cccd[:140],
+        "notificacao": ("ATT_0X03_WRITE_NOT_PERMITTED" if att03 else
+                        ("ERRO_SEM_ATT03" if error else "SEM_ERRO")),
+        "link_ble": "SIM" if connected else "NAO",
+        "proximo_teste": action,
+    }
+
+
 def _gatt_notify_inventory(services) -> str:
     """Read-only GATT metadata; never issue diagnostic characteristic writes.
 
@@ -360,6 +417,7 @@ class EasyChangeGattClient:
         self._last_stage = "IDLE"
         self.diagnostics = GattDiagnosticLog()
         self._attempt = 0
+        self._last_verdict = {}
         self._consecutive_cccd_denials = 0
         self._retry_wakeup = None
         self.diagnostics.record(
@@ -424,7 +482,8 @@ class EasyChangeGattClient:
         return {"running": self._thread is not None and self._thread.is_alive(),
                 "secure": self._accepted, "bluetooth_connected": bool(
                     self._client and self._client.is_connected),
-                "last_stage": self._last_stage, "last_error": self._last_error}
+                "last_stage": self._last_stage, "last_error": self._last_error,
+                "gatt_verdict": dict(self._last_verdict)}
 
     async def _resolve_target(self, scanner):
         """Discover the generic BLE GATT peripheral Easy (paired or advertising)."""
@@ -514,6 +573,9 @@ class EasyChangeGattClient:
             failure = ""
             gatt_metadata = ""
             cccd_state = "CCCD_READ_NOT_ATTEMPTED"
+            diag_read = "DIAG_READ_NOT_ATTEMPTED"
+            winrt_access = "NOT_MEASURED"
+            notification_error = ""
             self._last_stage = stage
             cccd_denied = False
             self._attempt += 1
@@ -542,21 +604,23 @@ class EasyChangeGattClient:
                                 _gatt_attribute_details(getattr(client, "services", None))
                                 if getattr(client, "services", None) is not None
                                 else "Servicos BLE indisponiveis")
+                    winrt_access = _winrt_custom_service_access_status(client)
                     self._trace(
                         "WINRT_GATT_ACCESSO",
-                        "Estado de acesso ao servico BLE personalizado: " +
-                        _winrt_custom_service_access_status(client))
+                        f"Tentativa #{self._attempt}: {winrt_access}")
                     # Readable characteristic is independent of CCCD (0x2902).
                     # Perform one bounded read while the same BLE link is open.
                     # Firmware without this optional characteristic is valid.
-                    read_result = await _custom_service_read_probe(client)
+                    diag_read = await _custom_service_read_probe(client)
                     self._trace("GATT_LEITURA_TESTE",
-                                f"Servico personalizado, acesso somente leitura: {read_result}")
+                                f"Tentativa #{self._attempt}: leitura sem escrita: {diag_read}")
                     self._trace("INSCRICAO_GATT", "Solicitando notificacoes da "
                                 f"caracteristica {HOST_TO_REMOTE_UUID}; {gatt_metadata}")
                     try:
                         await client.start_notify(HOST_TO_REMOTE_UUID, self._notify)
                     except Exception as notify_exc:
+                        notification_error = (f"{type(notify_exc).__name__}: "
+                                              f"{str(notify_exc)[:90]}")
                         # Must inspect while BleakClient is STILL connected:
                         # outside the async-with, __aexit__ has disconnected
                         # and any CCCD read yields a misleading failure.
@@ -569,6 +633,12 @@ class EasyChangeGattClient:
                                 f"conectado={bool(client.is_connected)}")
                         raise
                     self._trace("INSCRICAO_GATT", "Inscricao confirmada pelo sistema")
+                    self._last_verdict = _gatt_verdict(
+                        stage="NOTIFY_OK", winrt_status=winrt_access,
+                        read_probe=diag_read, cccd_probe="NOT_NEEDED",
+                        notification_error="", metadata=gatt_metadata, connected=True)
+                    self._trace("VEREDITO_GATT", f"Tentativa #{self._attempt}: " +
+                                json.dumps(self._last_verdict, ensure_ascii=False))
                     self._consecutive_cccd_denials = 0
                     stage = "CONECTADO"
                     self._last_stage = stage
@@ -581,8 +651,15 @@ class EasyChangeGattClient:
                     if not self._stop.is_set():
                         failure = "BLE_LINK_DISCONNECTED"
             except Exception as exc:
-                self._trace(stage, "Erro na tentativa Bluetooth/GATT "
-                            f"#{self._attempt}; trace da excecao abaixo:", exc=exc)
+                # One concise verdict is more useful than 80 lines of repeated
+                # Bleak traceback. Full stacks remain opt-in for developers.
+                notification_error = notification_error or (
+                    f"{type(exc).__name__}: {str(exc)[:110]}")
+                if os.getenv("EASYCHANGE_GATT_DEBUG_TRACE") == "1":
+                    self._trace(stage, f"Tentativa #{self._attempt}: excecao detalhada", exc=exc)
+                else:
+                    self._trace(stage, f"Tentativa #{self._attempt}: " +
+                                notification_error)
                 failure = f"{type(exc).__name__}: {str(exc)[:160]}"
                 if stage == "INSCRICAO_GATT":
                     failure += " [" + gatt_metadata + "]"
@@ -598,6 +675,15 @@ class EasyChangeGattClient:
                                    f"(recusas={self._consecutive_cccd_denials}; "
                                    f"{cccd_state}) [{gatt_metadata}]")
             finally:
+                if failure:
+                    self._last_verdict = _gatt_verdict(
+                        stage=stage, winrt_status=winrt_access,
+                        read_probe=diag_read, cccd_probe=cccd_state,
+                        notification_error=notification_error,
+                        metadata=gatt_metadata,
+                        connected=bool(self._client and self._client.is_connected))
+                    self._trace("VEREDITO_GATT", f"Tentativa #{self._attempt}: " +
+                                json.dumps(self._last_verdict, ensure_ascii=False))
                 self._accepted = False
                 self._session = None
                 self._client = None
