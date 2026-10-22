@@ -355,6 +355,10 @@ class MainWindow(QMainWindow):
         self._active_path: str | None = None
 
         self._add_shortcut("Ctrl+K", self.focus_command)
+        # Operator-initiated GATT retry and read-only diagnostic log through
+        # the existing USB HID keyboard, with no mouse calibration dependency.
+        self._add_shortcut("Ctrl+Shift+G", self._retry_gatt_connection)
+        self._add_shortcut("Ctrl+Shift+D", self.open_gatt_diagnostics)
         self._add_shortcut("F12", self.toggle_machine)
         self._add_shortcut("Escape", self.focus_command)
         self._add_shortcut("Ctrl+S", self.save_editor)
