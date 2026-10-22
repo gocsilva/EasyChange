@@ -547,3 +547,73 @@ def test_paired_aep_invalid_address_requires_independent_verification(monkeypatc
     monkeypatch.setattr(module.DeviceInformation, "find_all_async", find_aep)
     monkeypatch.setattr(bclass, "from_id_async", missing_le)
     assert asyncio.run(gatt_client._paired_windows_ble_target()) is None
+
+
+
+def test_gatt_notify_inventory_reports_actual_service_characteristic_cccd():
+    import types
+    cccd = types.SimpleNamespace(uuid="00002902-0000-1000-8000-00805f9b34fb")
+    notify = types.SimpleNamespace(handle=79, properties=["notify"],
+                                   descriptors=[cccd])
+    class Services:
+        def get_service(self, uuid):
+            assert uuid == gatt_client.SERVICE_UUID
+            return object()
+        def get_characteristic(self, uuid):
+            assert uuid == gatt_client.HOST_TO_REMOTE_UUID
+            return notify
+    details = gatt_client._gatt_notify_inventory(Services())
+    assert details == "service=1,notify_char=1,notify=1,cccd=1,handle=79"
+
+
+def test_gatt_notify_inventory_flags_missing_cccd_and_notify_without_writes():
+    import types
+    class Services:
+        def get_service(self, uuid):
+            return object()
+        def get_characteristic(self, uuid):
+            return types.SimpleNamespace(handle=3, properties=["read"],
+                                         descriptors=[])
+    result = gatt_client._gatt_notify_inventory(Services())
+    assert result == "service=1,notify_char=1,notify=0,cccd=0,handle=3"
+    assert gatt_client._gatt_notify_inventory(None) == "gatt=unavailable"
+
+
+def test_gatt_notify_failure_preserves_inventory_in_final_error(monkeypatch):
+    import types
+    _fake_winrt_pair(monkeypatch, entries=[])
+    class Services:
+        def get_service(self, uuid):
+            return object()
+        def get_characteristic(self, uuid):
+            return types.SimpleNamespace(handle=24, properties=["notify"],
+                descriptors=[types.SimpleNamespace(uuid="00002902-0000-1000-8000-00805f9b34fb")])
+    class FailingClient:
+        is_connected = True
+        services = Services()
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            return None
+        async def start_notify(self, uuid, callback):
+            raise RuntimeError("GATT Protocol Error Write Not Permitted (0x03)")
+    monkeypatch.setattr(sys.modules["bleak"], "BleakClient", FailingClient, raising=False)
+    monkeypatch.setattr(sys.modules["bleak"], "BleakScanner", object, raising=False)
+    bridge = gatt_client.EasyChangeGattClient()
+    async def target(_):
+        return types.SimpleNamespace(address="A1:B2:C3:D4:E5:F6")
+    monkeypatch.setattr(bridge, "_resolve_target", target)
+    events = []
+    def record(e):
+        events.append(e)
+        if "desconectado" in str(e.get("message")):
+            bridge._stop.set()
+    monkeypatch.setattr(bridge, "_emit", record)
+    asyncio.run(bridge._run())
+    msg = events[-1]["message"]
+    assert "Write Not Permitted" in msg
+    assert "INSCRICAO_GATT" in msg
+    assert "notify_char=1,notify=1,cccd=1,handle=24" in msg
+    assert bridge.status()["secure"] is False

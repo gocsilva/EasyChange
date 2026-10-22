@@ -185,6 +185,35 @@ async def _paired_windows_ble_target(diagnostic=None):
     return BLEDevice(next(iter(addresses)), DEVICE_NAME, None)
 
 
+def _gatt_notify_inventory(services) -> str:
+    """Read-only GATT metadata; never issue diagnostic characteristic writes.
+
+    ATT 0x03 from start_notify can mean an actual server CCCD permission
+    denial or a stale Windows handle. Observe the expected service, notify
+    property and CCCD without guessing the cause or weakening link security.
+    """
+    if services is None:
+        return "gatt=unavailable"
+    try:
+        service = services.get_service(SERVICE_UUID)
+        characteristic = services.get_characteristic(HOST_TO_REMOTE_UUID)
+        if characteristic is None:
+            return f"service={int(service is not None)},notify_char=0,cccd=0"
+        props = [str(value).lower() for value in (getattr(
+            characteristic, "properties", ()) or ())][:16]
+        descriptors = list(getattr(characteristic, "descriptors", ()) or ())[:32]
+        cccd = any(str(getattr(desc, "uuid", "")).lower() in
+                   ("00002902-0000-1000-8000-00805f9b34fb", "2902", "0x2902")
+                   for desc in descriptors)
+        handle = getattr(characteristic, "handle", None)
+        handle_info = f",handle={int(handle)}" if type(handle) is int else ""
+        return (f"service={int(service is not None)},"
+                f"notify_char=1,notify={int('notify' in props)},"
+                f"cccd={int(cccd)}" + handle_info)
+    except (TypeError, ValueError, AttributeError, KeyError, RuntimeError) as exc:
+        return "gatt=metadata_unavailable_" + type(exc).__name__
+
+
 class EasyChangeGattClient:
     def __init__(self) -> None:
         self.events = queue.Queue(maxsize=256)
@@ -291,6 +320,7 @@ class EasyChangeGattClient:
             self._reader.reset()
             stage = "BUSCA_BLE"
             failure = ""
+            gatt_metadata = ""
             self._last_stage = stage
             try:
                 target = await self._resolve_target(BleakScanner)
@@ -304,6 +334,8 @@ class EasyChangeGattClient:
                     self._sending = asyncio.Lock()
                     stage = "INSCRICAO_GATT"
                     self._last_stage = stage
+                    gatt_metadata = _gatt_notify_inventory(
+                        getattr(client, "services", None))
                     await client.start_notify(HOST_TO_REMOTE_UUID, self._notify)
                     stage = "CONECTADO"
                     self._last_stage = stage
@@ -315,6 +347,8 @@ class EasyChangeGattClient:
                         failure = "BLE_LINK_DISCONNECTED"
             except Exception as exc:
                 failure = f"{type(exc).__name__}: {str(exc)[:160]}"
+                if stage == "INSCRICAO_GATT":
+                    failure += " [" + gatt_metadata + "]"
             finally:
                 self._accepted = False
                 self._session = None
@@ -325,7 +359,7 @@ class EasyChangeGattClient:
                     # Do not overwrite the actual error with a generic
                     # 'disconnected' event on the following Qt timer tick.
                     self._emit({"type":"status","message":
-                        f"GATT desconectado [{stage}]: {self._last_error[:160]}. "
+                        f"GATT desconectado [{stage}]: {self._last_error[:300]}. "
                         "Tentando reconectar; QR disponivel."})
             if not self._stop.is_set():
                 await asyncio.sleep(3)

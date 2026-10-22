@@ -93,3 +93,26 @@ name, `pairing.is_paired`, and six-octet MAC address before using it.
 That avoids an optional `BluetoothLEDevice.from_id_async` call from a
 non-UI background thread. A child-interface with the same display name is
 never sufficient; unpaired or malformed records cannot be used.
+
+
+### ATT 0x03 Write Not Permitted when starting notifications
+
+This happens *after* Bluetooth discovery and GATT connection and does not
+prove an administrator-only corporate policy. The BLE ATT server rejects
+the CCCD subscription write (or Windows is using a stale attribute handle).
+For a non-admin remote Windows machine, the application now reports the
+read-only GATT inventory (custom service, expected notify characteristic,
+notify property, descriptor 0x2902 and optional handle) alongside the
+original Bleak exception.
+
+- `notify_char=0` or `notify=0` or `cccd=0` is strong evidence that
+  Windows has discovered an incompatible or stale service definition.
+- `service=1,notify_char=1,notify=1,cccd=1` proves that those GATT
+  attributes were visible, **not** that the remote operating-system policy
+  allows them, or that the CCCD's server-side write permissions are correct.
+- Do not manually write CCCD from code or downgrade BLE security.
+- No administrator or local policy changes are required for this diagnostic.
+  If the cache remains stale, an operator may remove and re-pair only this
+  ESP from ordinary Windows Bluetooth Settings, understanding this temporarily
+  interrupts HID/QR, then relaunch EasyChange. Inspect again before suggesting
+  firmware modifications.
