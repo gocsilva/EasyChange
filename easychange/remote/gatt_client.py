@@ -13,6 +13,9 @@ import queue
 import re
 import sys
 import threading
+from importlib import metadata as importlib_metadata
+
+from .gatt_diagnostics import GattDiagnosticLog
 
 from .gatt_security import GattHandshake, GattSecureSession
 from .gatt_wire import FramedMessages, frame_object, fragments, seal_json, open_sealed
@@ -185,6 +188,34 @@ async def _paired_windows_ble_target(diagnostic=None):
     return BLEDevice(next(iter(addresses)), DEVICE_NAME, None)
 
 
+def _gatt_attribute_details(services) -> str:
+    """Return metadata-only inventory for all expected service attributes."""
+    lines = []
+    for label, uuid in (("SERVICE", SERVICE_UUID),
+                        ("RX_NOTIFY", HOST_TO_REMOTE_UUID),
+                        ("TX_WRITE", REMOTE_TO_HOST_UUID)):
+        try:
+            obj = (services.get_service(uuid) if label == "SERVICE"
+                   else services.get_characteristic(uuid))
+            if obj is None:
+                lines.append(f"{label}: NOT_FOUND uuid={uuid}")
+                continue
+            handle = getattr(obj, "handle", "?")
+            if label == "SERVICE":
+                lines.append(f"SERVICE: FOUND uuid={uuid} handle={handle}")
+                continue
+            properties = [str(p) for p in (getattr(obj, "properties", ()) or ())][:16]
+            lines.append(
+                f"{label}: FOUND uuid={uuid} handle={handle}"
+                f" properties={','.join(properties)}")
+            for desc in (getattr(obj, "descriptors", ()) or ())[:24]:
+                lines.append(f"  DESCRIPTOR uuid={str(getattr(desc, 'uuid', '?'))[:60]}"
+                             f" handle={getattr(desc, 'handle', '?')}")
+        except (TypeError, ValueError, RuntimeError, AttributeError, KeyError) as exc:
+            lines.append(f"{label}: INSPECTION_FAILED {type(exc).__name__}")
+    return "\n".join(lines)
+
+
 def _gatt_notify_inventory(services) -> str:
     """Read-only GATT metadata; never issue diagnostic characteristic writes.
 
@@ -229,6 +260,22 @@ class EasyChangeGattClient:
         self._sending = None
         self._last_error = ""
         self._last_stage = "IDLE"
+        self.diagnostics = GattDiagnosticLog()
+        self._attempt = 0
+        self.diagnostics.record(
+            "INICIO", "Iniciando diagnostico GATT no EasyChange. "
+            "Comandos, chaves, endereco BLE, mensagens cifradas e codigo SAS "
+            "nao sao coletados.")
+        try:
+            self.diagnostics.record(
+                "AMBIENTE", f"Python={sys.version.split()[0]}, "
+                f"OS={'Windows' if _on_windows() else sys.platform}, "
+                f"Bleak={importlib_metadata.version('bleak')}")
+        except (importlib_metadata.PackageNotFoundError, ValueError):
+            self.diagnostics.record("AMBIENTE", "Versao Bleak indisponivel")
+
+    def _trace(self, stage: str, message: str, exc=None) -> None:
+        self.diagnostics.record(stage, message, exc=exc)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -237,8 +284,10 @@ class EasyChangeGattClient:
         self._thread = threading.Thread(
             target=self._thread_main, daemon=True, name="easychange-native-gatt")
         self._thread.start()
+        self._trace("INICIO", "Worker Bluetooth GATT iniciado")
 
     def stop(self) -> None:
+        self._trace("ENCERRAMENTO", "Encerramento solicitado pelo EasyChange")
         self._stop.set()
         loop = self._loop
         if loop and loop.is_running():
@@ -254,6 +303,7 @@ class EasyChangeGattClient:
         """Use the paired Windows BLE HID record when advertisements have stopped."""
         address = os.getenv("EASYCHANGE_BLE_DEVICE_ADDRESS", "").strip()
         if address:
+            self._trace("DESCOBERTA", "Endereco BLE explicito configurado (valor ocultado)")
             if not BLE_ADDRESS_RE.fullmatch(address):
                 raise ValueError("EASYCHANGE_BLE_DEVICE_ADDRESS_INVALID")
             if _on_windows():
@@ -276,8 +326,21 @@ class EasyChangeGattClient:
                 self._last_error = "PAIRED_LOOKUP_WINRT_OVERLOAD_UNSUPPORTED"
                 target = None
             if target is not None:
+                self._trace("DESCOBERTA", "Dispositivo BLE associado e validado "
+                            f"via WinRT; fonte={discovery.get('source', '?')}; "
+                            f"registros={discovery.get('paired_records', '?')}; "
+                            f"nome={discovery.get('named_records', '?')}; "
+                            f"verificados={discovery.get('matching_records', '?')}")
                 return target
+            self._trace("DESCOBERTA", "WinRT nao retornou endereco BLE confirmado; "
+                        f"fonte={discovery.get('source', '?')}; "
+                        f"registros={discovery.get('paired_records', '?')}; "
+                        f"nome={discovery.get('named_records', '?')}; "
+                        f"verificados={discovery.get('matching_records', '?')}. "
+                        "Tentando anuncios BLE.")
         results = await scanner.discover(timeout=4)
+        self._trace("DESCOBERTA", f"Scanner Bluetooth: anuncios={len(results)}, "
+                    f"correspondencias={sum(1 for item in results if item.name == DEVICE_NAME)}")
         matches = [item for item in results if item.name == DEVICE_NAME]
         if len(matches) > 1:
             raise RuntimeError("ESP_BLE_ADVERTISING_MULTIPLE_SAME_NAME")
@@ -310,7 +373,8 @@ class EasyChangeGattClient:
     async def _run(self) -> None:
         try:
             from bleak import BleakClient, BleakScanner
-        except ImportError:
+        except ImportError as exc:
+            self._trace("FALHA", "Biblioteca Bleak nao instalada", exc=exc)
             self._emit({"type":"status","message":"GATT indisponivel: instale o extra GUI (bleak)."})
             return
         while not self._stop.is_set():
@@ -322,30 +386,49 @@ class EasyChangeGattClient:
             failure = ""
             gatt_metadata = ""
             self._last_stage = stage
+            self._attempt += 1
+            self._trace("BUSCA_BLE", f"Tentativa #{self._attempt}: iniciando descoberta do "
+                        "ESP Bluetooth HID emparelhado")
             try:
                 target = await self._resolve_target(BleakScanner)
                 stage = "CONEXAO_BLE"
                 self._last_stage = stage
                 options = {"winrt": {"use_cached_services": False}} if _on_windows() else {}
+                self._trace("CONEXAO_BLE", "Dispositivo resolvido; abrindo conexao "
+                            f"com timeout=12s, cache_servicos_desabilitado={_on_windows()}")
                 # This firmware adds a custom GATT service to an old HID bond.
                 # Windows must read its CURRENT attribute DB, not a cached one.
                 async with BleakClient(target, timeout=12, **options) as client:
                     self._client = client
                     self._sending = asyncio.Lock()
+                    self._trace("CONEXAO_BLE", "Conexao Bluetooth estabelecida. "
+                                f"is_connected={bool(client.is_connected)}; "
+                                f"MTU={getattr(client, 'mtu_size', '?')}")
                     stage = "INSCRICAO_GATT"
                     self._last_stage = stage
                     gatt_metadata = _gatt_notify_inventory(
                         getattr(client, "services", None))
+                    self._trace("INVENTARIO_GATT",
+                                _gatt_attribute_details(getattr(client, "services", None))
+                                if getattr(client, "services", None) is not None
+                                else "Servicos BLE indisponiveis")
+                    self._trace("INSCRICAO_GATT", "Solicitando notificacoes da "
+                                f"caracteristica {HOST_TO_REMOTE_UUID}; {gatt_metadata}")
                     await client.start_notify(HOST_TO_REMOTE_UUID, self._notify)
+                    self._trace("INSCRICAO_GATT", "Inscricao confirmada pelo sistema")
                     stage = "CONECTADO"
                     self._last_stage = stage
                     self._last_error = ""
+                    self._trace("CONECTADO", "Canal GATT pronto; ainda exige "
+                                "autenticacao de aplicacao SAS no MCP local")
                     self._emit({"type":"status","message":"Bluetooth GATT conectado; aguardando pareamento seguro."})
                     while client.is_connected and not self._stop.is_set():
                         await asyncio.sleep(.15)
                     if not self._stop.is_set():
                         failure = "BLE_LINK_DISCONNECTED"
             except Exception as exc:
+                self._trace(stage, "Erro na tentativa Bluetooth/GATT "
+                            f"#{self._attempt}; trace da excecao abaixo:", exc=exc)
                 failure = f"{type(exc).__name__}: {str(exc)[:160]}"
                 if stage == "INSCRICAO_GATT":
                     failure += " [" + gatt_metadata + "]"
@@ -356,6 +439,9 @@ class EasyChangeGattClient:
                 if not self._stop.is_set():
                     self._last_error = failure or "BLE_LINK_DISCONNECTED"
                     self._last_stage = stage
+                    self._trace("DESCONECTADO", f"Tentativa #{self._attempt} encerrada. "
+                                f"ultima_etapa={stage}; causa={self._last_error[:300]}; "
+                                "QR continua disponivel; reconexao em 3 segundos")
                     # Do not overwrite the actual error with a generic
                     # 'disconnected' event on the following Qt timer tick.
                     self._emit({"type":"status","message":
@@ -369,7 +455,8 @@ class EasyChangeGattClient:
             messages = self._reader.feed(bytes(data))
             for message in messages:
                 asyncio.create_task(self._message(message))
-        except Exception:
+        except Exception as exc:
+            self._trace("NOTIFICACAO", "Falha de integridade dos frames GATT", exc=exc)
             self._reader.reset()
             self._accepted = False
             self._emit({"type":"status","message":"Erro de integridade na montagem GATT."})
@@ -451,6 +538,7 @@ class EasyChangeGattClient:
             try:
                 done.result()
             except Exception as exc:
+                self._trace("RESULTADO_GATT", "Falha ao enviar resultado ao MCP", exc=exc)
                 # Do not leave the GUI claiming a healthy secure result channel
                 # after the Windows GATT write has failed. The MCP caller must
                 # reconcile its original sequence, never replay a mutation.

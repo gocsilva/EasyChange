@@ -116,3 +116,27 @@ original Bleak exception.
   ESP from ordinary Windows Bluetooth Settings, understanding this temporarily
   interrupts HID/QR, then relaunch EasyChange. Inspect again before suggesting
   firmware modifications.
+
+
+### Janela detalhada de diagnóstico sem administrador
+
+A interface gráfica do EasyChange remoto agora mostra **Diagnóstico GATT**
+ao lado do status Bluetooth. O botão abre uma única janela independente
+com texto técnico ao vivo, mesmo quando não existe conexão GATT. O histórico
+começa na abertura da GUI e guarda até 750 eventos em memória (sem log em
+disco por padrão). Contém data/hora local com milissegundos, versão do
+Bleak/Python, tentativa, origem da descoberta WinRT, estágio, timeout,
+dados de descoberta do serviço e características/descritores UUID e handles,
+CCCD 0x2902, motivo do encerramento e o traceback completo e limitado de
+falhas da biblioteca.
+
+A janela atualiza e rola automaticamente para o final, e há **Copiar log**
+e **Salvar log .txt** (salvamento somente após escolha manual). Desse modo o
+usuário consegue compartilhar o texto legível do erro sem fotos.
+
+A coleta não usa administrador, não altera a configuração Bluetooth do
+Windows, não cria outra conexão BLE, não interfere no HID/QR nem faz flash
+do ESP32. Não armazena código SAS, chaves, payloads criptografados nem
+texto dos comandos MCP; os campos de credenciais conhecidos são filtrados.
+A tentativa de \`start_notify\` continua sujeita às permissões normais da
+pilha GATT; a janela é exclusivamente de diagnóstico.

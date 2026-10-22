@@ -8,6 +8,7 @@ from pathlib import Path
 
 from easychange.remote.optical_protocol import encode_durable_result_header, encode_result_bundle
 from easychange.remote.gatt_client import EasyChangeGattClient
+from easychange.ui.gatt_diagnostic_window import GattDiagnosticWindow
 
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPixmap, QShortcut
@@ -286,6 +287,16 @@ class MainWindow(QMainWindow):
         # diagnostic to one line. Keep the text copyable for support.
         self._gatt_status.setWordWrap(True)
         self._gatt_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._gatt_diagnostic_window = None
+        self.gatt_diagnostic_button = QPushButton("Diagnóstico GATT")
+        self.gatt_diagnostic_button.setObjectName("openGattDiagnosticButton")
+        self.gatt_diagnostic_button.setToolTip(
+            "Abre uma janela separada com historico completo da conexao "
+            "Bluetooth GATT, excecoes e informacoes tecnicas, em tempo real.")
+        self.gatt_diagnostic_button.clicked.connect(self.open_gatt_diagnostics)
+        gatt_status_row = QHBoxLayout()
+        gatt_status_row.addWidget(self._gatt_status, 1)
+        gatt_status_row.addWidget(self.gatt_diagnostic_button)
         self._gatt_timer = QTimer(self)
         self._gatt_timer.setInterval(100)
         self._gatt_timer.timeout.connect(self._poll_gatt_client)
@@ -327,7 +338,7 @@ class MainWindow(QMainWindow):
         self.command.setMaxLength(4 * 1024 * 1024)
         self.command.setPlaceholderText("COMMAND > :remote-guide | Ctrl+K | Enter")
         self.command.installEventFilter(self)
-        layout.addLayout(header_row); layout.addWidget(self._gatt_status); layout.addWidget(self.optical_controls); layout.addWidget(self.workspace_split, 1); layout.addWidget(self.result_panel); layout.addWidget(self.command)
+        layout.addLayout(header_row); layout.addLayout(gatt_status_row); layout.addWidget(self.optical_controls); layout.addWidget(self.workspace_split, 1); layout.addWidget(self.result_panel); layout.addWidget(self.command)
         self.setCentralWidget(central)
         self.command.returnPressed.connect(self.execute_command)
         self.tree.itemActivated.connect(self.open_selected)
@@ -802,8 +813,22 @@ class MainWindow(QMainWindow):
         else:
             self._run_command(text)
 
+    def open_gatt_diagnostics(self) -> None:
+        """Operator-requested, read-only diagnostics; never starts BLE I/O."""
+        dialog = self._gatt_diagnostic_window
+        if dialog is None:
+            dialog = GattDiagnosticWindow(self)
+            self._gatt_diagnostic_window = dialog
+        dialog.refresh(self._gatt_client.diagnostics)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     def _poll_gatt_client(self) -> None:
         """Qt-thread adapter for a GATT link; never requests keyboard/window focus."""
+        dialog = getattr(self, "_gatt_diagnostic_window", None)
+        if dialog is not None and dialog.isVisible():
+            dialog.refresh(self._gatt_client.diagnostics)
         import queue
         for _ in range(8):
             try:
@@ -1520,6 +1545,9 @@ class MainWindow(QMainWindow):
             return
         self._command_poll_timer.stop()
         self._gatt_timer.stop()
+        if self._gatt_diagnostic_window is not None:
+            self._gatt_diagnostic_window.close()
+            self._gatt_diagnostic_window = None
         self._gatt_client.stop()
         self._command_executor.shutdown(wait=False, cancel_futures=True)
         self._optical_encode_executor.shutdown(wait=False, cancel_futures=True)
