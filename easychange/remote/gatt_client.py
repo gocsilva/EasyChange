@@ -231,6 +231,38 @@ def _is_cccd_write_denied(exc: BaseException) -> bool:
              "0x03" in message or "(3," in message))
 
 
+def _winrt_custom_service_access_status(client) -> str:
+    """Read existing WinRT GATT service access metadata; never request access.
+
+    The Bleak service wraps a Windows GattDeviceService in `obj`. Not every
+    Bleak/backend or WinRT projection exposes DeviceAccessInformation.
+    Keep this probe non-fatal, bounded, and free of device identifiers.
+    """
+    if not _on_windows():
+        return "NOT_WINDOWS"
+    try:
+        services = getattr(client, "services", None)
+        service = (services.get_service(SERVICE_UUID) if services is not None
+                   else None)
+        if service is None:
+            return "SERVICE_NOT_FOUND"
+        winrt_service = getattr(service, "obj", None)
+        if winrt_service is None:
+            return "WINRT_SERVICE_OBJECT_UNAVAILABLE"
+        access = getattr(winrt_service, "device_access_information", None)
+        if access is None:
+            return "WINRT_ACCESS_INFORMATION_UNAVAILABLE"
+        status = getattr(access, "current_status", None)
+        if status is None:
+            return "WINRT_CURRENT_STATUS_UNAVAILABLE"
+        name = getattr(status, "name", None)
+        label = str(name if name is not None else status)
+        label = re.sub(r"[^a-zA-Z0-9_ -]", "", label)[:48]
+        return "WINRT_ACCESS_STATUS=" + (label or "UNKNOWN")
+    except Exception as exc:
+        return "WINRT_ACCESS_QUERY_FAILED:" + type(exc).__name__
+
+
 async def _custom_service_read_probe(client) -> str:
     """Optional, safe read of public diagnostic marker (never commands or keys).
 
@@ -510,6 +542,10 @@ class EasyChangeGattClient:
                                 _gatt_attribute_details(getattr(client, "services", None))
                                 if getattr(client, "services", None) is not None
                                 else "Servicos BLE indisponiveis")
+                    self._trace(
+                        "WINRT_GATT_ACCESSO",
+                        "Estado de acesso ao servico BLE personalizado: " +
+                        _winrt_custom_service_access_status(client))
                     # Readable characteristic is independent of CCCD (0x2902).
                     # Perform one bounded read while the same BLE link is open.
                     # Firmware without this optional characteristic is valid.

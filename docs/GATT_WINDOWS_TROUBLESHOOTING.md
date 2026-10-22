@@ -230,3 +230,26 @@ No Windows remoto, `Easy` deve aparecer como dispositivo Bluetooth
 LE generico (o Windows determina a rotulagem); emparelhar apenas com
 consentimento do operador e sem direitos de administrador. O controle
 do EasyChange deve usar o GATT criptografado, mantendo SAS/AEAD.
+
+
+### Auditoria de acesso WinRT + eventos Bluedroid
+
+O EasyChange registra `WINRT_GATT_ACCESSO` para o servico personalizado,
+consultando **somente** `GattDeviceService.DeviceAccessInformation.CurrentStatus`
+quando exposto pelo backend Bleak/WinRT. Estados indisponiveis sao
+diferenciados de recusa. A consulta nao pede autorizacao, nao altera ACL,
+pareamento, cache, permissao corporativa ou dispositivo.
+
+O firmware adiciona `BLE_DIAG` no UART CH343 COM4, com contadores de
+conexoes/desconexoes, sucesso/falha de autenticacao (a ultima falha e
+retida apos desconectar), eventos Bluedroid de leitura da caracteristica
+publica e leitura/escrita CCCD. Nenhum conteudo transmitido, chaves,
+enderecos de pares ou codigos de emparelhamento entra no diagnostico.
+Os contadores refletem **somente** eventos entregues ao callback GATTS;
+uma recusa anterior na pilha ou no Windows pode nao aparecer neles.
+
+Fazer uma tentativa GATT no EasyChange e, sem reiniciar o ESP, consultar
+`BLE_DIAG` pelo controlador COM4 local. Analisar juntos
+`WINRT_GATT_ACCESSO`, `GATT_LEITURA_TESTE`, `CCCD_ATT03`,
+`BLE_LAST_AUTH_FAILURE`, `GATT_CCCD_WRITE_EVENTS` e
+`GATT_DIAG_READ_EVENTS`. O HID USB remoto nao e alterado.

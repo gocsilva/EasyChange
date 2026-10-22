@@ -821,3 +821,42 @@ def test_custom_gatt_probe_reports_old_firmware_or_access_denied():
             raise PermissionError("Access Denied")
     result = asyncio.run(gatt_client._custom_service_read_probe(ReadDenied()))
     assert result == "DIAG_READ_FAILED:PermissionError:Access Denied"
+
+
+
+def test_winrt_gatt_custom_service_access_reports_current_status_without_mutating():
+    from easychange.remote import gatt_client
+    import types
+    old_windows = gatt_client._on_windows
+    class Access:
+        current_status = types.SimpleNamespace(name="ALLOWED")
+        def request_access_async(self):
+            raise AssertionError("Must not request access")
+    raw = types.SimpleNamespace(device_access_information=Access())
+    class Services:
+        def get_service(self, uuid):
+            assert uuid == gatt_client.SERVICE_UUID
+            return types.SimpleNamespace(obj=raw)
+    try:
+        gatt_client._on_windows = lambda: True
+        assert (gatt_client._winrt_custom_service_access_status(
+            types.SimpleNamespace(services=Services())) == "WINRT_ACCESS_STATUS=ALLOWED")
+    finally:
+        gatt_client._on_windows = old_windows
+
+
+def test_winrt_gatt_access_probe_handles_absent_service_and_api():
+    from easychange.remote import gatt_client
+    import types
+    old_windows = gatt_client._on_windows
+    try:
+        gatt_client._on_windows = lambda: True
+        missing = types.SimpleNamespace(services=types.SimpleNamespace(
+            get_service=lambda uuid: None))
+        assert gatt_client._winrt_custom_service_access_status(missing) == "SERVICE_NOT_FOUND"
+        no_api = types.SimpleNamespace(services=types.SimpleNamespace(
+            get_service=lambda uuid: types.SimpleNamespace(obj=types.SimpleNamespace())))
+        assert (gatt_client._winrt_custom_service_access_status(no_api)
+                == "WINRT_ACCESS_INFORMATION_UNAVAILABLE")
+    finally:
+        gatt_client._on_windows = old_windows
