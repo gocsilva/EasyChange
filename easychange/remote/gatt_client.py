@@ -585,9 +585,17 @@ class EasyChangeGattClient:
                 target = await self._resolve_target(BleakScanner)
                 stage = "CONEXAO_BLE"
                 self._last_stage = stage
-                options = {"winrt": {"use_cached_services": False}} if _on_windows() else {}
+                # ESP32-S3 Easy uses a deterministic STATIC RANDOM BLE address
+                # (BLE_ADDR_TYPE_RANDOM).  A synthetic BLEDevice obtained from
+                # Windows' paired-AEP record carries no advertisement metadata;
+                # Bleak otherwise calls WinRT's address-only constructor,
+                # leaving the PUBLIC/RANDOM type implicit.  Bind the actual
+                # firmware type, and always fetch fresh GATT attributes.
+                options = {"winrt": {"address_type": "random",
+                                      "use_cached_services": False}} if _on_windows() else {}
                 self._trace("CONEXAO_BLE", "Dispositivo resolvido; abrindo conexao "
-                            f"com timeout=12s, cache_servicos_desabilitado={_on_windows()}")
+                            f"com timeout=12s, cache_servicos_desabilitado={_on_windows()}, "
+                            f"tipo_endereco={'RANDOM_STATIC' if _on_windows() else 'PLATFORM'}")
                 # GATT-only firmware Easy, not a Windows-owned BLE HID profile.
                 # Request fresh GATT attributes rather than stale HID cache.
                 async with BleakClient(target, timeout=12, **options) as client:

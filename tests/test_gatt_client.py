@@ -176,7 +176,7 @@ def test_windows_gatt_client_uses_uncached_services_and_reports_authenticated_st
 
     monkeypatch.setattr(bridge, "_resolve_target", target)
     asyncio.run(bridge._run())
-    assert created[0][1]["winrt"] == {"use_cached_services": False}
+    assert created[0][1]["winrt"] == {"address_type": "random", "use_cached_services": False}
     assert bridge._last_error == ""
     assert bridge._last_stage == "CONECTADO"
 
