@@ -17,6 +17,10 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QGridLayout
 
 from easychange.core.command_service import CommandService
 from easychange.core.maintenance_service import MaintenanceService
+from easychange.core.operation_registry import (
+    STRUCTURED_MUTATION_TYPES,
+    STRUCTURED_RECOVERY_TYPES,
+)
 from easychange.core.result import Result
 from easychange.core.workspace import Workspace
 from easychange.self_update import RESTART_GRACE_SECONDS, installation_root, schedule_self_update
@@ -1106,11 +1110,13 @@ class MainWindow(QMainWindow):
         self._show_terminal_optical_header_fast(result)
 
         generation = self._optical_render_generation
-        # A short sequenced source read has a small, bounded payload. Encode
-        # it immediately rather than waiting behind background QR work: the
-        # MCP often sees the PREVIOUS command for several HDMI frames and
-        # otherwise replays an already executed idempotent read. Preserve
-        # async encoding for long/unbounded results and other commands.
+        # Small terminal results must be encoded and painted before this GUI
+        # callback returns. The MCP can otherwise capture the fast EC2H header
+        # while a background encoder is still building the payload QRs, then
+        # start a recovery round trip before the current result is visible.
+        # This is especially harmful for write receipts and result_chunk(s):
+        # every recovery query can reproduce the same header-before-payload
+        # race. Keep large/unbounded results on the background worker.
         lines = result.data.get("lines") if isinstance(getattr(result, "data", None), dict) else None
         inline_small_read = bool(
             getattr(result, "ok", False)
@@ -1141,7 +1147,21 @@ class MainWindow(QMainWindow):
                 )
             except (TypeError, ValueError, UnicodeEncodeError):
                 inline_compact_state = False
-        if inline_small_read or inline_compact_state:
+        inline_small_terminal_result = False
+        inline_command = str(getattr(result, "command", "") or "").casefold()
+        if (
+            getattr(result, "ok", False)
+            and getattr(result, "sequence", None)
+            and isinstance(state_data, dict)
+            and inline_command in (STRUCTURED_MUTATION_TYPES | STRUCTURED_RECOVERY_TYPES)
+        ):
+            try:
+                inline_small_terminal_result = len(json.dumps(
+                    state_data, ensure_ascii=False, separators=(",", ":")
+                ).encode("utf-8")) <= 4096
+            except (TypeError, ValueError, UnicodeEncodeError):
+                inline_small_terminal_result = False
+        if inline_small_read or inline_compact_state or inline_small_terminal_result:
             try:
                 payloads, header = encode_result_bundle(
                     result,
@@ -1157,11 +1177,11 @@ class MainWindow(QMainWindow):
                 completed.set_result((payloads, header))
                 self._optical_encode_future = completed
                 self._poll_optical_bundle(generation, completed)
-                if inline_compact_state:
-                    # Complete the bounded 1–4-symbol state page before this
-                    # GUI callback returns. Merely scheduling paint work left
-                    # the previous command's QR visible during fresh remote
-                    # MCP captures even though state execution had finished.
+                if inline_compact_state or inline_small_terminal_result:
+                    # Complete the small result's QR page(s) before releasing
+                    # the command callback. Merely scheduling paint work left
+                    # the terminal header visible while payload symbols were
+                    # still absent from fresh remote MCP captures.
                     for _ in range(len(self.machine_qrs) + 1):
                         if self._optical_render_pending is None:
                             break

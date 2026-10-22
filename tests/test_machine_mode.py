@@ -211,13 +211,20 @@ def test_five_chunk_result_enters_single_page_burst_with_redundancy(tmp_path, mo
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
     monkeypatch.setattr(
+        window._optical_encode_executor,
+        "submit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("small terminal result must be encoded before returning")
+        ),
+    )
+    monkeypatch.setattr(
         "easychange.ui.main_window.encode_result_bundle",
         lambda result, **kwargs: (
             [json.dumps({"p":"EC2","s":"QX","i":i,"n":5,"d":str(i)}, separators=(",", ":")) for i in range(5)],
             '{"p":"EC2H","s":"QX","n":5}',
         ),
     )
-    window._update_machine_qr(Result(True, "study", {"x": 1}, sequence="QX"))
+    window._update_machine_qr(Result(True, "result_chunks", {"x": 1}, sequence="QX"))
     _drain_optical(window, app)
     assert window._optical_burst is True
     assert window._optical_timer.isActive() is False
