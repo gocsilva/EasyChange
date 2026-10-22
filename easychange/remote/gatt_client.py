@@ -155,6 +155,15 @@ class EasyChangeGattClient:
             self._emit({"type":"status","message":"Pacote GATT rejeitado: autenticacao falhou."})
             return
         if command.get("t") == "confirm":
+            # A host-side serial/notify ACK does not prove the application
+            # received confirmation. Return a session-sealed receipt before
+            # admitting no-focus source commands on this transport.
+            try:
+                await self._send(seal_json(self._session, {"t": "confirmed"}))
+            except Exception:
+                self._accepted = False
+                self._emit({"type":"status","message":"GATT: falha ao confirmar pareamento ao MCP."})
+                return
             self._accepted = True
             self._emit({"type":"status","message":"GATT seguro autenticado. EasyChange executa sem roubar foco."})
             return
@@ -182,4 +191,17 @@ class EasyChangeGattClient:
     def publish_result(self, sequence: str, result: dict) -> None:
         if not self._accepted or self._loop is None:
             return
-        asyncio.run_coroutine_threadsafe(self.send_result(sequence, result), self._loop)
+        future = asyncio.run_coroutine_threadsafe(
+            self.send_result(sequence, result), self._loop)
+        def verify_delivery(done):
+            try:
+                done.result()
+            except Exception as exc:
+                # Do not leave the GUI claiming a healthy secure result channel
+                # after the Windows GATT write has failed. The MCP caller must
+                # reconcile its original sequence, never replay a mutation.
+                self._accepted = False
+                self._emit({"type": "status",
+                            "message": "Falha ao enviar resultado GATT: " +
+                                       type(exc).__name__})
+        future.add_done_callback(verify_delivery)
