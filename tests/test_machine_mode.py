@@ -234,14 +234,15 @@ def test_small_mutation_and_recovery_results_encode_inline(tmp_path, monkeypatch
     window.close(); app.processEvents()
 
 
-def test_locate_result_up_to_8k_encodes_inline(tmp_path, monkeypatch):
+@pytest.mark.parametrize("command", ["locate", "result_get"])
+def test_bounded_locate_and_recovery_results_up_to_8k_encode_inline(tmp_path, monkeypatch, command):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
     monkeypatch.setattr(
         window._optical_encode_executor,
         "submit",
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("bounded locate result must be encoded before returning")
+            AssertionError("bounded locate/recovery result must be encoded before returning")
         ),
     )
     monkeypatch.setattr(
@@ -251,7 +252,7 @@ def test_locate_result_up_to_8k_encodes_inline(tmp_path, monkeypatch):
             for i in range(4)
         ], '{"p":"EC2H","s":"QL","n":4}'),
     )
-    window._update_machine_qr(Result(True, "locate", {"matches": ["x" * 5000]}, sequence="QL"))
+    window._update_machine_qr(Result(True, command, {"matches": ["x" * 5000]}, sequence="QL"))
     _drain_optical(window, app)
     assert len(window._optical_payloads) == 4
     assert window._optical_burst is False

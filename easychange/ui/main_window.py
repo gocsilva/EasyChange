@@ -1150,7 +1150,13 @@ class MainWindow(QMainWindow):
                 inline_compact_state = False
         inline_small_terminal_result = False
         inline_command = str(getattr(result, "command", "") or "").casefold()
-        inline_limit = 8192 if inline_command in {"locate", "search", "read_many"} else 4096
+        inline_limit = (
+            8192
+            if inline_command in (
+                STRUCTURED_RECOVERY_TYPES | {"locate", "search", "read_many"}
+            )
+            else 4096
+        )
         if (
             getattr(result, "ok", False)
             and getattr(result, "sequence", None)
