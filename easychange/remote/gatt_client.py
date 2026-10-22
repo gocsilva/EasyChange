@@ -216,6 +216,45 @@ def _gatt_attribute_details(services) -> str:
     return "\n".join(lines)
 
 
+def _is_cccd_write_denied(exc: BaseException) -> bool:
+    """ATT 0x03 differs from pairing/authentication errors (0x05, 0x0F)."""
+    value = getattr(exc, "protocol_error", None)
+    if value is not None:
+        try:
+            return int(value) == 3
+        except (ValueError, TypeError):
+            return False
+    message = str(exc).lower()
+    return ("write not permitted" in message and
+            ("gatt" in message or "protocol error" in message or
+             "0x03" in message or "(3," in message))
+
+
+async def _cccd_readonly_probe(client) -> str:
+    """Inspect CCCD (0x2902) using read only; never write or alter BLE bonds."""
+    services = getattr(client, "services", None)
+    if services is None:
+        return "CCCD_SERVICES_UNAVAILABLE"
+    try:
+        char = services.get_characteristic(HOST_TO_REMOTE_UUID)
+        if char is None:
+            return "CCCD_NOTIFY_CHARACTERISTIC_MISSING"
+        descriptors = list(getattr(char, "descriptors", ()) or ())[:32]
+        cccd = next((desc for desc in descriptors
+                     if str(getattr(desc, "uuid", "")).lower() in
+                     ("00002902-0000-1000-8000-00805f9b34fb", "2902", "0x2902")), None)
+        if cccd is None:
+            return "CCCD_DESCRIPTOR_MISSING"
+        value = bytes(await asyncio.wait_for(
+            client.read_gatt_descriptor(cccd, use_cached=False), timeout=4))
+        if len(value) != 2:
+            return "CCCD_READ_LENGTH_INVALID"
+        return "CCCD_READ_OK:0x" + value.hex()
+    except Exception as exc:
+        # Optional diagnostics must never mask the actual write-denied error.
+        return "CCCD_READ_FAILED:" + type(exc).__name__ + ":" + str(exc)[:85]
+
+
 def _gatt_notify_inventory(services) -> str:
     """Read-only GATT metadata; never issue diagnostic characteristic writes.
 
@@ -262,6 +301,8 @@ class EasyChangeGattClient:
         self._last_stage = "IDLE"
         self.diagnostics = GattDiagnosticLog()
         self._attempt = 0
+        self._consecutive_cccd_denials = 0
+        self._retry_wakeup = None
         self.diagnostics.record(
             "INICIO", "Iniciando diagnostico GATT no EasyChange. "
             "Comandos, chaves, endereco BLE, mensagens cifradas e codigo SAS "
@@ -277,6 +318,32 @@ class EasyChangeGattClient:
     def _trace(self, stage: str, message: str, exc=None) -> None:
         self.diagnostics.record(stage, message, exc=exc)
 
+    def retry_now(self) -> bool:
+        """User initiated non-destructive retry; no unpair or admin operations."""
+        loop, signal = self._loop, self._retry_wakeup
+        if loop is None or not loop.is_running() or signal is None:
+            return False
+        self._trace("RECONEXAO_MANUAL", "Operador solicitou nova tentativa BLE; "
+                    "nenhum pareamento ou configuracao Windows alterado")
+        loop.call_soon_threadsafe(signal.set)
+        return True
+
+    async def _retry_delay(self, seconds: float | None) -> None:
+        signal = self._retry_wakeup
+        if signal is None:
+            if seconds is not None:
+                await asyncio.sleep(seconds)
+            return
+        try:
+            if seconds is None:
+                await signal.wait()
+            else:
+                await asyncio.wait_for(signal.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            signal.clear()
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
@@ -291,7 +358,8 @@ class EasyChangeGattClient:
         self._stop.set()
         loop = self._loop
         if loop and loop.is_running():
-            loop.call_soon_threadsafe(lambda: None)
+            signal = self._retry_wakeup
+            loop.call_soon_threadsafe(signal.set if signal is not None else lambda: None)
 
     def status(self) -> dict:
         return {"running": self._thread is not None and self._thread.is_alive(),
@@ -377,6 +445,7 @@ class EasyChangeGattClient:
             self._trace("FALHA", "Biblioteca Bleak nao instalada", exc=exc)
             self._emit({"type":"status","message":"GATT indisponivel: instale o extra GUI (bleak)."})
             return
+        self._retry_wakeup = asyncio.Event()
         while not self._stop.is_set():
             self._session = None
             self._handshake = None
@@ -386,6 +455,7 @@ class EasyChangeGattClient:
             failure = ""
             gatt_metadata = ""
             self._last_stage = stage
+            cccd_denied = False
             self._attempt += 1
             self._trace("BUSCA_BLE", f"Tentativa #{self._attempt}: iniciando descoberta do "
                         "ESP Bluetooth HID emparelhado")
@@ -416,6 +486,7 @@ class EasyChangeGattClient:
                                 f"caracteristica {HOST_TO_REMOTE_UUID}; {gatt_metadata}")
                     await client.start_notify(HOST_TO_REMOTE_UUID, self._notify)
                     self._trace("INSCRICAO_GATT", "Inscricao confirmada pelo sistema")
+                    self._consecutive_cccd_denials = 0
                     stage = "CONECTADO"
                     self._last_stage = stage
                     self._last_error = ""
@@ -432,6 +503,18 @@ class EasyChangeGattClient:
                 failure = f"{type(exc).__name__}: {str(exc)[:160]}"
                 if stage == "INSCRICAO_GATT":
                     failure += " [" + gatt_metadata + "]"
+                    if _is_cccd_write_denied(exc):
+                        cccd_denied = True
+                        self._consecutive_cccd_denials += 1
+                        cccd_state = await _cccd_readonly_probe(client)
+                        self._trace("CCCD_ATT03", "Recusa do servidor BLE ao "
+                                    "habilitar notificacoes: ATT 0x03 Write Not Permitted; "
+                                    f"recusas={self._consecutive_cccd_denials}; "
+                                    f"leitura={cccd_state}. Nenhuma escrita "
+                                    "direta no CCCD nem mudanca no Windows.")
+                        failure = ("ATT_0x03 Write Not Permitted "
+                                   f"(recusas={self._consecutive_cccd_denials}; "
+                                   f"{cccd_state}) [{gatt_metadata}]")
             finally:
                 self._accepted = False
                 self._session = None
@@ -441,14 +524,27 @@ class EasyChangeGattClient:
                     self._last_stage = stage
                     self._trace("DESCONECTADO", f"Tentativa #{self._attempt} encerrada. "
                                 f"ultima_etapa={stage}; causa={self._last_error[:300]}; "
-                                "QR continua disponivel; reconexao em 3 segundos")
+                                "HID/QR permanecem independentes da falha GATT")
                     # Do not overwrite the actual error with a generic
                     # 'disconnected' event on the following Qt timer tick.
                     self._emit({"type":"status","message":
                         f"GATT desconectado [{stage}]: {self._last_error[:300]}. "
                         "Tentando reconectar; QR disponivel."})
             if not self._stop.is_set():
-                await asyncio.sleep(3)
+                if cccd_denied and self._consecutive_cccd_denials >= 2:
+                    self._last_stage = "CCCD_ATT03_ACTION_REQUIRED"
+                    self._trace("CCCD_ATT03_ACTION_REQUIRED",
+                                "Duas conexoes independentes tiveram a mesma recusa "
+                                "ATT 0x03. Esperando nova tentativa do operador, "
+                                "sem loop infinito; nao e sucesso GATT.")
+                    self._emit({"type": "status", "message":
+                        "GATT nao autenticado: duas recusas ATT 0x03 do CCCD. "
+                        "Verifique o log. Clique 'Tentar GATT' para nova tentativa "
+                        "sem administrador. HID permanece disponivel."})
+                    await self._retry_delay(None)
+                    self._consecutive_cccd_denials = 0
+                else:
+                    await self._retry_delay(3)
 
     def _notify(self, sender, data) -> None:
         try:

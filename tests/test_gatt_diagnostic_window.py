@@ -116,3 +116,23 @@ def test_main_window_button_opens_only_one_live_popup_and_starts_no_extra_gatt(t
     finally:
         win.close()
         app.processEvents()
+
+
+
+def test_main_window_gatt_retry_button_is_non_admin_and_does_not_restart_esp(tmp_path, monkeypatch):
+    app = _app()
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=False, hid_mode=False)
+    window.show()
+    app.processEvents()
+    try:
+        attempts = []
+        monkeypatch.setattr(
+            window._gatt_client, "retry_now",
+            lambda: (attempts.append("worker_signal"), True)[1])
+        assert window.gatt_retry_button.text() == "Tentar GATT"
+        assert window.gatt_retry_button.objectName() == "retryGattConnectionButton"
+        window.gatt_retry_button.click()
+        assert attempts == ["worker_signal"]
+    finally:
+        window.close()
+        app.processEvents()

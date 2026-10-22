@@ -617,3 +617,109 @@ def test_gatt_notify_failure_preserves_inventory_in_final_error(monkeypatch):
     assert "INSCRICAO_GATT" in msg
     assert "notify_char=1,notify=1,cccd=1,handle=24" in msg
     assert bridge.status()["secure"] is False
+
+
+def test_att03_classifier_distinguishes_write_permission_from_security_and_other_errors():
+    class BleakProtocol:
+        protocol_error = 3
+        def __str__(self):
+            return "BLE GATT Protocol Error: Write Not Permitted"
+    class SecurityFailure:
+        protocol_error = 5
+        def __str__(self):
+            return "GATT: Insufficient Authentication"
+    assert gatt_client._is_cccd_write_denied(BleakProtocol()) is True
+    assert gatt_client._is_cccd_write_denied(SecurityFailure()) is False
+    assert gatt_client._is_cccd_write_denied(
+        RuntimeError("GATT Protocol Error: Write Not Permitted")) is True
+    assert gatt_client._is_cccd_write_denied(
+        RuntimeError("Insufficient Encryption")) is False
+    assert gatt_client._is_cccd_write_denied(
+        RuntimeError("GATT write failed with timeout")) is False
+
+
+def test_cccd_probe_is_readonly_and_uses_fresh_descriptor_read():
+    cccd = types.SimpleNamespace(uuid="00002902-0000-1000-8000-00805f9b34fb")
+    ch = types.SimpleNamespace(descriptors=[cccd])
+    class Services:
+        def get_characteristic(self, uuid):
+            assert uuid == gatt_client.HOST_TO_REMOTE_UUID
+            return ch
+    class Client:
+        services = Services()
+        async def read_gatt_descriptor(self, descriptor, *, use_cached):
+            assert descriptor is cccd
+            assert use_cached is False
+            return b"\x00\x00"
+        async def write_gatt_descriptor(self, *_args, **_kwargs):
+            raise AssertionError("CCCD must never be written directly")
+    assert asyncio.run(gatt_client._cccd_readonly_probe(Client())) == "CCCD_READ_OK:0x0000"
+
+
+def test_cccd_probe_failure_does_not_hide_root_att03_error():
+    cccd = types.SimpleNamespace(uuid="00002902-0000-1000-8000-00805f9b34fb")
+    class Client:
+        services = types.SimpleNamespace(
+            get_characteristic=lambda uuid: types.SimpleNamespace(descriptors=[cccd]))
+        async def read_gatt_descriptor(self, *_args, **_kwargs):
+            raise PermissionError("read permission denied")
+    status = asyncio.run(gatt_client._cccd_readonly_probe(Client()))
+    assert status.startswith("CCCD_READ_FAILED:PermissionError")
+
+
+def test_repeated_att03_is_bounded_and_never_marks_session_authenticated(monkeypatch):
+    _fake_winrt_pair(monkeypatch, entries=[])
+    count = []
+    class FailingClient:
+        is_connected = True
+        services = None
+        def __init__(self, *_args, **_kwargs):
+            count.append("attempt")
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return None
+        async def start_notify(self, *_args):
+            raise RuntimeError("GATT Protocol Error: Write Not Permitted")
+    monkeypatch.setattr(sys.modules["bleak"], "BleakClient", FailingClient, raising=False)
+    monkeypatch.setattr(sys.modules["bleak"], "BleakScanner", object, raising=False)
+    bridge = gatt_client.EasyChangeGattClient()
+    events = []
+    delay_requests = []
+    async def resolve(_):
+        return types.SimpleNamespace(address="BLEDevice")
+    async def short_circuit_delay(seconds):
+        delay_requests.append(seconds)
+        if seconds is None:
+            bridge._stop.set()
+    monkeypatch.setattr(bridge, "_resolve_target", resolve)
+    monkeypatch.setattr(bridge, "_retry_delay", short_circuit_delay)
+    monkeypatch.setattr(bridge, "_emit", lambda item: events.append(item))
+    asyncio.run(bridge._run())
+    assert len(count) == 2
+    assert delay_requests == [3, None]
+    assert any("duas recusas ATT 0x03" in
+               event.get("message", "") for event in events)
+    assert bridge._accepted is False
+    assert bridge._consecutive_cccd_denials == 0
+    assert any(row["stage"] == "CCCD_ATT03_ACTION_REQUIRED"
+               for row in bridge.diagnostics.snapshot()["events"])
+
+
+def test_manual_retry_is_only_a_worker_wakeup_not_windows_policy_change():
+    bridge = gatt_client.EasyChangeGattClient()
+    assert bridge.retry_now() is False
+    class FakeLoop:
+        def is_running(self):
+            return True
+        def call_soon_threadsafe(self, callback):
+            callback()
+    class FakeSignal:
+        called = 0
+        def set(self):
+            self.called += 1
+    signal = FakeSignal()
+    bridge._loop = FakeLoop()
+    bridge._retry_wakeup = signal
+    assert bridge.retry_now() is True
+    assert signal.called == 1

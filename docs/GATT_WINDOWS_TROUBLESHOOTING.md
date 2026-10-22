@@ -161,3 +161,28 @@ nao abrem outra conexao BLE. A inicializacao/atualizacao permanece a
 operacao EasyChange existente `:self-update`, com protecao de editor nao salvo.
 Nao executar o reinicio sem verificar o recibo, e evitar reenviar a mesma
 sequencia mutante quando o recibo estiver incerto.
+
+
+### Tratamento de ATT 0x03 persistente no EasyChange (sem administrador)
+
+O backend WinRT/Bleak ativa notificacoes escrevendo no CCCD 0x2902.
+Se o GATT server responder ATT 0x03 ('Write Not Permitted'), a aplicacao
+nao tem como transformar essa rejeicao do servidor em sucesso apenas por
+outra chamada de escrita. A biblioteca Bleak tambem desautoriza escrever
+CCCD diretamente. Nao trocar para `force_indicate`: nosso canal anuncia
+apenas `notify`.
+
+O EasyChange agora registra um snapshot opcional **somente de leitura** do
+CCCD sem cache (se o Windows aceitar leitura), preserva o traceback e
+tenta uma unica reconexao limpa. A segunda recusa identica interrompe
+as repeticoes automaticas, marca `CCCD_ATT03_ACTION_REQUIRED` e informa
+na janela principal que a sessao GATT NAO foi autenticada. O botao
+**Tentar GATT** faz uma nova tentativa comecando pelo discovery BLE,
+sem direitos de administrador, sem remover o emparelhamento HID nem
+alterar permissoes do Windows.
+
+Isto corrige o retry infinito e melhora a separacao entre falha de
+transporte e autorizacao. Nao afirma reparar permissoes do servidor GATT:
+a causa fisica da recusa continua necessitando verificacao caso persista.
+O QR/HID ja existente permanece funcional, mas nao e necessario para ler
+a janela Diagnostico GATT por HDMI.

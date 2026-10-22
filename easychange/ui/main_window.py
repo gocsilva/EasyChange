@@ -295,8 +295,15 @@ class MainWindow(QMainWindow):
             "Abre uma janela separada com historico completo da conexao "
             "Bluetooth GATT, excecoes e informacoes tecnicas, em tempo real.")
         self.gatt_diagnostic_button.clicked.connect(self.open_gatt_diagnostics)
+        self.gatt_retry_button = QPushButton("Tentar GATT")
+        self.gatt_retry_button.setObjectName("retryGattConnectionButton")
+        self.gatt_retry_button.setToolTip(
+            "Nova tentativa de conexao GATT sem remover emparelhamento "
+            "nem alterar a configuracao do Windows.")
+        self.gatt_retry_button.clicked.connect(self._retry_gatt_connection)
         gatt_status_row = QHBoxLayout()
         gatt_status_row.addWidget(self._gatt_status, 1)
+        gatt_status_row.addWidget(self.gatt_retry_button)
         gatt_status_row.addWidget(self.gatt_diagnostic_button)
         self._gatt_timer = QTimer(self)
         self._gatt_timer.setInterval(100)
@@ -813,6 +820,11 @@ class MainWindow(QMainWindow):
             self._queue_machine_command(text)
         else:
             self._run_command(text)
+
+    def _retry_gatt_connection(self) -> None:
+        """Manual non-destructive wakeup; retains Bluetooth HID pairing."""
+        if not self._gatt_client.retry_now():
+            self._gatt_status.setText("GATT: cliente Bluetooth nao esta ativo.")
 
     def open_gatt_diagnostics(self) -> None:
         """Operator-requested, read-only diagnostics; never starts BLE I/O."""
