@@ -257,7 +257,7 @@ def test_winrt_all_overloads_fallback_enumerates_only_paired(monkeypatch):
     target = asyncio.run(gatt_client._paired_windows_ble_target())
     assert isinstance(target, FakeBLEDevice)
     assert target.address == "A1:B2:C3:D4:E5:F6"
-    assert [len(args) for args in calls] == [1, 2, 0]
+    assert [len(args) for args in calls] == [1, 2, 2, 0]
 
 
 def test_winrt_unfiltered_does_not_accept_missing_pairing_information(monkeypatch):
@@ -337,7 +337,7 @@ def test_winrt_two_argument_iterable_conversion_error_tries_no_arg(monkeypatch):
     target = asyncio.run(gatt_client._paired_windows_ble_target())
     assert isinstance(target, FakeBLEDevice)
     assert target.address == "A1:B2:C3:D4:E5:F6"
-    assert [len(call) for call in calls] == [1, 2, 0]
+    assert [len(call) for call in calls] == [1, 2, 2, 0]
 
 
 
@@ -363,7 +363,9 @@ def test_winrt_paired_le_query_must_specify_association_endpoint(monkeypatch):
     assert isinstance(device, FakeBLEDevice)
     assert device.address == "A1:B2:C3:D4:E5:F6"
     assert calls == [("PAIRED_LE_ONLY", [], 5)]
-    assert info == {"paired_records": 1, "named_records": 1, "matching_records": 1}
+    assert info == {"paired_records": 1, "named_records": 1,
+                    "matching_records": 1, "verified_le_objects": 1,
+                    "verified_aep_addresses": 0, "source": "AEP_LIST"}
     assert devices["esp"].closed is True
 
 
@@ -379,7 +381,7 @@ def test_empty_paired_aep_and_advertisement_reports_counts(monkeypatch):
         async def discover(timeout):
             assert timeout == 4
             return []
-    with pytest.raises(RuntimeError, match=r"paired=0, named=0, matched=0, scan=0"):
+    with pytest.raises(RuntimeError, match=r"records=0, named=0, verified=0, le=0, aep=0, source=SELECTOR_ONLY, scan=0"):
         asyncio.run(gatt_client.EasyChangeGattClient()._resolve_target(NoAdvertisements))
 
 
@@ -402,3 +404,146 @@ def test_named_unpaired_aep_cannot_be_selected(monkeypatch):
     assert device is None
     assert counts["named_records"] == 1
     assert counts["matching_records"] == 0
+
+
+
+def test_aep_nullable_winrt_iiiterable_succeeds_if_python_list_cannot_convert(monkeypatch):
+    """Real PyWinRT bindings may reject [] for nullable IIterable[str]."""
+    _devices, FakeBLEDevice = _fake_winrt_pair(monkeypatch, entries=[
+        ("BT KeyboardMouse E", "esp", 0xA1B2C3D4E5F6),
+    ])
+    module = sys.modules["winrt.windows.devices.enumeration"]
+    module.DeviceInformationKind = types.SimpleNamespace(ASSOCIATION_ENDPOINT=5)
+    calls = []
+    async def find_all(*args):
+        calls.append(args)
+        if len(args) == 3 and args[1] is None and args[2] == 5:
+            return [types.SimpleNamespace(
+                name="BT KeyboardMouse E", id="esp",
+                pairing=types.SimpleNamespace(is_paired=True))]
+        raise TypeError("Invalid parameter count or invalid iterable type")
+    monkeypatch.setattr(module.DeviceInformation, "find_all_async", find_all)
+    seen = {}
+    actual = asyncio.run(gatt_client._paired_windows_ble_target(seen))
+    assert isinstance(actual, FakeBLEDevice)
+    assert actual.address == "A1:B2:C3:D4:E5:F6"
+    assert seen["source"] == "AEP_NULL"
+    assert [len(row) for row in calls] == [3, 3]
+
+
+def test_windows_child_interface_unpaired_but_verified_main_device_paired(monkeypatch):
+    devices, FakeBLEDevice = _fake_winrt_pair(monkeypatch, entries=[
+        ("BT KeyboardMouse E", "child", 0xA1B2C3D4E5F6),
+    ])
+    module = sys.modules["winrt.windows.devices.enumeration"]
+    async def unfiltered(*args):
+        if args:
+            raise TypeError("Invalid parameter count")
+        return [types.SimpleNamespace(
+            name="BT KeyboardMouse E", id="child",
+            pairing=types.SimpleNamespace(is_paired=False))]
+    monkeypatch.setattr(module.DeviceInformation, "find_all_async", unfiltered)
+    devices["child"].device_information = types.SimpleNamespace(
+        pairing=types.SimpleNamespace(is_paired=True))
+    diag = {}
+    actual = asyncio.run(gatt_client._paired_windows_ble_target(diag))
+    assert isinstance(actual, FakeBLEDevice)
+    assert actual.address == "A1:B2:C3:D4:E5:F6"
+    assert diag["source"] == "UNFILTERED"
+    assert diag["named_records"] == 1
+    assert diag["matching_records"] == 1
+
+
+def test_unpaired_main_device_cannot_use_paired_looking_child(monkeypatch):
+    devices, _FakeBLEDevice = _fake_winrt_pair(monkeypatch, entries=[
+        ("BT KeyboardMouse E", "child", 0xA1B2C3D4E5F6),
+    ])
+    module = sys.modules["winrt.windows.devices.enumeration"]
+    async def filtered(*args):
+        return [types.SimpleNamespace(
+            name="BT KeyboardMouse E", id="child",
+            pairing=types.SimpleNamespace(is_paired=True))]
+    monkeypatch.setattr(module.DeviceInformation, "find_all_async", filtered)
+    devices["child"].device_information = types.SimpleNamespace(
+        pairing=types.SimpleNamespace(is_paired=False))
+    assert asyncio.run(gatt_client._paired_windows_ble_target()) is None
+
+
+def test_bad_child_interface_ids_are_skipped_without_guessing_mac(monkeypatch):
+    _devices, _FakeBLEDevice = _fake_winrt_pair(monkeypatch, entries=[])
+    module = sys.modules["winrt.windows.devices.enumeration"]
+    ble_class = sys.modules["winrt.windows.devices.bluetooth"].BluetoothLEDevice
+    async def all_rows(*args):
+        return [types.SimpleNamespace(
+            name="BT KeyboardMouse E", id="not-a-ble-aep",
+            pairing=types.SimpleNamespace(is_paired=False))]
+    async def bad_child_id(_device_id):
+        raise TypeError("Invalid parameter count")
+    monkeypatch.setattr(module.DeviceInformation, "find_all_async", all_rows)
+    monkeypatch.setattr(ble_class, "from_id_async", bad_child_id)
+    diag = {}
+    assert asyncio.run(gatt_client._paired_windows_ble_target(diag)) is None
+    assert diag["matching_records"] == 0
+
+
+
+def test_winrt_paired_aep_address_avoids_ui_thread_only_fromid(monkeypatch):
+    _devices, FakeBLEDevice = _fake_winrt_pair(monkeypatch, entries=[])
+    module = sys.modules["winrt.windows.devices.enumeration"]
+    module.DeviceInformationKind = types.SimpleNamespace(ASSOCIATION_ENDPOINT=5)
+    bclass = sys.modules["winrt.windows.devices.bluetooth"].BluetoothLEDevice
+
+    async def find_aep(*args):
+        if len(args) != 3:
+            return []
+        return [types.SimpleNamespace(
+            name="BT KeyboardMouse E", id="aep-paired",
+            pairing=types.SimpleNamespace(is_paired=True),
+            properties={"System.Devices.Aep.DeviceAddress": "a1:b2:c3:d4:e5:f6"})]
+    async def forbid_second_winrt_lookup(_id):
+        raise AssertionError("An authenticated AEP already has a verified address")
+    monkeypatch.setattr(module.DeviceInformation, "find_all_async", find_aep)
+    monkeypatch.setattr(bclass, "from_id_async", forbid_second_winrt_lookup)
+    info = {}
+    target = asyncio.run(gatt_client._paired_windows_ble_target(info))
+    assert isinstance(target, FakeBLEDevice)
+    assert target.address == "A1:B2:C3:D4:E5:F6"
+    assert info["verified_aep_addresses"] == 1
+    assert info["verified_le_objects"] == 0
+    assert info["matching_records"] == 1
+
+
+def test_unpaired_aep_cannot_supply_address_even_with_valid_mac(monkeypatch):
+    _devices, _FakeBLEDevice = _fake_winrt_pair(monkeypatch, entries=[])
+    module = sys.modules["winrt.windows.devices.enumeration"]
+    module.DeviceInformationKind = types.SimpleNamespace(ASSOCIATION_ENDPOINT=5)
+    bclass = sys.modules["winrt.windows.devices.bluetooth"].BluetoothLEDevice
+
+    async def find_aep(*args):
+        return [types.SimpleNamespace(
+            name="BT KeyboardMouse E", id="aep-unpaired",
+            pairing=types.SimpleNamespace(is_paired=False),
+            properties={"System.Devices.Aep.DeviceAddress": "a1:b2:c3:d4:e5:f6"})]
+    async def missing_le(_id):
+        return None
+    monkeypatch.setattr(module.DeviceInformation, "find_all_async", find_aep)
+    monkeypatch.setattr(bclass, "from_id_async", missing_le)
+    assert asyncio.run(gatt_client._paired_windows_ble_target()) is None
+
+
+def test_paired_aep_invalid_address_requires_independent_verification(monkeypatch):
+    _devices, _FakeBLEDevice = _fake_winrt_pair(monkeypatch, entries=[])
+    module = sys.modules["winrt.windows.devices.enumeration"]
+    module.DeviceInformationKind = types.SimpleNamespace(ASSOCIATION_ENDPOINT=5)
+    bclass = sys.modules["winrt.windows.devices.bluetooth"].BluetoothLEDevice
+
+    async def find_aep(*args):
+        return [types.SimpleNamespace(
+            name="BT KeyboardMouse E", id="aep-bad-mac",
+            pairing=types.SimpleNamespace(is_paired=True),
+            properties={"System.Devices.Aep.DeviceAddress": "this-is-not-a-mac"})]
+    async def missing_le(_id):
+        return None
+    monkeypatch.setattr(module.DeviceInformation, "find_all_async", find_aep)
+    monkeypatch.setattr(bclass, "from_id_async", missing_le)
+    assert asyncio.run(gatt_client._paired_windows_ble_target()) is None

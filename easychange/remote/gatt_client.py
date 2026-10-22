@@ -39,7 +39,8 @@ def _ble_address(value: int) -> str:
     return ":".join(text[i:i + 2] for i in range(0, 12, 2))
 
 
-async def _paired_windows_device_infos(device_information, selector, kind=None):
+async def _paired_windows_device_infos(device_information, selector, kind=None,
+                                       diagnostic=None):
     """Handle PyWinRT FindAllAsync overload differences safely.
 
     Some Windows Python WinRT bindings reject the AQS-only overload with
@@ -52,21 +53,40 @@ async def _paired_windows_device_infos(device_information, selector, kind=None):
     # explicit kind, Windows can return zero matches for an active HID bond.
     variants = []
     if kind is not None:
-        variants.append(((selector, [], kind), True))
+        # The WinRT projection accepts a nullable IIterable on some Windows
+        # builds but rejects Python [] for the same signature. The explicit
+        # AssociationEndpoint kind is vital: zero-arg enumeration can return
+        # thousands of DEVICE INTERFACE child records with pairing=False.
+        variants.extend((
+            ((selector, [], kind), True, "AEP_LIST"),
+            ((selector, None, kind), True, "AEP_NULL"),
+            ((selector, (), kind), True, "AEP_TUPLE"),
+        ))
     variants.extend((
-        ((selector,), True),
-        ((selector, []), True),
-        ((), False),
+        ((selector,), True, "SELECTOR_ONLY"),
+        ((selector, []), True, "SELECTOR_LIST"),
+        ((selector, None), True, "SELECTOR_NULL"),
+        ((), False, "UNFILTERED"),
     ))
-    for args, paired_filter_from_windows in variants:
+    empty = None
+    for args, paired_filter_from_windows, label in variants:
         try:
             devices = await device_information.find_all_async(*args)
-            return devices, paired_filter_from_windows
+            count = len(devices)
+            if count:
+                if isinstance(diagnostic, dict):
+                    diagnostic["source"] = label
+                return devices, paired_filter_from_windows
+            if empty is None:
+                empty = (devices, paired_filter_from_windows, label)
         except TypeError:
-            # PyWinRT versions differ not only on argument count, but also
-            # on conversion of Python lists to WinRT IIterable arguments.
-            # Only this read-only enumeration overload is retried.
+            # Only this read-only WinRT overload is retried.
             continue
+    if empty is not None:
+        devices, is_filtered, label = empty
+        if isinstance(diagnostic, dict):
+            diagnostic["source"] = label
+        return devices, is_filtered
     raise RuntimeError("WINRT_FIND_ALL_ASYNC_OVERLOADS_UNSUPPORTED")
 
 
@@ -90,37 +110,74 @@ async def _paired_windows_ble_target(diagnostic=None):
     kind_type = getattr(enumeration_module, "DeviceInformationKind", None)
     endpoint_kind = getattr(kind_type, "ASSOCIATION_ENDPOINT", None)
     items, paired_filter_from_windows = await _paired_windows_device_infos(
-        DeviceInformation, selector, kind=endpoint_kind)
+        DeviceInformation, selector, kind=endpoint_kind, diagnostic=diagnostic)
     paired_filter_from_windows = paired_filter_from_windows and selector_is_paired
-    matched = []
+    from_aep = bool(isinstance(diagnostic, dict) and
+                    str(diagnostic.get("source", "")).startswith("AEP_"))
+    named = []
     if isinstance(diagnostic, dict):
         diagnostic["paired_records"] = min(9999, len(items))
         diagnostic["named_records"] = 0
         diagnostic["matching_records"] = 0
+        diagnostic["verified_le_objects"] = 0
+        diagnostic["verified_aep_addresses"] = 0
     for item in items:
         if str(getattr(item, "name", "")).strip().casefold() != DEVICE_NAME.casefold():
             continue
-        if isinstance(diagnostic, dict):
-            diagnostic["named_records"] += 1
-        pairing = getattr(item, "pairing", None)
-        if not paired_filter_from_windows and getattr(pairing, "is_paired", False) is not True:
-            continue
-        if pairing is not None and getattr(pairing, "is_paired", True) is False:
-            continue
-        matched.append(item)
+        named.append(item)
     if isinstance(diagnostic, dict):
-        diagnostic["matching_records"] = len(matched)
-    if not matched:
-        return None
+        diagnostic["named_records"] = len(named)
+    # DeviceInformation child-interface entries may have pairing=False even
+    # when the actual BluetoothLEDevice is paired. Verify the resolved LE
+    # object against its OWN DeviceInformation pairing state. Never trust
+    # the name, link status, or a child-interface record alone.
     addresses = set()
-    for item in matched:
-        obj = await BluetoothLEDevice.from_id_async(item.id)
+    for item in named[:32]:
+        pairing = getattr(item, "pairing", None)
+        record_paired = getattr(pairing, "is_paired", False) is True
+        if paired_filter_from_windows and pairing is None:
+            # AQS paired-only filtered results may omit pairing property.
+            record_paired = True
+        if from_aep and record_paired:
+            # Use Windows' own address for a confirmed PAIRED association
+            # endpoint, avoiding another WinRT FromIdAsync from the worker
+            # thread (some Windows builds require a UI dispatcher).
+            try:
+                address_value = item.properties["System.Devices.Aep.DeviceAddress"]
+            except (KeyError, AttributeError, TypeError, OSError):
+                address_value = None
+            if isinstance(address_value, str) and BLE_ADDRESS_RE.fullmatch(
+                    address_value.strip()):
+                addresses.add(address_value.strip().upper())
+                if isinstance(diagnostic, dict):
+                    diagnostic["verified_aep_addresses"] += 1
+                continue
+        try:
+            obj = await BluetoothLEDevice.from_id_async(item.id)
+        except (OSError, ValueError, RuntimeError, TypeError):
+            # A default WinRT device-interface ID need not be a valid
+            # BluetoothLEDevice endpoint ID. Never treat that as consent
+            # to connect based on the child interface's display name.
+            continue
         if obj is None:
             continue
         try:
+            info = getattr(obj, "device_information", None)
+            device_pairing = getattr(getattr(info, "pairing", None),
+                                     "is_paired", None)
+            verified_paired = (device_pairing is True or
+                               (device_pairing is None and record_paired))
+            if not verified_paired:
+                continue
+            if str(getattr(obj, "name", DEVICE_NAME)).strip().casefold() != DEVICE_NAME.casefold():
+                continue
+            if isinstance(diagnostic, dict):
+                diagnostic["verified_le_objects"] += 1
             addresses.add(_ble_address(int(obj.bluetooth_address)))
         finally:
             obj.close()
+    if isinstance(diagnostic, dict):
+        diagnostic["matching_records"] = len(addresses)
     if len(addresses) > 1:
         raise RuntimeError("ESP_BLE_PAIRED_MULTIPLE_SAME_NAME")
     if not addresses:
@@ -196,10 +253,12 @@ class EasyChangeGattClient:
         if len(matches) > 1:
             raise RuntimeError("ESP_BLE_ADVERTISING_MULTIPLE_SAME_NAME")
         if not matches:
-            stats = (f"paired={discovery.get('paired_records', '?')}, "
+            stats = (f"records={discovery.get('paired_records', '?')}, "
                      f"named={discovery.get('named_records', '?')}, "
-                     f"matched={discovery.get('matching_records', '?')}, "
-                     f"scan={len(results)}")
+                     f"verified={discovery.get('matching_records', '?')}, "
+                     f"le={discovery.get('verified_le_objects', '?')}, "
+                     f"aep={discovery.get('verified_aep_addresses', '?')}, "
+                     f"source={discovery.get('source', '?')}, scan={len(results)}")
             raise RuntimeError("ESP_BLE_NOT_DISCOVERABLE_OR_NOT_PAIRED [" + stats + "]")
         return matches[0]
 

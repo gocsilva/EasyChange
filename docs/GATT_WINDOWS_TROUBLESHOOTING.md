@@ -68,7 +68,28 @@ explicitly via the three-argument WinRT enumeration API, falling back only
 when the binding lacks that overload.
 
 If no device was discovered, the displayed BUSCA_BLE error includes counts
-`paired` (Windows paired BLE association records), `named` (records
-matching our ESP HID device name), `matched` (records with verified pairing
-status), and `scan` (raw advertisements seen by Bleak). These counters do
-not identify a device by name alone or bypass secure SAS verification.
+`records` (Windows records enumerated; NOT necessarily paired), `named`
+(records matching the ESP HID name), `verified` (unique LE addresses whose
+parent LE object's pairing status was proved), `le` (verified BluetoothLEDevice instances), `aep` (verified paired
+association-endpoint addresses), `source` (WinRT overload that actually
+produced the records), and `scan` (raw advertisements seen by Bleak). These counters do not
+identify a device by name alone or bypass secure SAS verification.
+
+Some PyWinRT builds require `None` for the nullable collection of extra
+properties when requesting `DeviceInformationKind.ASSOCIATION_ENDPOINT`.
+The client tries the strict AEP selector with a null property list as well
+as Python list/tuple variants BEFORE falling back to the unfiltered device
+interface enumeration (which can contain over 1,000 records and duplicate
+names with `is_paired=False`). For a named child-interface row, only
+`BluetoothLEDevice.device_information.pairing.is_paired` (or a strict
+paired-only parent AEP result with no exposed pairing property) provides
+authority to resolve that address. Duplicates with different addresses are
+rejected, not guessed.
+
+
+When Windows returns a paired BLE AssociationEndpoint that includes
+`System.Devices.Aep.DeviceAddress`, the client verifies its exact display
+name, `pairing.is_paired`, and six-octet MAC address before using it.
+That avoids an optional `BluetoothLEDevice.from_id_async` call from a
+non-UI background thread. A child-interface with the same display name is
+never sufficient; unpaired or malformed records cannot be used.
