@@ -39,6 +39,30 @@ def _ble_address(value: int) -> str:
     return ":".join(text[i:i + 2] for i in range(0, 12, 2))
 
 
+async def _paired_windows_device_infos(device_information, selector):
+    """Handle PyWinRT FindAllAsync overload differences safely.
+
+    Some Windows Python WinRT bindings reject the AQS-only overload with
+    'Invalid parameter count'. Try the documented AQS + property-list form,
+    then the no-argument enumerator as a final compatibility fallback. An
+    unfiltered list MUST be checked for pairing before selecting a device.
+    """
+    for args, paired_filter_from_windows in (
+        ((selector,), True),
+        ((selector, []), True),
+        ((), False),
+    ):
+        try:
+            devices = await device_information.find_all_async(*args)
+            return devices, paired_filter_from_windows
+        except TypeError:
+            # PyWinRT versions differ not only on argument count, but also
+            # on conversion of Python lists to WinRT IIterable arguments.
+            # Only this read-only enumeration overload is retried.
+            continue
+    raise RuntimeError("WINRT_FIND_ALL_ASYNC_OVERLOADS_UNSUPPORTED")
+
+
 async def _paired_windows_ble_target():
     """Find an already paired HID device even when it stops advertising."""
     if not _on_windows():
@@ -47,9 +71,27 @@ async def _paired_windows_ble_target():
     from winrt.windows.devices.bluetooth import BluetoothLEDevice
     from winrt.windows.devices.enumeration import DeviceInformation
 
-    selector = BluetoothLEDevice.get_device_selector_from_pairing_state(True)
-    items = await DeviceInformation.find_all_async(selector)
-    matched = [item for item in items if str(getattr(item, "name", "")).strip() == DEVICE_NAME]
+    # Some WinRT projections reject selectors or overloads at runtime.
+    # Never let an optional paired-device lookup prevent ordinary BLE scan.
+    try:
+        selector = BluetoothLEDevice.get_device_selector_from_pairing_state(True)
+        selector_is_paired = True
+    except TypeError:
+        selector = BluetoothLEDevice.get_device_selector()
+        selector_is_paired = False
+    items, paired_filter_from_windows = await _paired_windows_device_infos(
+        DeviceInformation, selector)
+    paired_filter_from_windows = paired_filter_from_windows and selector_is_paired
+    matched = []
+    for item in items:
+        if str(getattr(item, "name", "")).strip() != DEVICE_NAME:
+            continue
+        pairing = getattr(item, "pairing", None)
+        if not paired_filter_from_windows and getattr(pairing, "is_paired", False) is not True:
+            continue
+        if pairing is not None and getattr(pairing, "is_paired", True) is False:
+            continue
+        matched.append(item)
     if not matched:
         return None
     addresses = set()
@@ -117,7 +159,16 @@ class EasyChangeGattClient:
         if _on_windows():
             try:
                 target = await _paired_windows_ble_target()
-            except (ImportError, OSError):
+            except (ImportError, OSError) as exc:
+                self._last_error = "PAIRED_LOOKUP_UNAVAILABLE: " + type(exc).__name__
+                target = None
+            except TypeError:
+                self._last_error = "PAIRED_LOOKUP_WINRT_OVERLOAD_UNSUPPORTED"
+                target = None
+            except RuntimeError as exc:
+                if str(exc) != "WINRT_FIND_ALL_ASYNC_OVERLOADS_UNSUPPORTED":
+                    raise
+                self._last_error = "PAIRED_LOOKUP_WINRT_OVERLOAD_UNSUPPORTED"
                 target = None
             if target is not None:
                 return target

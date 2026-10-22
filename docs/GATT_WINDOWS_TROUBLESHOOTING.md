@@ -45,3 +45,15 @@ Follow status displayed on the remote EasyChange:
   common when Windows still holds a stale GATT cache.
 - `CONECTADO`: physical GATT link was opened; only successful SAS comparison
   and authenticated receipt can make it secure and ready for execution.
+
+
+### Invalid parameter count during BUSCA_BLE (WinRT)
+
+Some WinRT Python projections reject the one-filter
+`DeviceInformation.find_all_async(aqs_filter)` overload with
+`TypeError: Invalid parameter count`. The client now retries the two-argument
+WinRT signature before resorting to an unfiltered enumeration that must prove
+`DeviceInformation.pairing.is_paired`. It then falls back to the normal BLE
+scanner when paired-device enumeration itself cannot run. No unpaired item
+from an unfiltered enumeration may be used for GATT. These alternatives are
+read-only OS discovery, and don't unpair HID, flash the ESP, or bypass SAS.

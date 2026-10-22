@@ -213,3 +213,128 @@ def test_disconnection_does_not_overwrite_root_error(monkeypatch):
     assert "CONEXAO_BLE" in events[-1]["message"]
     assert "CHARACTERISTIC_NOT_FOUND" in events[-1]["message"]
     assert bridge.status()["last_error"] == "RuntimeError: CHARACTERISTIC_NOT_FOUND"
+
+
+def test_winrt_selector_overload_error_retries_two_argument_version(monkeypatch):
+    _devices, FakeBLEDevice = _fake_winrt_pair(monkeypatch, entries=[
+        ("BT KeyboardMouse E", "esp", 0xA1B2C3D4E5F6),
+    ])
+    enumeration = sys.modules["winrt.windows.devices.enumeration"].DeviceInformation
+    calls = []
+
+    async def selector_plus_properties(*args):
+        calls.append(args)
+        if len(args) != 2:
+            raise TypeError("Invalid parameter count")
+        assert args[0] == "PAIRED_LE_ONLY" and args[1] == []
+        return [types.SimpleNamespace(name="BT KeyboardMouse E", id="esp")]
+    monkeypatch.setattr(enumeration, "find_all_async", selector_plus_properties)
+    target = asyncio.run(gatt_client._paired_windows_ble_target())
+    assert isinstance(target, FakeBLEDevice)
+    assert target.address == "A1:B2:C3:D4:E5:F6"
+    assert [len(args) for args in calls] == [1, 2]
+
+
+def test_winrt_all_overloads_fallback_enumerates_only_paired(monkeypatch):
+    _devices, FakeBLEDevice = _fake_winrt_pair(monkeypatch, entries=[
+        ("BT KeyboardMouse E", "unpaired", 0x102030405060),
+        ("BT KeyboardMouse E", "paired", 0xA1B2C3D4E5F6),
+    ])
+    enumeration = sys.modules["winrt.windows.devices.enumeration"].DeviceInformation
+    calls = []
+
+    async def only_unfiltered(*args):
+        calls.append(args)
+        if args:
+            raise TypeError("Invalid parameter count")
+        return [
+            types.SimpleNamespace(name="BT KeyboardMouse E", id="unpaired",
+                                  pairing=types.SimpleNamespace(is_paired=False)),
+            types.SimpleNamespace(name="BT KeyboardMouse E", id="paired",
+                                  pairing=types.SimpleNamespace(is_paired=True)),
+        ]
+    monkeypatch.setattr(enumeration, "find_all_async", only_unfiltered)
+    target = asyncio.run(gatt_client._paired_windows_ble_target())
+    assert isinstance(target, FakeBLEDevice)
+    assert target.address == "A1:B2:C3:D4:E5:F6"
+    assert [len(args) for args in calls] == [1, 2, 0]
+
+
+def test_winrt_unfiltered_does_not_accept_missing_pairing_information(monkeypatch):
+    _devices, _FakeBLEDevice = _fake_winrt_pair(monkeypatch, entries=[
+        ("BT KeyboardMouse E", "not-proven-paired", 0xA1B2C3D4E5F6)
+    ])
+    enumeration = sys.modules["winrt.windows.devices.enumeration"].DeviceInformation
+
+    async def only_unfiltered(*args):
+        if args:
+            raise TypeError("Invalid parameter count")
+        return [types.SimpleNamespace(name="BT KeyboardMouse E",
+                                      id="not-proven-paired")]
+    monkeypatch.setattr(enumeration, "find_all_async", only_unfiltered)
+    assert asyncio.run(gatt_client._paired_windows_ble_target()) is None
+
+
+def test_winrt_selector_error_retries_default_selector_and_filters_unpaired(monkeypatch):
+    _devices, FakeBLEDevice = _fake_winrt_pair(monkeypatch, entries=[
+        ("BT KeyboardMouse E", "paired", 0xA1B2C3D4E5F6),
+    ])
+    ble = sys.modules["winrt.windows.devices.bluetooth"].BluetoothLEDevice
+    enumeration = sys.modules["winrt.windows.devices.enumeration"].DeviceInformation
+
+    def rejects_paired(_paired):
+        raise TypeError("Invalid parameter count")
+    monkeypatch.setattr(ble, "get_device_selector_from_pairing_state", rejects_paired)
+    monkeypatch.setattr(ble, "get_device_selector", lambda: "ALL_BLE", raising=False)
+
+    async def all_ble(*args):
+        assert args == ("ALL_BLE",)
+        return [types.SimpleNamespace(name="BT KeyboardMouse E", id="paired",
+                                      pairing=types.SimpleNamespace(is_paired=True))]
+    monkeypatch.setattr(enumeration, "find_all_async", all_ble)
+    target = asyncio.run(gatt_client._paired_windows_ble_target())
+    assert isinstance(target, FakeBLEDevice)
+    assert target.address == "A1:B2:C3:D4:E5:F6"
+
+
+def test_unusable_winrt_overloads_fall_back_to_ble_scanner(monkeypatch):
+    _fake_winrt_pair(monkeypatch, entries=[])
+    monkeypatch.delenv("EASYCHANGE_BLE_DEVICE_ADDRESS", raising=False)
+    enumeration = sys.modules["winrt.windows.devices.enumeration"].DeviceInformation
+
+    async def all_fail(*_args):
+        raise TypeError("Invalid parameter count")
+    monkeypatch.setattr(enumeration, "find_all_async", all_fail)
+
+    class Scanner:
+        @staticmethod
+        async def discover(timeout):
+            assert timeout == 4
+            return [types.SimpleNamespace(
+                name="BT KeyboardMouse E", address="AA:BB:CC:DD:EE:FF")]
+    target = asyncio.run(gatt_client.EasyChangeGattClient()._resolve_target(Scanner))
+    assert target.address == "AA:BB:CC:DD:EE:FF"
+
+
+
+def test_winrt_two_argument_iterable_conversion_error_tries_no_arg(monkeypatch):
+    _devices, FakeBLEDevice = _fake_winrt_pair(monkeypatch, entries=[
+        ("BT KeyboardMouse E", "esp", 0xA1B2C3D4E5F6),
+    ])
+    enumeration = sys.modules["winrt.windows.devices.enumeration"].DeviceInformation
+    calls = []
+
+    async def overloads(*args):
+        calls.append(args)
+        if len(args) == 1:
+            raise TypeError("Invalid parameter count")
+        if len(args) == 2:
+            raise TypeError("Cannot convert list to WinRT IIterable")
+        return [types.SimpleNamespace(
+            name="BT KeyboardMouse E", id="esp",
+            pairing=types.SimpleNamespace(is_paired=True))]
+    monkeypatch.setattr(enumeration, "find_all_async", overloads)
+    target = asyncio.run(gatt_client._paired_windows_ble_target())
+    assert isinstance(target, FakeBLEDevice)
+    assert target.address == "A1:B2:C3:D4:E5:F6"
+    assert [len(call) for call in calls] == [1, 2, 0]
