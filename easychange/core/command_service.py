@@ -3500,6 +3500,9 @@ class CommandService:
             "operation_profiles": True,
             "adaptive_optical_dwell": True,
             "mcp_optical_tuning": True,
+            "inline_optical_dwell_v2": True,
+            "hybrid_pixel_qr": True,
+            "optical_auto_probe_feedback": True,
             "compact_runtime_environment_status": True,
         }
         fingerprint_source = {
@@ -3516,6 +3519,9 @@ class CommandService:
                 "adaptive": True,
                 "configurable_in_easychange_ui": True,
                 "mcp_tuning_supported": True,
+                "inline_dwell_without_restart": True,
+                "hybrid_qr_and_pixel_rendering": True,
+                "runtime_modes": ["AUTO", "QR", "PIXEL", "PIXEL+QR", "GATT"],
                 "initial_broadcast_max_chunks": 15,
                 "overflow_broadcast_chunks": 3,
                 "initial_broadcast_pages": 1,
