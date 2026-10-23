@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import stat
 import subprocess
 from .subprocess_utils import hidden_console_kwargs
 
@@ -95,13 +96,18 @@ class FileService:
             if not normalized:
                 return False
             parts = tuple(part for part in normalized.split("/") if part)
-            if any(part in ignored for part in parts):
+            if any(part.casefold() in ignored for part in parts):
                 return False
             candidate = root / Path(normalized)
             try:
-                if not candidate.is_file():
+                # Git inventory and filesystem fallback must not publish
+                # symlink/device or hardlinked external aliases as editable
+                # workspace files; the caller can subsequently read paths.
+                metadata = candidate.lstat()
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                     return False
-            except OSError:
+                candidate.resolve(strict=True).relative_to(root)
+            except (OSError, ValueError):
                 return False
             items.append({
                 "path": normalized,
@@ -144,7 +150,7 @@ class FileService:
         for current_root, dirs, files in os.walk(root):
             dirs[:] = sorted(
                 name for name in dirs
-                if name not in ignored
+                if name.casefold() not in ignored
             )
             current = Path(current_root)
             for name in sorted(files):
