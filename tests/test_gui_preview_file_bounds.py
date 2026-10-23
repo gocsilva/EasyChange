@@ -64,3 +64,47 @@ def test_direct_editor_load_still_rejects_binary(tmp_path):
     finally:
         window.close()
         app.processEvents()
+
+
+
+
+def test_external_change_after_gui_preview_cannot_be_overwritten(tmp_path):
+    from types import SimpleNamespace
+    from easychange.core.file_service import ExternalChangeError
+
+    app = QApplication.instance() or QApplication([])
+    document = tmp_path / "guard.txt"
+    document.write_text("open version", encoding="utf-8")
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=False)
+    try:
+        window.preview_selected(SimpleNamespace(text=lambda _column: "guard.txt"))
+        assert window._active_path == "guard.txt"
+        assert window.editor.toPlainText() == "open version"
+
+        document.write_text("external edit", encoding="utf-8")
+        with pytest.raises(ExternalChangeError):
+            window.service.files.write("guard.txt", "outdated GUI save")
+        assert document.read_text(encoding="utf-8") == "external edit"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.parametrize("invalid", [b"binary\x00data", b"invalid\xffutf8"])
+def test_invalid_preview_keeps_existing_editor_and_baseline(tmp_path, invalid):
+    from types import SimpleNamespace
+
+    app = QApplication.instance() or QApplication([])
+    (tmp_path / "valid.txt").write_text("keep this", encoding="utf-8")
+    (tmp_path / "invalid.bin").write_bytes(invalid)
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=False)
+    try:
+        window.preview_selected(SimpleNamespace(text=lambda _column: "valid.txt"))
+        baseline = window.service.files._baselines["valid.txt"]
+        window.preview_selected(SimpleNamespace(text=lambda _column: "invalid.bin"))
+        assert window._active_path == "valid.txt"
+        assert window.editor.toPlainText() == "keep this"
+        assert window.service.files._baselines["valid.txt"] == baseline
+    finally:
+        window.close()
+        app.processEvents()
