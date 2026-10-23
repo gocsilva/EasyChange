@@ -23,6 +23,32 @@ def signature(value):
     raw=value if isinstance(value,bytes) else str(value or "").encode("utf-8","replace")
     return {"bytes":len(raw),"sha256":hashlib.sha256(raw).hexdigest()}
 
+
+def _recent_log_lines(path: Path, limit: int = 2000):
+    """Read only the final lines needed to recover a persisted monotonic ID.
+
+    A cold GUI log write used to read each entire rotated file before the
+    deque discarded all but 2,000 lines. Read backwards in bounded blocks,
+    retaining the same last-N-line semantics, including torn final records.
+    """
+    try:
+        with path.open("rb") as source:
+            source.seek(0, os.SEEK_END)
+            remaining = source.tell()
+            blocks = []
+            newlines = 0
+            while remaining > 0 and newlines <= limit:
+                amount = min(64 * 1024, remaining)
+                remaining -= amount
+                source.seek(remaining)
+                block = source.read(amount)
+                blocks.append(block)
+                newlines += block.count(b"\n")
+        return b"".join(reversed(blocks)).splitlines()[-limit:]
+    except OSError:
+        return ()
+
+
 def log(stage,sequence="",direction="",**kwargs):
     rec={"at":datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
          "stage":str(stage)[:64],"sequence":str(sequence or "")[:64],
@@ -43,19 +69,16 @@ def log(stage,sequence="",direction="",**kwargs):
             ROOT.mkdir(parents=True,exist_ok=True)
             if _LAST_ID == 0:
                 for path in (FILE.with_suffix(".jsonl.2"),FILE.with_suffix(".jsonl.1"),FILE):
-                    try:
-                        with path.open("r",encoding="utf-8",errors="replace") as source:
-                            for stored in deque(source,maxlen=2000):
-                                if "\ufffd" in stored:
-                                    continue
-                                try:
-                                    stored_id=json.loads(stored).get("id")
-                                    if type(stored_id) is int and stored_id > _LAST_ID:
-                                        _LAST_ID=stored_id
-                                except (TypeError,ValueError,AttributeError):
-                                    continue
-                    except OSError:
-                        continue
+                    for stored_bytes in _recent_log_lines(path):
+                        stored = stored_bytes.decode("utf-8", errors="replace")
+                        if "\ufffd" in stored:
+                            continue
+                        try:
+                            stored_id=json.loads(stored).get("id")
+                            if type(stored_id) is int and stored_id > _LAST_ID:
+                                _LAST_ID=stored_id
+                        except (TypeError,ValueError,AttributeError):
+                            continue
             _LAST_ID=max(time.time_ns(),_LAST_ID+1)
             rec["id"]=_LAST_ID
             line=json.dumps(rec,ensure_ascii=True,separators=(",",":"),allow_nan=False)

@@ -185,3 +185,43 @@ def test_corrupt_utf8_audit_line_cannot_break_snapshot_or_restart_writer(tmp_pat
     after = audit.snapshot(limit=8, sequence="QVALID123")
     assert after["count"] == 1
     assert after["events"][0]["sequence"] == "QVALID123"
+
+
+
+def test_recovery_scans_last_2000_records_without_losing_rotated_ids(tmp_path, monkeypatch):
+    folder = tmp_path / "audit"
+    folder.mkdir()
+    monkeypatch.setattr(audit, "ROOT", folder)
+    monkeypatch.setattr(audit, "FILE", folder / "transport_audit.jsonl")
+    monkeypatch.setattr(audit, "_LAST_ID", 0)
+    monkeypatch.setattr(audit.time, "time_ns", lambda: 1)
+
+    # A high ID outside the last 2,000 rows is intentionally ignored,
+    # exactly as the original deque(maxlen=2000) implementation did.
+    current_rows = [json.dumps({"id": 9000000})]
+    current_rows.extend(json.dumps({"id": value}) for value in range(200, 2205))
+    audit.FILE.write_text("\n".join(current_rows) + "\n", encoding="utf-8")
+    audit.FILE.with_suffix(".jsonl.2").write_text(
+        '{"id":3000}\n{"id":3100}\n', encoding="utf-8"
+    )
+    audit.FILE.with_suffix(".jsonl.1").write_bytes(
+        b'{"id":3200}\n{"id":3300}\n{"id":3400,"broken":"\xff"}\n'
+    )
+
+    audit.log("ec2_page_painted", "QRECOVER", "EASYCHANGE_TO_MCP", packets=2)
+    last = json.loads(audit.FILE.read_text(encoding="utf-8").splitlines()[-1])
+    assert last["id"] == 3301
+
+
+def test_tail_reader_preserves_torn_record_and_complete_recent_rows(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    # Cross a 64-KiB block boundary; the last partial line must not hide
+    # earlier complete records during restart recovery.
+    values = [json.dumps({"id": n, "padding": "A" * 70})
+              for n in range(2500)]
+    path.write_bytes(("\n".join(values) + "\n").encode("utf-8")
+                     + b'{"id":9999,"bad":"\xff"}')
+    recent = audit._recent_log_lines(path)
+    assert len(recent) == 2000
+    assert json.loads(recent[-2])["id"] == 2499
+    assert recent[-1].endswith(b'\xff"}')
