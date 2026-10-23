@@ -1,6 +1,7 @@
 from __future__ import annotations
 import hashlib
 import codecs
+from io import BytesIO
 import errno
 import json
 import math
@@ -1008,7 +1009,7 @@ class ProcessService:
         text = str((current or {}).get(stream) or "")
         raw = text.encode("utf-8", errors="replace")
         start = min(cursor, len(raw))
-        chunk = raw[start:start + page_bytes]
+        chunk = _read_utf8_page(BytesIO(raw), start, page_bytes, len(raw))
         next_cursor = start + len(chunk)
         complete = next_cursor >= len(raw)
         return {
