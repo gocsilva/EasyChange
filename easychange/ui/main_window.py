@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import binascii
 import json
 import os
@@ -309,6 +310,7 @@ class MainWindow(QMainWindow):
             self.machine_qrs.append(label)
         self.machine_qr = self.machine_qrs[0]
 
+        self._last_machine_result = None
         self._optical_payloads: list[str] = []
         self._optical_header_payload: str | None = None
         self._optical_pixmaps: OrderedDict[str, QPixmap] = OrderedDict()
@@ -377,11 +379,11 @@ class MainWindow(QMainWindow):
         self._host_optical_preference = "QR"
         self.remote_transport_selector = QComboBox()
         self.remote_transport_selector.setObjectName("easychangeRemoteTransportMode")
-        self.remote_transport_selector.addItems(["AUTO", "GATT", "QR", "PIXEL", "PIXEL+QR"])
+        self.remote_transport_selector.addItems(["AUTO", "GATT", "QR", "PIXEL", "PIXEL+QR", "UBUNTU"])
         self.remote_transport_selector.setToolTip(
             "AUTO compara QR, PIXEL e PIXEL+QR em entregas reais, alterna "
             "por latencia e falhas, sem reexecutar comandos. PIXEL+QR mistura "
-            "EC2 e ECP1 na mesma pagina; GATT permanece uma escolha explicita. "
+            "EC2 e ECP1 na mesma pagina; UBUNTU mostra somente texto via OCR, sem QR. GATT permanece uma escolha explicita. "
             "O MCP ajusta o tempo EC2 em cada comando conforme as metricas.")
         self.remote_transport_selector.currentTextChanged.connect(
             self._set_remote_transport_mode)
@@ -917,7 +919,7 @@ class MainWindow(QMainWindow):
         choice takes effect even if the local selection has not been refreshed.
         """
         chosen = str(value or "").upper()
-        if chosen not in {"AUTO", "QR", "PIXEL", "PIXEL+QR", "GATT"}:
+        if chosen not in {"AUTO", "QR", "PIXEL", "PIXEL+QR", "GATT", "UBUNTU"}:
             return
         self.remote_transport_mode = chosen
         # An explicit GATT selection is an operator request to enable it;
@@ -932,7 +934,9 @@ class MainWindow(QMainWindow):
         self._optical_page = 0
         # Existing EC2 packets remain valid and can be repainted without
         # invoking CommandService or executing the original mutation again.
-        if self._machine and self._optical_payloads:
+        if self._machine and self._last_machine_result is not None:
+            self._update_machine_qr(self._last_machine_result)
+        elif self._machine and self._optical_payloads:
             self._render_optical_page()
 
     def _toggle_gatt_connection(self) -> None:
@@ -1062,7 +1066,7 @@ class MainWindow(QMainWindow):
         inline_ms = None
         if (len(parts) == 7 and parts[0].casefold() == ":ec"
                 and parts[2].casefold() == ":view"
-                and parts[3].upper() in {"QR", "PIXEL", "HYBRID"}
+                and parts[3].upper() in {"QR", "PIXEL", "HYBRID", "UBUNTU"}
                 and parts[4].casefold() == ":dwell"):
             try:
                 candidate = int(parts[5])
@@ -1077,7 +1081,7 @@ class MainWindow(QMainWindow):
             legacy = text.strip().split(maxsplit=4)
             if (len(legacy) == 5 and legacy[0].casefold() == ":ec"
                     and legacy[2].casefold() == ":view"
-                    and legacy[3].upper() in {"QR", "PIXEL", "HYBRID"}):
+                    and legacy[3].upper() in {"QR", "PIXEL", "HYBRID", "UBUNTU"}):
                 preference = legacy[3].upper()
                 text = f":ec {legacy[1]} {legacy[4]}"
             elif len(parts) >= 3 and parts[2].casefold() == ":view":
@@ -1262,7 +1266,12 @@ class MainWindow(QMainWindow):
                 result.data["command_focus_confirmed"] = bool(
                     focus.get("command_focus_confirmed")
                 )
-        self.output.setPlainText(result.render(self.service.output))
+        if not (self._machine and result.sequence and (
+            getattr(self, "remote_transport_mode", "AUTO") == "UBUNTU" or
+            (getattr(self, "remote_transport_mode", "AUTO") == "AUTO" and
+             getattr(self, "_host_optical_preference", "QR") == "UBUNTU")
+        )):
+            self.output.setPlainText(result.render(self.service.output))
         if not early_result_optics:
             self._update_machine_qr(result)
         if result.ok and (result.data.get("path") or result.data.get("file")) and text.lstrip(":").split(maxsplit=1)[0] in {"open", "read", "context", "goto", "reload"}:
@@ -1311,7 +1320,12 @@ class MainWindow(QMainWindow):
         return max(1, min(cls._OPTICAL_BURST_QR_SIZE, side_by_width, side_by_height))
 
     def _set_optical_burst(self, enabled: bool) -> None:
-        enabled = bool(enabled and self._machine)
+        terminal_ocr = bool(self._machine and (
+            getattr(self, "remote_transport_mode", "AUTO") == "UBUNTU" or
+            (getattr(self, "remote_transport_mode", "AUTO") == "AUTO" and
+             getattr(self, "_host_optical_preference", "QR") == "UBUNTU")
+        ))
+        enabled = bool(enabled and self._machine and not terminal_ocr)
         self._optical_burst = enabled
         screen = self.screen()
         available = screen.availableGeometry() if screen is not None else None
@@ -1348,6 +1362,21 @@ class MainWindow(QMainWindow):
             self._optical_timer.setInterval(
                 int(self.service.optical_transport_config()["current_ms"])
             )
+        # Text-only HDMI/OCR presentation: occupy the workspace like a terminal.
+        # QR and pixel paint remain entirely disabled while UBUNTU is selected.
+        self.qr_panel.setVisible(bool(self._machine and not terminal_ocr))
+        self.workspace_split.setVisible(not terminal_ocr)
+        self.centralWidget().layout().setStretchFactor(self.result_panel, 1 if terminal_ocr else 0)
+        if terminal_ocr:
+            self.split.setVisible(False)
+            self.output.setVisible(True)
+            self.output.setMaximumHeight(16777215)
+            self.output.setStyleSheet("QPlainTextEdit { background:#101820; color:#f4f6f8; font: 17px Consolas, monospace; }")
+            self.result_panel.setMinimumHeight(420)
+            self.result_panel.setMaximumHeight(16777215)
+        else:
+            self.output.setStyleSheet("")
+            self.output.setMaximumHeight(330 if self._machine else 190)
 
     def _cache_optical_pixmap(self, payload: str, pixmap: QPixmap) -> None:
         cache = self._optical_pixmaps
@@ -1402,6 +1431,7 @@ class MainWindow(QMainWindow):
 
     def _update_machine_qr(self, result) -> None:
         from easychange.core.transport_audit import log
+        self._last_machine_result = result
         self._optical_audit_encode_started=time.perf_counter()
         seq=str(getattr(result,"sequence","") or "")
         log("ec2_encode_start",seq,"EASYCHANGE_TO_MCP",
@@ -1421,6 +1451,35 @@ class MainWindow(QMainWindow):
             label.setVisible(False)
         if not self._machine:
             self._set_optical_burst(False)
+            return
+        if (self.remote_transport_mode == "UBUNTU" or
+                (self.remote_transport_mode == "AUTO" and self._host_optical_preference == "UBUNTU")):
+            # EC1 execution/result-store is untouched. This mode never calls
+            # an optical encoder or emits QR/Pixels, even for recovery commands.
+            self._set_optical_burst(False)
+            sequence = str(getattr(result, "sequence", "") or "-")
+            compact = result.render("compact")
+            import zlib
+            # Fixed-width OCR-readable textual frames instead of one long,
+            # clipped EC1 line. The checksum covers all fragments and rejects
+            # silently corrupted source text (especially code punctuation).
+            encoded = base64.urlsafe_b64encode(compact.encode('utf-8')).decode('ascii').rstrip('=')
+            fragments = [encoded[offset:offset + 68]
+                         for offset in range(0, len(encoded), 68)]
+            checksum = f"{zlib.crc32(compact.encode('utf-8')) & 0xffffffff:08X}"
+            status = "OK" if result.ok else "ERR"
+            human_output = result.render("text")
+            if len(human_output) > 16000:
+                human_output = human_output[:16000] + "\n[PREVIEW LIMIT: use EasyChange read ranges for more]"
+            text_packets = "\n".join(
+                f"ECO1 {index:02d} {part}" for index, part in enumerate(fragments)
+            )
+            self.output.setPlainText(
+                f"ECO1 UBUNTU {sequence} {status} {len(fragments)}\n"
+                f"{text_packets}\nECO1 END {sequence} {checksum}\n\n"
+                + human_output
+            )
+            self.output.verticalScrollBar().setValue(0)
             return
 
         previous = self._optical_encode_future
