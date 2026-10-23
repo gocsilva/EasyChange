@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Sequence
@@ -19,6 +20,7 @@ from typing import Callable, Sequence
 RESTART_GRACE_SECONDS = 45
 UPDATE_TIMEOUT_SECONDS = 900
 UPDATE_RECEIPT_SCHEMA = "easychange.update_receipt.v1"
+_SCHEDULE_LOCK = threading.RLock()
 
 
 def installation_root() -> Path:
@@ -128,6 +130,49 @@ def schedule_self_update(
     platform_name: str | None = None,
     popen_factory: Callable = subprocess.Popen,
 ) -> dict:
+    """Schedule at most one updater per GUI process and active receipt."""
+    with _SCHEDULE_LOCK:
+        return _schedule_self_update_once(
+            workspace, repo_root=repo_root, executable=executable,
+            parent_pid=parent_pid, platform_name=platform_name,
+            popen_factory=popen_factory,
+        )
+
+
+def _active_update_handoff(root: Path, workspace: Path) -> dict | None:
+    try:
+        existing = json.loads(update_receipt_path().read_text(encoding="utf-8"))
+        if not isinstance(existing, dict):
+            return None
+        if (existing.get("schema") != UPDATE_RECEIPT_SCHEMA
+                or existing.get("repo_root") != str(root)
+                or existing.get("state") not in {"SCHEDULED", "RUNNING"}):
+            return None
+        started = datetime.fromisoformat(str(existing.get("started_at_utc") or ""))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - started).total_seconds()
+        # SCHEDULED with no live child is retriable after a short grace.
+        # RUNNING may legitimately last the full 15-minute update timeout.
+        maximum = (RESTART_GRACE_SECONDS + 90 + 30
+                   if existing["state"] == "SCHEDULED"
+                   else UPDATE_TIMEOUT_SECONDS + 120)
+        if not -5 <= age <= maximum:
+            return None
+        return existing
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return None
+
+
+def _schedule_self_update_once(
+    workspace: str | Path,
+    *,
+    repo_root: str | Path | None = None,
+    executable: str | None = None,
+    parent_pid: int | None = None,
+    platform_name: str | None = None,
+    popen_factory: Callable = subprocess.Popen,
+) -> dict:
     """Start a detached updater; the worker waits for this GUI to close first."""
     if (platform_name or os.name) != "nt":
         return {"ok": False, "error": "SELF_UPDATE_REQUIRES_WINDOWS"}
@@ -139,6 +184,15 @@ def schedule_self_update(
 
     python = executable or sys.executable
     target_workspace = Path(workspace).resolve()
+    existing = _active_update_handoff(root, target_workspace)
+    if existing is not None:
+        return {
+            "ok": True, "scheduled": True, "already_scheduled": True,
+            "worker_pid": existing.get("worker_pid"),
+            "workspace": existing.get("workspace") or str(target_workspace),
+            "restart_mode": "machine_hid",
+            "restart_grace_seconds": RESTART_GRACE_SECONDS,
+        }
     log_path = update_log_path()
     scheduled_at = _utc_now()
     try:
@@ -160,6 +214,7 @@ def schedule_self_update(
         "origin_main_sha": revisions.get("origin_main_sha"),
         "relaunch_state": "PENDING",
         "workspace": str(target_workspace),
+        "repo_root": str(root),
         "worker_pid": None,
         "started_at_utc": scheduled_at,
         "finished_at_utc": None,
@@ -286,6 +341,8 @@ def run_update_worker(
         "origin_main_sha": None,
         "relaunch_state": "PENDING",
         "workspace": str(target_workspace),
+        "repo_root": str(root),
+        "worker_pid": os.getpid(),
         "started_at_utc": _utc_now(),
         "finished_at_utc": None,
     }

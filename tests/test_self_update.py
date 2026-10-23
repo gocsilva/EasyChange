@@ -446,3 +446,51 @@ def test_update_wait_parent_pid_not_found_permits_safe_handoff(monkeypatch):
     monkeypatch.setattr(self_update.ctypes,"windll",SimpleNamespace(kernel32=kernel),
                         raising=False)
     assert self_update._wait_for_parent_exit(4567) is True
+
+
+def test_duplicate_self_update_schedule_does_not_spawn_two_workers(tmp_path,monkeypatch):
+    """Double-clicking update must not launch two competing Git updater workers."""
+    repo=tmp_path/"EasyChange"
+    repo.mkdir()
+    (repo/"Atualizar_EasyChange.bat").write_text("@echo off\n",encoding="utf-8")
+    workspace=tmp_path/"project"
+    workspace.mkdir()
+    monkeypatch.setattr(self_update,"update_log_path",lambda:tmp_path/"log"/"update.log")
+    monkeypatch.setattr(self_update,"update_receipt_path",lambda:tmp_path/"log"/"receipt.json")
+    spawned=[]
+    def fake_popen(argv,**kwargs):
+        spawned.append((argv,kwargs))
+        return SimpleNamespace(pid=4321)
+    first=self_update.schedule_self_update(
+        workspace,repo_root=repo,platform_name="nt",
+        executable="pythonw.exe",parent_pid=5678,popen_factory=fake_popen)
+    second=self_update.schedule_self_update(
+        workspace,repo_root=repo,platform_name="nt",
+        executable="pythonw.exe",parent_pid=5678,popen_factory=fake_popen)
+    assert first["ok"] and second["ok"]
+    assert len(spawned)==1
+    assert second.get("already_scheduled") is True
+
+
+def test_self_update_same_checkout_different_workspace_reuses_worker(tmp_path,monkeypatch):
+    repo=tmp_path/"EasyChange"
+    repo.mkdir()
+    (repo/"Atualizar_EasyChange.bat").write_text("@echo off\n",encoding="utf-8")
+    workspace_a=tmp_path/"A"
+    workspace_b=tmp_path/"B"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    monkeypatch.setattr(self_update,"update_log_path",lambda:tmp_path/"logs"/"update.log")
+    monkeypatch.setattr(self_update,"update_receipt_path",lambda:tmp_path/"logs"/"receipt.json")
+    launches=[]
+    def popen(*args,**kwargs):
+        launches.append(args)
+        return SimpleNamespace(pid=987)
+    first=self_update.schedule_self_update(workspace_a,repo_root=repo,
+        platform_name="nt",popen_factory=popen)
+    second=self_update.schedule_self_update(workspace_b,repo_root=repo,
+        platform_name="nt",popen_factory=popen)
+    assert first["ok"] and second["ok"]
+    assert len(launches)==1
+    assert second.get("already_scheduled") is True
+    assert second["workspace"]==str(workspace_a.resolve())
