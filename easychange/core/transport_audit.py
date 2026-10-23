@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime,timezone
 from pathlib import Path
-import hashlib,json,math,os,threading,time
+import hashlib,json,math,os,re,threading,time
 
 ROOT=Path(os.environ.get("LOCALAPPDATA") or Path.home())/"EasyChange"/"logs"
 FILE=ROOT/"transport_audit.jsonl"
@@ -18,6 +18,20 @@ SAFE_FIELDS=frozenset(("stage","sequence","direction","medium","mode","command_t
     "attempt","ok","cause","code","state","result_state","duplicate","duration_ms",
     "elapsed_ms","bytes","sha256","frames","packets","chunks","page","pages",
     "generation","result_complete","payload_length","render_ms","encoding_ms"))
+
+_SAFE_LABEL = re.compile(r"^[A-Za-z0-9_.+\-]*$")
+_SECRET_LABEL = re.compile(
+    r"(password|passwd|secret|token|bearer|authorization|credential|"
+    r"private[_-]?key|api[_-]?key)", re.I,
+)
+
+
+def _safe_label(value, maximum, *, allow_empty=False):
+    return (type(value) is str and len(value) <= maximum
+            and (allow_empty or bool(value))
+            and _SAFE_LABEL.fullmatch(value) is not None
+            and _SECRET_LABEL.search(value) is None)
+
 
 def signature(value):
     raw=value if isinstance(value,bytes) else str(value or "").encode("utf-8","replace")
@@ -53,6 +67,9 @@ def log(stage,sequence="",direction="",**kwargs):
     rec={"at":datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
          "stage":str(stage)[:64],"sequence":str(sequence or "")[:64],
          "direction":str(direction or "")[:40]}
+    for key, maximum in (("stage", 64), ("sequence", 64), ("direction", 40)):
+        if not _safe_label(rec[key], maximum, allow_empty=key != "stage"):
+            rec[key] = "REDACTED"
     for k,v in kwargs.items():
         if k not in SAFE_FIELDS or k in {"stage","sequence","direction"}:continue
         if isinstance(v,float) and not math.isfinite(v):
@@ -61,8 +78,12 @@ def log(stage,sequence="",direction="",**kwargs):
         elif isinstance(v,str):
             if k=="sha256" and len(v)==64 and all(ch in "0123456789abcdef" for ch in v.lower()):
                 rec[k]=v.lower()
-            elif k in {"cause","code"}:rec[k]="".join(c if c.isalnum() or c in "._-" else "_" for c in v)[:80]
-            elif k in {"medium","mode","command_type","state","result_state"}:rec[k]=v[:65]
+            elif k in {"cause","code"}:
+                if not _SECRET_LABEL.search(v):
+                    rec[k]="".join(c if c.isalnum() or c in "._-" else "_" for c in v)[:80]
+            elif k in {"medium","mode","command_type","state","result_state"}:
+                if _safe_label(v, 65):
+                    rec[k]=v
     try:
         global _LAST_ID
         with _LOCK:
@@ -100,10 +121,16 @@ def _safe_snapshot_entry(entry):
         "state": 65, "result_state": 65, "cause": 80, "code": 80,
     }
     if (type(entry.get("id")) is not int or entry["id"] <= 0
-            or any(type(entry.get(key)) is not str
-                   or len(entry[key]) > maximum
-                   for key, maximum in (("at", 40), ("stage", 64),
-                                        ("sequence", 64), ("direction", 40)))):
+            or type(entry.get("at")) is not str or len(entry["at"]) > 40
+            or not _safe_label(entry.get("stage"), 64)
+            or not _safe_label(entry.get("sequence"), 64, allow_empty=True)
+            or not _safe_label(entry.get("direction"), 40, allow_empty=True)):
+        return None
+    # The timestamp is the only intentionally non-label text field.
+    # Reject legacy/tampered free-form content rather than returning it.
+    try:
+        datetime.fromisoformat(entry["at"])
+    except ValueError:
         return None
 
     clean = {}
@@ -113,10 +140,12 @@ def _safe_snapshot_entry(entry):
         if key == "id":
             clean[key] = entry["id"]
         elif key in text_limits:
-            if type(value) is str and len(value) <= text_limits[key]:
+            if (type(value) is str and len(value) <= text_limits[key]
+                    and not _SECRET_LABEL.search(value)):
                 if key in {"cause", "code"}:
                     value = "".join(c if c.isalnum() or c in "._-" else "_" for c in value)
-                clean[key] = value
+                if key == "at" or _safe_label(value, text_limits[key], allow_empty=True):
+                    clean[key] = value
         elif key in {"ok", "duplicate", "result_complete"}:
             if type(value) is bool:
                 clean[key] = value
