@@ -129,6 +129,10 @@ def test_main_window_gatt_retry_button_is_non_admin_and_does_not_restart_esp(tmp
         monkeypatch.setattr(
             window._gatt_client, "retry_now",
             lambda: (attempts.append("worker_signal"), True)[1])
+        # GATT no longer starts on application launch.
+        monkeypatch.setattr(window._gatt_client, "start", lambda: None)
+        assert not window.gatt_retry_button.isEnabled()
+        window.gatt_toggle_button.click()
         assert window.gatt_retry_button.text() == "Tentar GATT"
         assert window.gatt_retry_button.objectName() == "retryGattConnectionButton"
         window.gatt_retry_button.click()

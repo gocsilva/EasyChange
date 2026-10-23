@@ -6,6 +6,15 @@ USB COM4 stays physically connected to the MCP_HOST controller, not REMOTE_PC.
 The GATT client runs in the existing remote EasyChange Qt GUI and is not a
 second MCP server.
 
+**GATT starts disabled on every GUI launch.** The user must click **Ligar GATT**
+to start BLE discovery/connection and the GATT polling worker. **Desligar GATT**
+closes the active BLE session, cancels pending GATT operations and joins the
+Bluetooth worker. **Tentar GATT** remains available only while the mode is
+enabled; Ctrl+Shift+G is an explicit operator shortcut to enable/retry.
+**Diagnóstico GATT** can be opened without starting Bluetooth. Closing the
+EasyChange window stops GATT and releases its worker before exiting. USB HID
+and QR/HDMI stay independent and work even when GATT is disabled.
+
 After flashing firmware 3.0.0, the Windows HID bond might remain connected
 even if the firmware's new custom GATT service is not in the Windows cached
 attribute database. Because connected HID devices may stop advertising, a

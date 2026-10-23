@@ -494,6 +494,7 @@ class EasyChangeGattClient:
         self._stop = threading.Event()
         self._loop = None
         self._thread = None
+        self._run_task = None
         self._client = None
         self._reader = FramedMessages()
         self._handshake = None
@@ -567,13 +568,48 @@ class EasyChangeGattClient:
         self._thread.start()
         self._trace("INICIO", "Worker Bluetooth GATT iniciado")
 
-    def stop(self) -> None:
-        self._trace("ENCERRAMENTO", "Encerramento solicitado pelo EasyChange")
+    def stop(self, timeout: float = 3.0) -> bool:
+        """Cancel scanning/connection, join the worker and discard BLE-only state.
+
+        A False result means Windows has not released the worker yet. Callers
+        must not restart the transport or finalize GUI shutdown in that state.
+        """
         self._stop.set()
-        loop = self._loop
-        if loop and loop.is_running():
-            signal = self._retry_wakeup
-            loop.call_soon_threadsafe(signal.set if signal is not None else lambda: None)
+        self._accepted = False
+        worker, loop = self._thread, self._loop
+        if loop is not None and loop.is_running():
+            def cancel_worker():
+                signal = self._retry_wakeup
+                if signal is not None:
+                    signal.set()
+                task = self._run_task
+                if task is not None and not task.done():
+                    task.cancel()
+            try:
+                loop.call_soon_threadsafe(cancel_worker)
+            except RuntimeError:
+                pass
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=max(0.0, float(timeout)))
+        stopped = worker is None or not worker.is_alive()
+        if not stopped:
+            return False
+        self._thread = None
+        self._handshake = None
+        self._session = None
+        self._client = None
+        self._sending = None
+        self._retry_wakeup = None
+        self._reader.reset()
+        self._last_stage = "STOPPED"
+        for pending in (self.events, self.commands):
+            while True:
+                try:
+                    pending.get_nowait()
+                except queue.Empty:
+                    break
+        self._trace("ENCERRAMENTO", "Worker e sessao GATT encerrados")
+        return True
 
     def status(self) -> dict:
         return {"running": self._thread is not None and self._thread.is_alive(),
@@ -648,9 +684,26 @@ class EasyChangeGattClient:
         self._loop = loop
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(self._run())
+            self._run_task = loop.create_task(self._run())
+            loop.run_until_complete(self._run_task)
+        except asyncio.CancelledError:
+            # Operator shutdown: async-with BleakClient runs __aexit__.
+            pass
         finally:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            self._accepted = False
+            self._session = None
+            self._handshake = None
+            self._sending = None
+            self._client = None
+            self._retry_wakeup = None
+            self._run_task = None
             self._loop = None
+            asyncio.set_event_loop(None)
             loop.close()
 
     async def _run(self) -> None:

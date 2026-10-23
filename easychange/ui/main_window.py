@@ -280,9 +280,11 @@ class MainWindow(QMainWindow):
         self._command_poll_timer = QTimer(self)
         self._command_poll_timer.setInterval(30)
         self._command_poll_timer.timeout.connect(self._poll_machine_command)
+        # Diagnostics are local only. Never open a Bluetooth connection on startup.
         self._gatt_client = EasyChangeGattClient()
+        self._gatt_enabled = False
         self.service.gatt_diagnostics_source = self._gatt_client.diagnostics.snapshot
-        self._gatt_status = QLabel('GATT: conectando Bluetooth em segundo plano...')
+        self._gatt_status = QLabel('GATT: desligado. Clique em Ligar GATT para iniciar.')
         self._gatt_status.setObjectName('easychangeGattStatus')
         # Show the entire failure stage and error instead of clipping the
         # diagnostic to one line. Keep the text copyable for support.
@@ -295,21 +297,28 @@ class MainWindow(QMainWindow):
             "Abre uma janela separada com historico completo da conexao "
             "Bluetooth GATT, excecoes e informacoes tecnicas, em tempo real.")
         self.gatt_diagnostic_button.clicked.connect(self.open_gatt_diagnostics)
+        self.gatt_toggle_button = QPushButton("Ligar GATT")
+        self.gatt_toggle_button.setObjectName("toggleGattConnectionButton")
+        self.gatt_toggle_button.setToolTip(
+            "Liga ou desliga explicitamente o cliente Bluetooth GATT. "
+            "Ao desligar, encerra a conexao e o worker, sem alterar USB HID/QR.")
+        self.gatt_toggle_button.clicked.connect(self._toggle_gatt_connection)
         self.gatt_retry_button = QPushButton("Tentar GATT")
         self.gatt_retry_button.setObjectName("retryGattConnectionButton")
         self.gatt_retry_button.setToolTip(
             "Nova tentativa de conexao GATT sem remover emparelhamento "
             "nem alterar a configuracao do Windows.")
         self.gatt_retry_button.clicked.connect(self._retry_gatt_connection)
+        self.gatt_retry_button.setEnabled(False)
         gatt_status_row = QHBoxLayout()
         gatt_status_row.addWidget(self._gatt_status, 1)
+        gatt_status_row.addWidget(self.gatt_toggle_button)
         gatt_status_row.addWidget(self.gatt_retry_button)
         gatt_status_row.addWidget(self.gatt_diagnostic_button)
         self._gatt_timer = QTimer(self)
         self._gatt_timer.setInterval(100)
         self._gatt_timer.timeout.connect(self._poll_gatt_client)
-        self._gatt_timer.start()
-        self._gatt_client.start()
+        # The GATT polling timer and BLE worker start only by operator action.
         self._optical_timer = QTimer(self)
         self._optical_timer.setInterval(420)
         self._optical_timer.timeout.connect(self._render_optical_page)
@@ -825,9 +834,51 @@ class MainWindow(QMainWindow):
         else:
             self._run_command(text)
 
+    def _toggle_gatt_connection(self) -> None:
+        if self._gatt_enabled:
+            self._disable_gatt_connection()
+        else:
+            self._enable_gatt_connection()
+
+    def _enable_gatt_connection(self) -> None:
+        """Only explicit user action may start BLE scanning/GATT."""
+        if self._gatt_enabled:
+            return
+        if self._gatt_client.status()["running"]:
+            self._gatt_status.setText("GATT: aguardando fim da sessao anterior.")
+            return
+        self._gatt_enabled = True
+        self.gatt_toggle_button.setText("Desligar GATT")
+        self.gatt_retry_button.setEnabled(True)
+        self._gatt_status.setText("GATT: iniciando por solicitacao do operador...")
+        self._gatt_timer.start()
+        self._gatt_client.start()
+
+    def _disable_gatt_connection(self) -> bool:
+        """Tear down only BLE; preserve the independent HID/optical transport."""
+        self._gatt_enabled = False
+        # Never execute queued GATT commands after operator shutdown.
+        # An already-running mutation remains durable and is not interrupted.
+        self._machine_command_queue = deque(
+            item for item in self._machine_command_queue if not isinstance(item, tuple)
+        )
+        stopped = self._gatt_client.stop(timeout=3.0)
+        self.gatt_toggle_button.setText("Ligar GATT")
+        self.gatt_toggle_button.setEnabled(stopped)
+        self.gatt_retry_button.setEnabled(False)
+        if stopped:
+            self._gatt_timer.stop()
+            self._gatt_status.setText("GATT: desligado. USB HID/QR permanece disponivel.")
+        else:
+            self._gatt_status.setText("GATT: encerrando Bluetooth; aguardando worker...")
+            self._gatt_timer.start()
+        return stopped
+
     def _retry_gatt_connection(self) -> None:
-        """Manual non-destructive wakeup; retains Bluetooth HID pairing."""
-        if not self._gatt_client.retry_now():
+        """Manual non-destructive retry; keyboard shortcut may also enable GATT."""
+        if not self._gatt_enabled:
+            self._enable_gatt_connection()
+        elif not self._gatt_client.retry_now():
             self._gatt_status.setText("GATT: cliente Bluetooth nao esta ativo.")
 
     def open_gatt_diagnostics(self) -> None:
@@ -846,6 +897,13 @@ class MainWindow(QMainWindow):
         dialog = getattr(self, "_gatt_diagnostic_window", None)
         if dialog is not None and dialog.isVisible():
             dialog.refresh(self._gatt_client.diagnostics)
+        if not self._gatt_enabled:
+            if not self._gatt_client.status()["running"]:
+                self._gatt_client.stop(timeout=0.0)
+                self._gatt_timer.stop()
+                self.gatt_toggle_button.setEnabled(True)
+                self._gatt_status.setText("GATT: desligado. USB HID/QR permanece disponivel.")
+            return
         import queue
         for _ in range(8):
             try:
@@ -1550,6 +1608,12 @@ class MainWindow(QMainWindow):
         self.output.appendPlainText("SAVEALL: 1 active file")
 
     def closeEvent(self, event) -> None:
+        # Stop accepting GATT work before waiting for in-flight durable commands.
+        # If Windows is still releasing BLE, defer closing rather than leak it.
+        if not self._disable_gatt_connection():
+            event.ignore()
+            QTimer.singleShot(300, self.close)
+            return
         self._flush_human_text()
         future = self._optical_encode_future
         if future is not None and not future.done():
@@ -1565,7 +1629,7 @@ class MainWindow(QMainWindow):
         if self._gatt_diagnostic_window is not None:
             self._gatt_diagnostic_window.close()
             self._gatt_diagnostic_window = None
-        self._gatt_client.stop()
+        self.service.gatt_diagnostics_source = None
         self._command_executor.shutdown(wait=False, cancel_futures=True)
         self._optical_encode_executor.shutdown(wait=False, cancel_futures=True)
         self.service.close()

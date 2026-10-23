@@ -86,8 +86,9 @@ def test_remote_qt_mainwindow_wires_gatt_snapshot_to_core(tmp_path):
         result = window.service.execute(":gatt-log 0 8")
         assert result.ok and result.data["available"]
         assert any("handle=111" in event["message"] for event in result.data["events"])
-        # Copy and source-code content remain outside the diagnostics ring.
-        assert window._gatt_client._thread is not None
+        # Local diagnostics remain available without starting a BLE worker.
+        assert window._gatt_client._thread is None
+        assert not window._gatt_timer.isActive()
     finally:
         window.close()
         app.processEvents()
