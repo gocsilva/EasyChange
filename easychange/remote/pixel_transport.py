@@ -117,7 +117,12 @@ def decode_pixel_frame(frame) -> list[str]:
             # Old 56px wire format first; the 72px compact option is
             # attempted only on a failed CRC, never assumed from GUI mode.
             for side in (SIDE, LARGE_SIDE):
-                for interpolation in (cv2.INTER_AREA, cv2.INTER_LINEAR):
+                # INTER_NEAREST_EXACT samples logical module centers. At
+                # 125px per tile / 56 modules, AREA and LINEAR can blend
+                # a handful of neighboring bits, breaking the whole CRC.
+                # Keep blur-tolerant AREA/LINEAR as bounded fallbacks.
+                exact = getattr(cv2, "INTER_NEAREST_EXACT", cv2.INTER_NEAREST)
+                for interpolation in (exact, cv2.INTER_AREA, cv2.INTER_LINEAR):
                     small = cv2.resize(cropped, (side, side), interpolation=interpolation)
                     text = decode_pixel_bitmap(small.ravel(), side=side)
                     if text is not None:
