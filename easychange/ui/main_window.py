@@ -314,6 +314,7 @@ class MainWindow(QMainWindow):
         # Remote operator chooses the route/optical format. Bluetooth remains
         # independently opt-in and never starts merely because the GUI opens.
         self.remote_transport_mode = "AUTO"
+        self._host_optical_preference = "QR"
         self.remote_transport_selector = QComboBox()
         self.remote_transport_selector.setObjectName("easychangeRemoteTransportMode")
         self.remote_transport_selector.addItems(["AUTO", "GATT", "QR", "PIXEL"])
@@ -978,6 +979,26 @@ class MainWindow(QMainWindow):
             # Do not execute or silently reassign an untracked EC1 sequence.
             self.optical_status.setText("EC1 COMMAND QUEUE FULL - RETRY")
             return
+        # Optional EC1 transport-display hint from the local MCP. The
+        # CommandService receives the exact original ':ec <seq> <command>';
+        # no new command executes and the journal/mutation sequence is stable.
+        # A manual selector on this GUI takes precedence over this hint.
+        parts = text.strip().split(maxsplit=4)
+        if (len(parts) == 5 and parts[0].casefold() == ":ec"
+                and parts[2].casefold() == ":view"
+                and parts[3].upper() in {"QR", "PIXEL"}):
+            preference = parts[3].upper()
+            text = f":ec {parts[1]} {parts[4]}"
+            if preference != self._host_optical_preference:
+                self._host_optical_preference = preference
+                if self.remote_transport_mode == "AUTO":
+                    self._optical_timer.stop()
+                    self._optical_render_generation += 1
+                    self._optical_render_pending = None
+                    self._optical_pixmaps.clear()
+                    self._optical_page = 0
+                    if self._machine and self._optical_payloads:
+                        self._render_optical_page()
         self._machine_command_queue.append(text)
         self._start_next_machine_command()
 
@@ -1550,14 +1571,19 @@ class MainWindow(QMainWindow):
         # EC2 data already visible to MCP. This is metadata ONLY; it cannot
         # authorize execution or change a result's durable SHA/CRC contract.
         # It lets the MCP honor a remote mode after correlating the receipt.
+        requested = getattr(self, "remote_transport_mode", "AUTO")
+        optical_mode = (
+            getattr(self, "_host_optical_preference", "QR")
+            if requested == "AUTO" else requested
+        )
         try:
             item = json.loads(payload)
             if isinstance(item, dict) and item.get("p") in {"EC2", "EC2H"}:
-                item["tm"] = getattr(self, "remote_transport_mode", "AUTO")
+                item["tm"] = optical_mode
                 payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
         except (ValueError, TypeError):
             pass
-        if getattr(self, "remote_transport_mode", "AUTO") == "PIXEL":
+        if optical_mode == "PIXEL":
             try:
                 pixels = encode_pixel_bitmap(payload)
             except ValueError:
