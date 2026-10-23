@@ -366,6 +366,10 @@ class InboundCommandStore:
                 json.dumps(meta, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
             )
             os.utime(directory, None)
+            # The pre-create cleanup retains MAX_TRANSFERS directories.
+            # Creating another one can exceed the cap until a *future*
+            # begin; enforce retention after the successful reservation.
+            self._cleanup_locked()
             return {**expected, "duplicate": False}
 
     def put_chunk(

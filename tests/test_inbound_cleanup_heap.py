@@ -50,3 +50,20 @@ def test_cleanup_preserves_recovery_after_disappearing_staging_directory(tmp_pat
     with store._transaction_lock():
         store._cleanup_locked()
     assert second.exists() and third.exists()
+
+
+def test_begin_enforces_transfer_count_after_new_reservation(tmp_path):
+    """Creating the next transfer must not leave MAX_TRANSFERS+1 directories."""
+    import hashlib
+    store=InboundCommandStore(tmp_path/"uploads")
+    store.MAX_TRANSFERS=3
+    for index in range(4):
+        store.begin(
+            f"UCAPACITY{index:03d}",
+            raw_bytes=2,compressed_bytes=2,chunk_count=1,
+            sha256=hashlib.sha256(b"ok").hexdigest(),
+        )
+    names={p.name for p in store.root.iterdir() if p.is_dir()}
+    assert len(names)==store.MAX_TRANSFERS
+    assert "UCAPACITY000" not in names
+    assert "UCAPACITY003" in names
