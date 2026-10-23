@@ -83,3 +83,19 @@ def test_snapshot_never_returns_unapproved_fields_from_persisted_file(tmp_path, 
     assert "sensitive-bearer-token" not in rendered
     assert "password=leak" not in rendered
     assert "sensitive-response" not in rendered
+
+
+def test_snapshot_skips_malformed_log_records_without_crashing(tmp_path,monkeypatch):
+    """Damaged/legacy JSONL cannot take down the read-only EC1 diagnostic."""
+    directory=tmp_path/"audit"
+    monkeypatch.setattr(audit,"ROOT",directory)
+    monkeypatch.setattr(audit,"FILE",directory/"ec-audit.jsonl")
+    audit.log("ec1_received","QGOODREC1","MCP_TO_EASYCHANGE",bytes=4)
+    with audit.FILE.open("a",encoding="utf-8") as handle:
+        handle.write('["unexpected-json-array"]\n')
+        handle.write('{"id":"not-an-integer","stage":"invalid"}\n')
+        handle.write('{"id":null,"stage":"invalid"}\n')
+        handle.write('{"id":-2,"stage":"invalid"}\n')
+    result=audit.snapshot(after=0,limit=16)
+    assert result["count"]==1
+    assert result["events"][0]["sequence"]=="QGOODREC1"

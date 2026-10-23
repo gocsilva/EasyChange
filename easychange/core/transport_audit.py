@@ -63,9 +63,18 @@ def snapshot(after=0,limit=8,sequence="",direction=""):
     for line in rows:
         try:entry=json.loads(line)
         except (TypeError,ValueError):continue
-        if (entry.get("id",0)<=after or
-            (sequence and entry.get("sequence","").upper()!=sequence.upper()) or
-            (direction and entry.get("direction","").lower()!=direction.lower())):
+        if not isinstance(entry,dict):
+            continue
+        identifier=entry.get("id")
+        record_sequence=entry.get("sequence","")
+        record_direction=entry.get("direction","")
+        if (type(identifier) is not int or identifier<=0
+                or not isinstance(record_sequence,str)
+                or not isinstance(record_direction,str)):
+            continue
+        if (identifier<=after or
+            (sequence and record_sequence.upper()!=sequence.upper()) or
+            (direction and record_direction.lower()!=direction.lower())):
             continue
         # Disk content may originate from an older release or be malformed.
         # The EC2 query is a security boundary: never forward arbitrary
