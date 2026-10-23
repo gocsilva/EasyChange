@@ -21,12 +21,15 @@ class CommandParser:
         tokens: list[str] = []
         token: list[str] = []
         quote: str | None = None
+        explicit_empty = False
         index = 0
 
         def flush() -> None:
-            if token:
+            nonlocal explicit_empty
+            if token or explicit_empty:
                 tokens.append("".join(token))
                 token.clear()
+                explicit_empty = False
 
         while index < len(raw):
             char = raw[index]
@@ -57,6 +60,7 @@ class CommandParser:
                 continue
             if char in {"'", '"'}:
                 quote = char
+                explicit_empty = True
                 index += 1
                 continue
             if char == "\\":
@@ -87,12 +91,15 @@ class CommandParser:
         token: list[str] = []
         quote: str | None = None
         escaped_boundary = False
+        explicit_empty = False
         index = 0
 
         def flush() -> None:
-            if token:
+            nonlocal explicit_empty
+            if token or explicit_empty:
                 tokens.append("".join(token))
                 token.clear()
+                explicit_empty = False
 
         while index < len(raw):
             char = raw[index]
@@ -105,6 +112,7 @@ class CommandParser:
                 if char in {"'", '"'}:
                     quote = char
                     escaped_boundary = False
+                    explicit_empty = True
                     index += 1
                     continue
                 # Accept command text arriving with escaped outer quotes,
@@ -118,6 +126,7 @@ class CommandParser:
                 ):
                     quote = raw[index + 1]
                     escaped_boundary = True
+                    explicit_empty = True
                     index += 2
                     continue
                 token.append(char)
