@@ -323,9 +323,10 @@ class MainWindow(QMainWindow):
         self.remote_transport_selector.setObjectName("easychangeRemoteTransportMode")
         self.remote_transport_selector.addItems(["AUTO", "GATT", "QR", "PIXEL", "PIXEL+QR"])
         self.remote_transport_selector.setToolTip(
-            "AUTO usa GATT se autenticado e QR como retorno visual; QR conserva "
-            "o EC2 atual; PIXEL desenha os mesmos pacotes EC2 em celulas ECP1. "
-            "A leitura MCP aceita ambos sem alterar comandos nem ESP.")
+            "AUTO compara QR, PIXEL e PIXEL+QR em entregas reais, alterna "
+            "por latencia e falhas, sem reexecutar comandos. PIXEL+QR mistura "
+            "EC2 e ECP1 na mesma pagina; GATT permanece uma escolha explicita. "
+            "O MCP ajusta o tempo EC2 em cada comando conforme as metricas.")
         self.remote_transport_selector.currentTextChanged.connect(
             self._set_remote_transport_mode)
         gatt_status_row = QHBoxLayout()
@@ -1655,16 +1656,15 @@ class MainWindow(QMainWindow):
         )
         # Advertise the v2 runtime presentation contract on observed EC2
         # pixels, enabling future per-command dwell hints on the MCP.
-        if True:
-            try:
-                item = json.loads(payload)
-                if isinstance(item, dict) and item.get("p") in {"EC2", "EC2H"}:
-                    item["tm"] = optical_mode
-                    item["rm"] = requested  # explicit remote selector, not host hint
-                    item["vh"] = 2  # supports inline :view MODE :dwell N
-                    payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
-            except (ValueError, TypeError):
-                pass
+        try:
+            item = json.loads(payload)
+            if isinstance(item, dict) and item.get("p") in {"EC2", "EC2H"}:
+                item["tm"] = optical_mode
+                item["rm"] = requested  # explicit remote selector, not host hint
+                item["vh"] = 2  # supports inline :view MODE :dwell N
+                payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        except (ValueError, TypeError):
+            pass
         # HYBRID uses ECP1 for the receipt and most data fragments, with
         # periodic QR cells (including data index 0). Mixed pages remain
         # independently CRC/digest verified by the same EC2 receiver.
