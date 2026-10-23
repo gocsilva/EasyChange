@@ -274,6 +274,10 @@ class InboundCommandStore:
         newest: list[tuple[float, Path]] = []
         try:
             for path in self.root.iterdir():
+                # Retention owns only canonical U* transfer directories.
+                # Never delete unrelated user or service folders in this root.
+                if not self._TRANSFER_RE.fullmatch(path.name):
+                    continue
                 try:
                     if path.is_symlink() or not path.is_dir():
                         continue
