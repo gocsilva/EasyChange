@@ -991,6 +991,10 @@ class UbuntuService:
                 output = lowered[index + 1]
             elif value.startswith(("-o=", "--output=")):
                 output = value.split("=", 1)[1]
+            elif value.startswith("-o") and not value.startswith("--") and len(value) > 2:
+                # kubectl accepts compact -ojson/-oyaml/-ojsonpath=...
+                # as -o json. They must receive the same secret guard.
+                output = value[2:].lstrip("=")
             if output.startswith(
                 ("json", "yaml", "jsonpath", "go-template", "template", "custom-columns")
             ):
