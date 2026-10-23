@@ -153,7 +153,12 @@ def snapshot(after=0,limit=8,sequence="",direction=""):
                 for line in reversed(recent)
             )
     found=[]
-    for line in rows:
+    # First pages return the latest entries, so stop at the requested number
+    # of valid matches while reading backwards. Cursor pages retain original
+    # oldest-first semantics and read one extra match to compute "more".
+    lines = iter(rows) if after else reversed(rows)
+    needed = limit + (1 if after else 0)
+    for line in lines:
         if "\ufffd" in line:
             continue
         try:entry=json.loads(line)
@@ -177,7 +182,11 @@ def snapshot(after=0,limit=8,sequence="",direction=""):
         safe_entry = _safe_snapshot_entry(entry)
         if safe_entry is not None:
             found.append(safe_entry)
-    chosen=found[:limit] if after else found[-limit:]
+            if len(found) >= needed:
+                break
+    chosen=found[:limit]
+    if not after:
+        chosen.reverse()
     return {"events":chosen,"next_cursor":chosen[-1]["id"] if chosen else after,
             "more":bool(after and len(found)>limit),"count":len(chosen),
             "source":"EASYCHANGE_REMOTE","redacted":True}

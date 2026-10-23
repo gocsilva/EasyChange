@@ -257,3 +257,35 @@ def test_snapshot_reads_newest_rotation_first_preserving_event_order(tmp_path, m
                           encoding="utf-8")
     result = audit.snapshot(limit=16)
     assert [entry["id"] for entry in result["events"]] == list(range(2004, 2020))
+
+
+
+def test_snapshot_avoids_parsing_unneeded_events(tmp_path, monkeypatch):
+    folder = tmp_path / "audit"
+    folder.mkdir()
+    monkeypatch.setattr(audit, "ROOT", folder)
+    monkeypatch.setattr(audit, "FILE", folder / "transport_audit.jsonl")
+    with audit.FILE.open("w", encoding="utf-8") as out:
+        for identifier in range(1, 2001):
+            out.write(json.dumps({
+                "id": identifier, "at": "2026-10-23", "stage": "ec2_page_painted",
+                "sequence": "QLAST", "direction": "EASYCHANGE_TO_MCP",
+            }) + "\n")
+
+    original = audit.json.loads
+    decoded = []
+
+    def tracked_loads(*args, **kwargs):
+        decoded.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(audit.json, "loads", tracked_loads)
+    last = audit.snapshot(limit=8)
+    assert [item["id"] for item in last["events"]] == list(range(1993, 2001))
+    assert len(decoded) == 8
+
+    decoded.clear()
+    cursor = audit.snapshot(after=5, limit=2)
+    assert [item["id"] for item in cursor["events"]] == [6, 7]
+    assert cursor["more"] is True
+    assert len(decoded) == 8  # five skips + two results + one lookahead
