@@ -636,6 +636,15 @@ def decode_result_chunks(payloads: Collection[str]) -> dict[str, Any]:
     value = decode_ec2_packet_json(raw)
     if not isinstance(value, dict):
         raise ValueError("optical result object required")
+    # Fragment SHA/CRC authenticate the compressed result bytes, but do not
+    # cover the EC2 envelope's sequence. A relabeled QR could otherwise be
+    # reported as a verified result for a *different* EC1 request.
+    # The producer uses "-" only for an omitted, None or empty sequence.
+    payload_sequence = value.get("sequence")
+    if payload_sequence is None or payload_sequence == "":
+        payload_sequence = "-"
+    if type(payload_sequence) is not str or payload_sequence != first["s"]:
+        raise ValueError("optical result sequence mismatch")
     return _expand_transport_value(
         value, preserve_literal_marker=first.get("t") == 0 and
         type(first.get("t")) is int
