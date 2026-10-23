@@ -185,6 +185,7 @@ class CommandParser:
         """Return command/stop_on_failure pairs; semicolon continues and && stops."""
         parts: list[tuple[str, bool]] = []
         quote: str | None = None
+        escaped_boundary = False
         token: list[str] = []
         index = 0
         while index < len(text):
@@ -193,9 +194,29 @@ class CommandParser:
                 end = index
                 while end < len(text) and text[end] == "\\":
                     end += 1
-                if quote is not None and end < len(text) and text[end] == quote:
+                if end < len(text) and text[end] in {"'", '"'}:
+                    delimiter = text[end]
+                    next_index = end + 1
+                    next_boundary = (
+                        next_index >= len(text)
+                        or text[next_index].isspace()
+                        or text[next_index] == ";"
+                        or text.startswith("&&", next_index)
+                    )
+                    # The EC1 parser accepts JSON/HID-escaped outer quotes.
+                    # Track their boundaries here as well, otherwise a
+                    # semicolon or && in a Windows path splits the command,
+                    # and a closing \" appears to be an escaped literal.
+                    if (quote is None and end == index + 1
+                            and (not token or token[-1].isspace())):
+                        quote = delimiter
+                        escaped_boundary = True
+                    elif (quote == delimiter and escaped_boundary
+                          and end == index + 1 and next_boundary):
+                        quote = None
+                        escaped_boundary = False
                     token.extend(text[index:end])
-                    token.append(text[end])
+                    token.append(delimiter)
                     index = end + 1
                     continue
                 token.extend(text[index:end])
@@ -204,8 +225,10 @@ class CommandParser:
             if char in {"'", '"'}:
                 if quote == char:
                     quote = None
+                    escaped_boundary = False
                 elif quote is None:
                     quote = char
+                    escaped_boundary = False
                 token.append(char)
                 index += 1
                 continue
