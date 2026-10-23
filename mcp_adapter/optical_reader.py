@@ -259,8 +259,14 @@ def decode_hdmi_qr(frame) -> list[str]:
                 if ok and texts is not None and not isinstance(texts,(str,bytes,dict)):
                     # The multi API may return generators rather than tuples.
                     # Never exhaust an unbounded iterator in the HDMI reader.
-                    decoded=[value for value in itertools.islice(texts,32)
-                             if isinstance(value,str) and value]
+                    # Some decoders return a QR more than once. Count unique
+                    # symbols so duplicates cannot hide a missing fourth footer
+                    # QR or suppress the existing per-cell recovery pass.
+                    seen=set()
+                    for value in itertools.islice(texts,32):
+                        if isinstance(value,str) and value and value not in seen:
+                            seen.add(value)
+                            decoded.append(value)
             except (TypeError, cv2.error):
                 # OpenCV builds can expose multi-QR yet fail at runtime due
                 # to unsupported signatures or an internal decoder error.

@@ -43,3 +43,16 @@ def test_complete_multi_decode_needs_no_extra_crops(monkeypatch):
     monkeypatch.setitem(sys.modules, "cv2", SimpleNamespace(error=RuntimeError))
     assert optical_reader.decode_hdmi_qr(_Frame()) == ["a", "b", "c", "d"]
     assert detector.crop_calls == []
+
+
+
+
+def test_duplicate_multi_results_do_not_hide_fourth_qr(monkeypatch):
+    detector = _Detector(["qr-first", "qr-first", "qr-second", "qr-third"])
+    monkeypatch.setattr(optical_reader._qr_detectors, "detector", detector, raising=False)
+    monkeypatch.setitem(sys.modules, "cv2", SimpleNamespace(error=RuntimeError))
+
+    assert optical_reader.decode_hdmi_qr(_Frame()) == [
+        "qr-first", "qr-second", "qr-third", "qr-fourth",
+    ]
+    assert detector.crop_calls  # Duplicate cannot suppress missing-cell recovery.
