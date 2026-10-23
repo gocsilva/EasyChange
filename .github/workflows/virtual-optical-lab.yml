@@ -47,12 +47,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install isolated GUI and optical dependencies
+      - name: Install system OCR and Qt libraries
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq tesseract-ocr fonts-dejavu-core libgl1 libglib2.0-0
           python -m pip install -U pip
-          python -m pip install -e './easychange[gui,dev]' opencv-python-headless 'numpy>=1.26,<2'
       - name: Identify caller and install component dependencies
         shell: bash
         env:
@@ -61,7 +60,10 @@ jobs:
           set -euo pipefail
           if [[ -z "$KIND" && "$GITHUB_REPOSITORY" == "gocsilva/EasyChange" ]]; then KIND=easychange; fi
           case "$KIND" in easychange|mcp|esp) ;; *) echo "Unknown caller" >&2; exit 2 ;; esac
+          if [[ "$KIND" == "easychange" ]]; then LAB_SOURCE_DIR=component; else LAB_SOURCE_DIR=easychange; fi
           echo "LAB_KIND=$KIND" >> "$GITHUB_ENV"
+          echo "LAB_SOURCE_DIR=$LAB_SOURCE_DIR" >> "$GITHUB_ENV"
+          python -m pip install -e "./$LAB_SOURCE_DIR[gui,dev]" opencv-python-headless 'numpy>=1.26,<2'
           if [[ "$KIND" == "mcp" ]]; then
             python -m pip install 'mcp>=1.9,<2' 'jsonschema>=4.20,<5' 'psutil>=6,<8' \
               'pyserial>=3.5,<4' 'requests>=2.32,<3' 'websocket-client>=1.8,<2' \
@@ -71,7 +73,7 @@ jobs:
             python -m pip install 'pyserial>=3.5,<4'
           fi
       - name: Test public optical wire contract
-        run: python -m pytest -q easychange/tests/test_virtual_optical_contract.py
+        run: python -m pytest -q "$GITHUB_WORKSPACE/$LAB_SOURCE_DIR/tests/test_virtual_optical_contract.py"
       - name: Test real private MCP optical decoder
         if: env.LAB_KIND == 'mcp'
         run: |
@@ -92,15 +94,13 @@ jobs:
           set -euo pipefail
           mkdir -p reports
           args=(--tesseract /usr/bin/tesseract --max-cases 4
-                --easychange-source "$GITHUB_WORKSPACE/easychange"
+                --easychange-source "$GITHUB_WORKSPACE/$LAB_SOURCE_DIR"
                 --evidence-dir "$GITHUB_WORKSPACE/reports")
-          if [[ "$LAB_KIND" == "easychange" ]]; then
-            args+=(--easychange-source "$GITHUB_WORKSPACE/component")
-          elif [[ "$LAB_KIND" == "mcp" ]]; then
+          if [[ "$LAB_KIND" == "mcp" ]]; then
             args+=(--mcp-source "$GITHUB_WORKSPACE/component")
           fi
           if [[ "$STRICT_OCR" == "true" ]]; then args+=(--strict-ocr); fi
-          python easychange/tests/virtual_optical_lab.py "${args[@]}" > reports/optical-report.json
+          python "$GITHUB_WORKSPACE/$LAB_SOURCE_DIR/tests/virtual_optical_lab.py" "${args[@]}" > reports/optical-report.json
       - name: Report validated CRC and unresolved OCR failures
         if: always()
         shell: bash
