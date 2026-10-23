@@ -114,3 +114,35 @@ def test_audit_writer_rejects_nonfinite_numeric_samples(tmp_path,monkeypatch):
     assert "Infinity" not in raw
     assert "-Infinity" not in raw
     assert json.loads(raw,parse_constant=lambda _: (_ for _ in ()).throw(ValueError("NONFINITE")))["packets"]==32
+
+
+def test_snapshot_validates_persisted_field_types_before_returning(tmp_path, monkeypatch):
+    """Allowlisted field names cannot smuggle nested tampered payloads."""
+    directory=tmp_path/"audit"
+    monkeypatch.setattr(audit,"ROOT",directory)
+    monkeypatch.setattr(audit,"FILE",directory/"ec-audit.jsonl")
+    audit.log("ec1_received","QSAFEVAL1","MCP_TO_EASYCHANGE",bytes=5)
+    with audit.FILE.open("a",encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "id":audit.snapshot(limit=1)["events"][0]["id"]+5,
+            "at":"2026-10-23T00:00:00Z",
+            "stage":{"token":"nested-sensitive-value"},
+            "sequence":"QSAFEVAL2", "direction":"MCP_TO_EASYCHANGE",
+            "bytes":{"raw":"private-payload"},
+        })+"\n")
+        handle.write(json.dumps({
+            "id":audit.snapshot(limit=1)["events"][0]["id"]+10,
+            "at":"2026-10-23T00:00:01Z",
+            "stage":"ec1_received", "sequence":"QSAFEVAL3",
+            "direction":"MCP_TO_EASYCHANGE",
+            "bytes":{"raw":"private-payload"},
+            "cause":["nested-sensitive-value"],
+        })+"\n")
+    result=audit.snapshot(limit=16)
+    assert result["count"]==2
+    assert result["events"][-1]["stage"]=="ec1_received"
+    assert "bytes" not in result["events"][-1]
+    assert "cause" not in result["events"][-1]
+    rendered=json.dumps(result)
+    assert "nested-sensitive-value" not in rendered
+    assert "private-payload" not in rendered

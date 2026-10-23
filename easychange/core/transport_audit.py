@@ -50,6 +50,47 @@ def log(stage,sequence="",direction="",**kwargs):
             with FILE.open("a",encoding="utf-8") as out:out.write(line+"\n")
     except OSError:pass
 
+def _safe_snapshot_entry(entry):
+    """Validate persisted event types before exposing data to diagnostics."""
+    text_limits = {
+        "at": 40, "stage": 64, "sequence": 64, "direction": 40,
+        "medium": 65, "mode": 65, "command_type": 65,
+        "state": 65, "result_state": 65, "cause": 80, "code": 80,
+    }
+    if (type(entry.get("id")) is not int or entry["id"] <= 0
+            or any(type(entry.get(key)) is not str
+                   or len(entry[key]) > maximum
+                   for key, maximum in (("at", 40), ("stage", 64),
+                                        ("sequence", 64), ("direction", 40)))):
+        return None
+
+    clean = {}
+    for key, value in entry.items():
+        if key not in SAFE_FIELDS and key not in {"id", "at", "stage", "sequence", "direction"}:
+            continue
+        if key == "id":
+            clean[key] = entry["id"]
+        elif key in text_limits:
+            if type(value) is str and len(value) <= text_limits[key]:
+                if key in {"cause", "code"}:
+                    value = "".join(c if c.isalnum() or c in "._-" else "_" for c in value)
+                clean[key] = value
+        elif key in {"ok", "duplicate", "result_complete"}:
+            if type(value) is bool:
+                clean[key] = value
+        elif key == "sha256":
+            if (type(value) is str and len(value) == 64
+                    and all(ch in "0123456789abcdef" for ch in value.lower())):
+                clean[key] = value.lower()
+        elif key in {"duration_ms", "elapsed_ms", "bytes", "frames", "packets",
+                     "chunks", "page", "pages", "generation", "payload_length",
+                     "render_ms", "encoding_ms", "attempt"}:
+            if (type(value) in (int, float) and math.isfinite(value)
+                    and abs(value) <= 1_000_000_000_000):
+                clean[key] = value
+    return clean
+
+
 def snapshot(after=0,limit=8,sequence="",direction=""):
     if type(after) is not int or after<0 or type(limit) is not int or not 1<=limit<=16:
         raise ValueError("INVALID_TRANSPORT_LOG_CURSOR_OR_LIMIT")
@@ -81,12 +122,9 @@ def snapshot(after=0,limit=8,sequence="",direction=""):
         # Disk content may originate from an older release or be malformed.
         # The EC2 query is a security boundary: never forward arbitrary
         # persisted keys such as command bodies, tokens or source code.
-        found.append({
-            key:value for key,value in entry.items()
-            if key in SAFE_FIELDS or key in {
-                "id", "at", "stage", "sequence", "direction"
-            }
-        })
+        safe_entry = _safe_snapshot_entry(entry)
+        if safe_entry is not None:
+            found.append(safe_entry)
     chosen=found[:limit] if after else found[-limit:]
     return {"events":chosen,"next_cursor":chosen[-1]["id"] if chosen else after,
             "more":bool(after and len(found)>limit),"count":len(chosen),
