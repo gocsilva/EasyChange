@@ -60,6 +60,12 @@ MAX_COMMAND_INPUT_CHARS = 32 * 1024 * 1024
 MAX_ACTIVE_TRANSACTION_RECORD_CHARS = 64 * 1024 * 1024
 
 
+def _strip_batch_end_marker(body: str) -> str:
+    """Remove a standalone trailing :end token from a batch body."""
+    marker = re.search(r"(?i)(?:^|[\s;]):end\s*$", body)
+    return body[:marker.start()].rstrip() if marker else body
+
+
 @dataclass
 class Change:
     path: str
@@ -481,7 +487,7 @@ class CommandService:
             return received
         if raw.lower().startswith(":batch"):
             body = raw[len(":batch"):].strip()
-            if body.endswith(":end"): body = body[:-4].strip()
+            body = _strip_batch_end_marker(body)
             return self._execute_chain(body, batch=True)
         if raw.lower().startswith(":macro define ") and ":end" in raw:
             parts = raw.splitlines()
@@ -3140,7 +3146,8 @@ class CommandService:
         started = time.monotonic()
         body = text
         if batch and body.lower().startswith(":batch"): body = body[len(":batch"):].strip()
-        if ":end" in body: body = body.rsplit(":end", 1)[0]
+        if batch:
+            body = _strip_batch_end_marker(body)
         if batch and self.transaction is not None:
             return self._error_result(":batch", RuntimeError("BATCH_CANNOT_NEST_TRANSACTION"))
         if batch:
