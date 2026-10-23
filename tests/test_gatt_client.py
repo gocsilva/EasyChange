@@ -820,7 +820,8 @@ def test_custom_gatt_probe_reports_old_firmware_or_access_denied():
         async def read_gatt_char(self, *_args, **_kwargs):
             raise PermissionError("Access Denied")
     result = asyncio.run(gatt_client._custom_service_read_probe(ReadDenied()))
-    assert result == "DIAG_READ_FAILED:PermissionError:Access Denied"
+    assert result == ("DIAG_READ_FAILED:PermissionError:Access Denied;"
+                      "exception=PermissionError")
 
 
 

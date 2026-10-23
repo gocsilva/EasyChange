@@ -277,3 +277,27 @@ Para o teste fisico apos atualizar: abrir o EasyChange atualizado, clicar
 **Tentar GATT**, verificar `DIAG_READ_OK` e a inscricao confirmada; concluir
 o pareamento SAS no MCP local. Nenhum administrador, novo perfil HID ou
 escrita direta do CCCD pelo cliente e necessario. QR/HDMI continuam disponiveis.
+
+### Diagnostico schema 3 e firmware 3.0.2
+
+O cabecalho do log identifica EasyChange, build do Windows, versao do Bleak e
+SHA256 do modulo GATT carregado. As leituras diagnosticas usam a mesma conexao
+e a API WinRT `read_value_with_cache_mode_async(UNCACHED)`, preservando
+`GattCommunicationStatus` e `ProtocolError` sem repetir a leitura. Excecoes
+preservam os codigos ATT (incluindo `.code` do Bleak 3), HRESULT e WinError.
+
+`DeviceAccessStatus=DeniedByUser/System` confirma uma recusa local do Windows:
+o cliente interrompe as tentativas automaticas e aguarda o operador. O log
+nao identifica qual politica corporativa causou a recusa. `AccessDenied`
+generico ou ATT 0x03 isolado continuam insuficientes para essa atribuicao.
+
+No firmware 3.0.2 a tabela reporta schema 3, e o marcador publico tambem usa
+resposta da aplicacao para registrar seu status ATT e a conclusao da API.
+`BLE_DIAG` possui boot ID, epoca da conexao e historico de ate 32 eventos
+numericos. O observador de logs Bluedroid captura rejeicoes de permissao
+anteriores aos callbacks. Consultar antes/depois de uma unica tentativa;
+se o boot mudar, descartar o delta. Ausencia de eventos nao prova politica.
+
+Um evento de resposta do ESP confirma a etapa informada pela API; o sucesso
+de notificacoes continua exigindo `GATT_SUBSCRIPTION_CONFIRMED` no Windows,
+seguido de SAS/AEAD e resultado real para confirmar a aplicacao completa.

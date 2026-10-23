@@ -7,6 +7,7 @@ the keyboard/mouse interface. Qt command dispatch remains in the GUI thread.
 from __future__ import annotations
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import queue
@@ -14,7 +15,9 @@ import re
 import sys
 import threading
 from importlib import metadata as importlib_metadata
+from pathlib import Path
 
+from .. import __version__
 from .gatt_diagnostics import GattDiagnosticLog
 
 from .gatt_security import GattHandshake, GattSecureSession
@@ -25,6 +28,7 @@ HOST_TO_REMOTE_UUID = "c24c1e20-9b28-4e07-9c29-20167e20a4e2"
 REMOTE_TO_HOST_UUID = "c24c1e20-9b28-4e07-9c29-20167e20a4e3"
 DIAGNOSTIC_READ_UUID = "c24c1e20-9b28-4e07-9c29-20167e20a4e4"
 DEVICE_NAME = "Easy"
+GATT_CLIENT_DIAG_SCHEMA = 3
 SEQUENCE_RE = re.compile(r"Q[A-Z0-9_-]{4,40}\Z")
 
 
@@ -220,7 +224,7 @@ def _gatt_attribute_details(services) -> str:
 
 def _is_cccd_write_denied(exc: BaseException) -> bool:
     """ATT 0x03 differs from pairing/authentication errors (0x05, 0x0F)."""
-    value = getattr(exc, "protocol_error", None)
+    value = _gatt_protocol_code(exc)
     if value is not None:
         try:
             return int(value) == 3
@@ -230,6 +234,64 @@ def _is_cccd_write_denied(exc: BaseException) -> bool:
     return ("write not permitted" in message and
             ("gatt" in message or "protocol error" in message or
              "0x03" in message or "(3," in message))
+
+
+def _gatt_protocol_code(exc: BaseException):
+    value = getattr(exc, "protocol_error", None)
+    # Bleak 3.x exposes the ATT code as .code, not .protocol_error.
+    # Never treat arbitrary exceptions' generic .code as an ATT error.
+    if value is None and type(exc).__name__ == "BleakGATTProtocolError":
+        value = getattr(exc, "code", None)
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 255 else None
+
+
+def _gatt_exception_evidence(exc: BaseException) -> str:
+    """Preserve error codes that wrappers often hide, without arbitrary data."""
+    fields = ["exception=" + type(exc).__name__[:64]]
+    att = _gatt_protocol_code(exc)
+    if att is not None:
+        fields.append(f"ATT=0x{att:02X}")
+    for name in ("protocol_error", "hresult", "winerror"):
+        value = getattr(exc, name, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            if name != "protocol_error" and -(1 << 31) <= value < (1 << 32):
+                fields.append(f"{name.upper()}=0x{value & 0xFFFFFFFF:08X}")
+    return ";".join(fields)
+
+
+async def _gatt_probe_read(client, attribute, *, descriptor: bool = False):
+    """One uncached read on the existing link, retaining native WinRT status.
+
+    Bleak converts WinRT AccessDenied to a generic message and discards the
+    result object. Public WinRT read APIs let this diagnostic retain Status
+    and ProtocolError. No write, new device or new connection is created.
+    """
+    native = getattr(attribute, "obj", None)
+    read_native = getattr(native, "read_value_with_cache_mode_async", None)
+    cache_mode = None
+    if _on_windows() and callable(read_native):
+        try:
+            from winrt.windows.devices.bluetooth import BluetoothCacheMode
+            cache_mode = BluetoothCacheMode.UNCACHED
+        except (ImportError, AttributeError):
+            pass
+    if cache_mode is not None:
+        result = await asyncio.wait_for(read_native(cache_mode), timeout=4)
+        status = getattr(result, "status", None)
+        status_value = int(status) if isinstance(status, int) else None
+        labels = {0: "SUCCESS", 1: "UNREACHABLE", 2: "PROTOCOL_ERROR", 3: "ACCESS_DENIED"}
+        label = labels.get(status_value, "UNKNOWN")
+        protocol_error = getattr(result, "protocol_error", None)
+        att = (f"0x{protocol_error:02X}" if isinstance(protocol_error, int)
+               and not isinstance(protocol_error, bool) and 0 <= protocol_error <= 255
+               else "NONE")
+        evidence = f"READ_API=WINRT_UNCACHED;WINRT_STATUS={label};ATT={att}"
+        if status_value != 0:
+            return None, evidence
+        return bytes(result.value), evidence
+    method = client.read_gatt_descriptor if descriptor else client.read_gatt_char
+    raw = await asyncio.wait_for(method(attribute, use_cached=False), timeout=4)
+    return bytes(raw), ""
 
 
 def _winrt_custom_service_access_status(client) -> str:
@@ -256,8 +318,12 @@ def _winrt_custom_service_access_status(client) -> str:
         status = getattr(access, "current_status", None)
         if status is None:
             return "WINRT_CURRENT_STATUS_UNAVAILABLE"
+        # A numeric projection still has the documented DeviceAccessStatus
+        # meaning; never infer denial by searching arbitrary exception text.
+        labels = {0: "UNSPECIFIED", 1: "ALLOWED", 2: "DENIED_BY_USER", 3: "DENIED_BY_SYSTEM"}
         name = getattr(status, "name", None)
-        label = str(name if name is not None else status)
+        label = labels.get(int(status)) if isinstance(status, int) else None
+        label = label or str(name if name is not None else status)
         label = re.sub(r"[^a-zA-Z0-9_ -]", "", label)[:48]
         return "WINRT_ACCESS_STATUS=" + (label or "UNKNOWN")
     except Exception as exc:
@@ -280,14 +346,17 @@ async def _custom_service_read_probe(client) -> str:
         properties = {str(p).lower() for p in (getattr(char, "properties", ()) or ())}
         if "read" not in properties:
             return "DIAG_CHARACTERISTIC_NOT_READABLE"
-        raw = bytes(await asyncio.wait_for(
-            client.read_gatt_char(char, use_cached=False), timeout=4))
+        raw, evidence = await _gatt_probe_read(client, char)
+        if raw is None:
+            return "DIAG_READ_FAILED:" + evidence
         # Do not expose peripheral data in log; compare against one fixed
         # public protocol marker only.
-        return ("DIAG_READ_OK" if raw == b"BMO-GATT-DIAG-1"
-                else "DIAG_READ_UNEXPECTED_LENGTH:" + str(len(raw)))
+        outcome = ("DIAG_READ_OK" if raw == b"BMO-GATT-DIAG-1"
+                   else "DIAG_READ_UNEXPECTED_LENGTH:" + str(len(raw)))
+        return outcome + (";" + evidence if evidence else "")
     except Exception as exc:
-        return "DIAG_READ_FAILED:" + type(exc).__name__ + ":" + str(exc)[:110]
+        return ("DIAG_READ_FAILED:" + type(exc).__name__ + ":" + str(exc)[:110]
+                + ";" + _gatt_exception_evidence(exc))
 
 
 async def _cccd_readonly_probe(client) -> str:
@@ -305,14 +374,16 @@ async def _cccd_readonly_probe(client) -> str:
                      ("00002902-0000-1000-8000-00805f9b34fb", "2902", "0x2902")), None)
         if cccd is None:
             return "CCCD_DESCRIPTOR_MISSING"
-        value = bytes(await asyncio.wait_for(
-            client.read_gatt_descriptor(cccd, use_cached=False), timeout=4))
+        value, evidence = await _gatt_probe_read(client, cccd, descriptor=True)
+        if value is None:
+            return "CCCD_READ_FAILED:" + evidence
         if len(value) != 2:
             return "CCCD_READ_LENGTH_INVALID"
-        return "CCCD_READ_OK:0x" + value.hex()
+        return "CCCD_READ_OK:0x" + value.hex() + (";" + evidence if evidence else "")
     except Exception as exc:
         # Optional diagnostics must never mask the actual write-denied error.
-        return "CCCD_READ_FAILED:" + type(exc).__name__ + ":" + str(exc)[:85]
+        return ("CCCD_READ_FAILED:" + type(exc).__name__ + ":" + str(exc)[:85]
+                + ";" + _gatt_exception_evidence(exc))
 
 
 def _gatt_verdict(*, stage: str, winrt_status: str, read_probe: str,
@@ -329,9 +400,13 @@ def _gatt_verdict(*, stage: str, winrt_status: str, read_probe: str,
     cccd = str(cccd_probe or "NOT_MEASURED")
     error = str(notification_error or "")
     meta = str(metadata or "")
-    deny = "DENIED" in access.upper() and "UNAVAILABLE" not in access.upper()
-    att03 = ("0X03" in error.upper() or
+    access_label = access.upper().removeprefix("WINRT_ACCESS_STATUS=").replace("_", "")
+    deny = access_label in ("DENIEDBYUSER", "DENIEDBYSYSTEM")
+    allowed = access_label == "ALLOWED"
+    att03 = ("ATT=0X03" in error.upper() or "ATT 0X03" in error.upper() or
              ("WRITE NOT PERMITTED" in error.upper()))
+    windows_block = ("CONFIRMADO_" + access_label if deny else
+                     "NAO_REPORTADO_PELO_DEVICE_ACCESS" if allowed else "NAO_MEDIDO")
     if stage == "NOTIFY_OK" and not error:
         code = "GATT_SUBSCRIPTION_CONFIRMED"
         confidence = "SUBSCRICAO_CONFIRMADA_PELO_WINDOWS"
@@ -339,12 +414,14 @@ def _gatt_verdict(*, stage: str, winrt_status: str, read_probe: str,
     elif deny:
         code = "WINRT_SERVICE_ACCESS_DENIED"
         confidence = "CONFIRMADO_PELO_WINDOWS"
-        action = "Analisar permissao de acesso ao servico BLE no WinRT; nao alterar firmware sem BLE_DIAG"
+        action = ("Parar repeticoes de firmware para esta recusa: Windows DeviceAccessStatus "
+                  "negou o servico. Operador de TI deve identificar a permissao/politica; "
+                  "a API nao informa a regra responsavel")
     elif "service=0" in meta or "notify_char=0" in meta or "cccd=0" in meta:
         code = "GATT_SCHEMA_MISSING_OR_STALE"
         confidence = "CONFIRMADO_INVENTARIO_INCOMPATIVEL"
         action = "Comparar handles com GATT_DIAG do ESP e versao do firmware; verificar cache de servicos"
-    elif att03 and "ACCESS DENIED" in (read + " " + cccd).upper():
+    elif att03 and "ACCESS DENIED" in (read + " " + cccd).upper().replace("_", " "):
         code = "ACCESS_DENIED_READ_AND_ATT03_CCCD"
         confidence = "CAUSA_AINDA_NAO_ISOLADA"
         action = ("Comparar contadores ESP BLE_DIAG antes/depois desta tentativa: "
@@ -367,8 +444,13 @@ def _gatt_verdict(*, stage: str, winrt_status: str, read_probe: str,
         "certeza": confidence,
         "etapa": str(stage)[:38],
         "winrt": access[:110],
-        "leitura": read[:165],
-        "cccd": cccd[:140],
+        "bloqueio_windows": windows_block,
+        "evidencia_att": "ATT_0X03_CONFIRMADO" if att03 else "SEM_ATT_0X03",
+        "politica_corporativa": "NAO_IDENTIFICADA_PELA_API",
+        "limite_evidencia": ("DeviceAccessStatus confirma recusa local; nao identifica sua regra" if deny
+                              else "AccessDenied generico ou ATT 0x03 nao prova bloqueio da maquina"),
+        "leitura": read[:350],
+        "cccd": cccd[:350],
         "notificacao": ("ATT_0X03_WRITE_NOT_PERMITTED" if att03 else
                         ("ERRO_SEM_ATT03" if error else "SEM_ERRO")),
         "link_ble": "SIM" if connected else "NAO",
@@ -429,6 +511,16 @@ class EasyChangeGattClient:
             "INICIO", "Iniciando diagnostico GATT no EasyChange. "
             "Comandos, chaves, endereco BLE, mensagens cifradas e codigo SAS "
             "nao sao coletados.")
+        try:
+            source_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+        except OSError:
+            source_hash = "UNAVAILABLE"
+        windows_build = str(getattr(sys.getwindowsversion(), "build", "?")) if (
+            _on_windows() and hasattr(sys, "getwindowsversion")) else "NA"
+        self.diagnostics.record(
+            "AMBIENTE", f"GATT_CLIENT_DIAG_SCHEMA={GATT_CLIENT_DIAG_SCHEMA}; "
+            f"EasyChange={__version__}; GATT_CLIENT_SOURCE_SHA256={source_hash}; "
+            f"WindowsBuild={windows_build}")
         try:
             self.diagnostics.record(
                 "AMBIENTE", f"Python={sys.version.split()[0]}, "
@@ -621,6 +713,9 @@ class EasyChangeGattClient:
                     self._trace(
                         "WINRT_GATT_ACCESSO",
                         f"Tentativa #{self._attempt}: {winrt_access}")
+                    access_label = winrt_access.upper().removeprefix("WINRT_ACCESS_STATUS=").replace("_", "")
+                    if access_label in ("DENIEDBYUSER", "DENIEDBYSYSTEM"):
+                        raise PermissionError("WINRT_SERVICE_ACCESS_DENIED")
                     # Readable characteristic is independent of CCCD (0x2902).
                     # Perform one bounded read while the same BLE link is open.
                     # Firmware without this optional characteristic is valid.
@@ -633,7 +728,10 @@ class EasyChangeGattClient:
                         await client.start_notify(HOST_TO_REMOTE_UUID, self._notify)
                     except Exception as notify_exc:
                         notification_error = (f"{type(notify_exc).__name__}: "
-                                              f"{str(notify_exc)[:90]}")
+                                              f"{str(notify_exc)[:90]};" +
+                                              _gatt_exception_evidence(notify_exc))
+                        self._trace("WINRT_ERRO_NOTIFICACAO",
+                                    _gatt_exception_evidence(notify_exc))
                         # Must inspect while BleakClient is STILL connected:
                         # outside the async-with, __aexit__ has disconnected
                         # and any CCCD read yields a misleading failure.
@@ -644,6 +742,10 @@ class EasyChangeGattClient:
                                 "Leitura somente-leitura do descritor durante "
                                 f"vinculo ativo: {cccd_state}; "
                                 f"conectado={bool(client.is_connected)}")
+                        # Keep access information from the same still-open
+                        # service at the time of failure, before __aexit__.
+                        winrt_access = _winrt_custom_service_access_status(client)
+                        self._trace("WINRT_GATT_ACCESSO_FINAL", winrt_access)
                         raise
                     self._trace("INSCRICAO_GATT", "Inscricao confirmada pelo sistema")
                     self._last_verdict = _gatt_verdict(
@@ -667,7 +769,9 @@ class EasyChangeGattClient:
                 # One concise verdict is more useful than 80 lines of repeated
                 # Bleak traceback. Full stacks remain opt-in for developers.
                 notification_error = notification_error or (
-                    f"{type(exc).__name__}: {str(exc)[:110]}")
+                    f"{type(exc).__name__}: {str(exc)[:110]};" +
+                    _gatt_exception_evidence(exc))
+                self._trace("WINRT_ERRO_CODIGOS", _gatt_exception_evidence(exc))
                 if os.getenv("EASYCHANGE_GATT_DEBUG_TRACE") == "1":
                     self._trace(stage, f"Tentativa #{self._attempt}: excecao detalhada", exc=exc)
                 else:
@@ -679,7 +783,7 @@ class EasyChangeGattClient:
                     if _is_cccd_write_denied(exc):
                         cccd_denied = True
                         self._consecutive_cccd_denials += 1
-                        self._trace("CCCD_ATT03", "Recusa do servidor BLE ao "
+                        self._trace("CCCD_ATT03", "Windows reportou resposta ATT ao "
                                     "habilitar notificacoes: ATT 0x03 Write Not Permitted; "
                                     f"recusas={self._consecutive_cccd_denials}; "
                                     f"leitura={cccd_state}. Nenhuma escrita "
@@ -712,7 +816,17 @@ class EasyChangeGattClient:
                         f"GATT desconectado [{stage}]: {self._last_error[:300]}. "
                         "Tentando reconectar; QR disponivel."})
             if not self._stop.is_set():
-                if cccd_denied and self._consecutive_cccd_denials >= 2:
+                if self._last_verdict.get("codigo") == "WINRT_SERVICE_ACCESS_DENIED":
+                    self._last_stage = "WINDOWS_ACCESS_ACTION_REQUIRED"
+                    self._trace("WINDOWS_ACCESS_ACTION_REQUIRED",
+                                "Windows confirmou DeniedByUser/System. Novas tentativas "
+                                "automaticas suspensas ate acao do operador; a regra "
+                                "responsavel nao e identificada pela API.")
+                    self._emit({"type": "status", "message":
+                        "Windows negou acesso ao servico Bluetooth. Verifique a permissao "
+                        "com o operador de TI; depois clique 'Tentar GATT'."})
+                    await self._retry_delay(None)
+                elif cccd_denied and self._consecutive_cccd_denials >= 2:
                     self._last_stage = "CCCD_ATT03_ACTION_REQUIRED"
                     self._trace("CCCD_ATT03_ACTION_REQUIRED",
                                 "Duas conexoes independentes tiveram a mesma recusa "
