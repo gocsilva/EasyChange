@@ -1049,6 +1049,11 @@ class MainWindow(QMainWindow):
                 # a new command starts; only its OWN receipt gets the new mode.
                 self._optical_timer.stop()
                 self._optical_render_generation += 1
+                # Switching the visual codec invalidates all already
+                # scheduled QR/PIXEL raster work, not just the Qt page.
+                # Otherwise old futures occupy both workers and delay the
+                # first correlated receipt of the NEW EC1 sequence.
+                self._discard_optical_render_jobs()
                 self._optical_render_pending = None
                 self._optical_pixmaps.clear()
                 self._optical_page = 0
