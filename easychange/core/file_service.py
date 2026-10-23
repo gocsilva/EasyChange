@@ -337,7 +337,10 @@ class FileService:
         lines = original.splitlines(keepends=True)
         if line < 1 or line > len(lines):
             raise IndexError(f"Line out of range: {line}")
-        ending = "\n" if lines[line - 1].endswith("\n") else ""
+        previous_line = lines[line - 1]
+        ending = ("\r\n" if previous_line.endswith("\r\n")
+                  else "\n" if previous_line.endswith("\n")
+                  else "\r" if previous_line.endswith("\r") else "")
         lines[line - 1] = value + ending
         updated = "".join(lines)
         self.write(path, updated)
