@@ -14,6 +14,18 @@ def test_chain_with_escaped_windows_path_semicolon_keeps_one_command():
     ]
 
 
+def test_chain_keeps_semicolon_after_literal_quote_inside_escaped_boundary():
+    parser=CommandParser()
+    raw=r':search \"a"b;c\";:state'
+    assert parser.split_chain(raw)==[
+        (r':search \"a"b;c\"',False),
+        (':state',False),
+    ]
+    assert parser.parse(parser.split_chain(raw)[0][0])==[
+        'search','a"b;c'
+    ]
+
+
 def test_chain_with_escaped_windows_path_and_and_operator():
     parser=CommandParser()
     raw=r':open \"C:\A&&B.cs\"&&:state'

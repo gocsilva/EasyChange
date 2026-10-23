@@ -223,6 +223,14 @@ class CommandParser:
                 index = end
                 continue
             if char in {"'", '"'}:
+                if quote == char and escaped_boundary:
+                    # parse() treats a bare quote inside an escaped outer
+                    # boundary as literal text; only its escaped quote can
+                    # close that token. Keep separators after this quote
+                    # inside the same command as well.
+                    token.append(char)
+                    index += 1
+                    continue
                 if quote == char:
                     quote = None
                     escaped_boundary = False
