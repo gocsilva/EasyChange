@@ -67,7 +67,15 @@ def snapshot(after=0,limit=8,sequence="",direction=""):
             (sequence and entry.get("sequence","").upper()!=sequence.upper()) or
             (direction and entry.get("direction","").lower()!=direction.lower())):
             continue
-        found.append(entry)
+        # Disk content may originate from an older release or be malformed.
+        # The EC2 query is a security boundary: never forward arbitrary
+        # persisted keys such as command bodies, tokens or source code.
+        found.append({
+            key:value for key,value in entry.items()
+            if key in SAFE_FIELDS or key in {
+                "id", "at", "stage", "sequence", "direction"
+            }
+        })
     chosen=found[:limit] if after else found[-limit:]
     return {"events":chosen,"next_cursor":chosen[-1]["id"] if chosen else after,
             "more":bool(after and len(found)>limit),"count":len(chosen),

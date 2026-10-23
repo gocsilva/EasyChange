@@ -57,3 +57,29 @@ def test_transport_log_command_dispatch_requires_exact_token(tmp_path):
         assert legitimate.ok and legitimate.command=="transport_log"
     finally:
         service.close()
+
+
+def test_snapshot_never_returns_unapproved_fields_from_persisted_file(tmp_path, monkeypatch):
+    """A tampered or legacy JSONL line must not exfiltrate raw EC1 credentials."""
+    directory=tmp_path/"audit"
+    monkeypatch.setattr(audit,"ROOT",directory)
+    monkeypatch.setattr(audit,"FILE",directory/"ec-audit.jsonl")
+    audit.log("ec1_received","QPRIVATE01","MCP_TO_EASYCHANGE",bytes=5)
+    with audit.FILE.open("a",encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "id":audit.snapshot(limit=1)["events"][0]["id"]+5,
+            "at":"2026-10-23T00:00:00Z",
+            "stage":"ec1_received", "sequence":"QPRIVATE02",
+            "direction":"MCP_TO_EASYCHANGE",
+            "bytes":12,
+            "token":"sensitive-bearer-token",
+            "raw_command":":ec QPRIVATE02 password=leak",
+            "result_body":{"private":"sensitive-response"},
+        })+"\n")
+    data=audit.snapshot(limit=10)
+    assert len(data["events"])==2
+    assert data["events"][-1]["bytes"]==12
+    rendered=json.dumps(data)
+    assert "sensitive-bearer-token" not in rendered
+    assert "password=leak" not in rendered
+    assert "sensitive-response" not in rendered
