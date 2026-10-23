@@ -370,10 +370,11 @@ class FileService:
         target = self.workspace.resolve(path)
         before = ""
         if target.exists():
-            existing = self._read_limited_text(target)
-            if len(existing)>MAX_TEXT_FILE_BYTES:
-                raise ValueError(f"File exceeds text write limit ({MAX_TEXT_FILE_BYTES} bytes)")
-            before = existing.decode("utf-8")
+            # Append is read-modify-write. Establish an optimistic baseline
+            # before computing new content, or another local editor can
+            # change the file between this read and write(), and the append
+            # silently overwrites their update.
+            _, _, before = self._read_for_edit(path)
         separator = "" if not before or before.endswith(("\n", "\r")) else "\n"
         self.write(path, before + separator + value)
         return {"path": path, "appended_chars": len(value)}
