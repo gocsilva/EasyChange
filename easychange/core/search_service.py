@@ -11,6 +11,8 @@ class SearchService:
         self.workspace = workspace
 
     def search(self, query: str, *, case_sensitive: bool = False, limit: int = 100) -> list[dict]:
+        if type(limit) is not int or limit <= 0:
+            return []
         results = []
         needle = query if case_sensitive else query.casefold()
         ignored = {".git", ".venv", "venv", "node_modules", "__pycache__", ".easychange"}
