@@ -702,6 +702,56 @@ def test_job_heartbeat_cannot_overwrite_concurrent_terminal_state(tmp_path, monk
     assert manifest["state"] == "SUCCEEDED"
 
 
+def test_reconcile_cannot_orphan_job_finalized_during_pid_check(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+    job_id = "JRECONCILERACE1"
+    job_path = service._job_path(job_id)
+    job_path.write_text("{}", encoding="utf-8")
+    manifest = {"job_id": job_id, "state": "RUNNING", "pid": 123, "started_at": time.time()}
+    pid_check_started = threading.Event()
+    allow_pid_check = threading.Event()
+
+    def read_job(_job_id):
+        return dict(manifest)
+
+    def write_job(_job_id, data, *, durable=True):
+        manifest.update(data)
+        return data
+
+    def pid_alive(_pid):
+        pid_check_started.set()
+        assert allow_pid_check.wait(timeout=5)
+        return False
+
+    monkeypatch.setattr(service, "_read_job", read_job)
+    monkeypatch.setattr(service, "_write_job", write_job)
+    monkeypatch.setattr(service, "_pid_alive", pid_alive)
+    monkeypatch.setattr(service, "_tail_file", lambda _path, _limit: ("", 0, "0" * 64))
+    item = RunningProcess(
+        process_id=job_id,
+        argv=["fake"],
+        process=type("ExitedProcess", (), {"pid": 123, "poll": lambda self: 0})(),
+        stdout_path=workspace / "stdout.log",
+        stderr_path=workspace / "stderr.log",
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        reconciliation = pool.submit(
+            service._reconcile_durable_jobs, limit=1, durable=False
+        )
+        assert pid_check_started.wait(timeout=5)
+        finalized = service._finalize_job(job_id, item)
+        allow_pid_check.set()
+        summary = reconciliation.result(timeout=5)
+
+    assert finalized["state"] == "SUCCEEDED"
+    assert manifest["state"] == "SUCCEEDED"
+    assert summary["orphaned"] == 0
+
+
 def test_job_tail_returns_only_new_bytes_and_preserves_cursor(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
     workspace = tmp_path / "workspace"

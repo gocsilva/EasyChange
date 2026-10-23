@@ -515,24 +515,33 @@ class ProcessService:
         reason: str,
         durable: bool = True,
     ) -> dict:
-        now = time.time()
-        updated = {
-            **current,
-            "state": "ORPHANED",
-            "finished_at": now,
-            "heartbeat_at": current.get("heartbeat_at") or current.get("started_at"),
-            "orphaned_at": now,
-            "orphan_reason": reason,
-            "pid_alive": False,
-            "terminal": True,
-        }
-        started = float(updated.get("started_at") or now)
-        updated["duration_ms"] = int(max(0.0, now - started) * 1000)
-        return self._write_job(
-            str(updated["job_id"]),
-            updated,
-            durable=durable,
-        )
+        job_id = str(current["job_id"])
+        with self._job_write_lock:
+            latest = self._read_job(job_id) or current
+            latest_state = str(latest.get("state") or "").upper()
+            current_state = str(current.get("state") or "").upper()
+            if latest_state in {"ORPHANED", "CANCELLED", "SUCCEEDED", "FAILED"}:
+                return latest
+            if latest_state != current_state:
+                return latest
+            now = time.time()
+            updated = {
+                **latest,
+                "state": "ORPHANED",
+                "finished_at": now,
+                "heartbeat_at": latest.get("heartbeat_at") or latest.get("started_at"),
+                "orphaned_at": now,
+                "orphan_reason": reason,
+                "pid_alive": False,
+                "terminal": True,
+            }
+            started = float(updated.get("started_at") or now)
+            updated["duration_ms"] = int(max(0.0, now - started) * 1000)
+            return self._write_job(
+                job_id,
+                updated,
+                durable=durable,
+            )
 
     def _reconcile_durable_jobs(
         self,
@@ -578,11 +587,13 @@ class ProcessService:
             if self._pid_alive(current.get("pid")):
                 running += 1
                 continue
-            self._mark_job_orphaned(
+            orphaned_job = self._mark_job_orphaned(
                 current,
                 reason="PROCESS_NOT_ALIVE",
                 durable=durable,
             )
+            if str(orphaned_job.get("state") or "").upper() != "ORPHANED":
+                continue
             reconciled += 1
             orphaned += 1
             if background and index and index % 32 == 0:
