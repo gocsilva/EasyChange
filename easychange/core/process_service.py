@@ -342,6 +342,7 @@ class ProcessService:
         self.max_runtime_bytes = self._runtime_budget()
         self._migrate_legacy_jobs()
         self._processes: dict[str, RunningProcess] = {}
+        self._processes_lock = threading.RLock()
         self.last_execution: dict | None = None
         self._job_start_lock = threading.RLock()
         self._job_write_lock = threading.RLock()
@@ -354,6 +355,22 @@ class ProcessService:
             durable=False,
         )
         self._start_background_reconcile()
+
+    def _process_items_snapshot(self) -> tuple[tuple[str, RunningProcess], ...]:
+        with self._processes_lock:
+            return tuple(self._processes.items())
+
+    def _process_values_snapshot(self) -> tuple[RunningProcess, ...]:
+        with self._processes_lock:
+            return tuple(self._processes.values())
+
+    def _track_process(self, process_id: str, item: RunningProcess) -> None:
+        with self._processes_lock:
+            self._processes[process_id] = item
+
+    def _untrack_process(self, process_id: str) -> RunningProcess | None:
+        with self._processes_lock:
+            return self._processes.pop(process_id, None)
 
     @staticmethod
     def _pid_alive(pid: int | None) -> bool:
@@ -1112,7 +1129,7 @@ class ProcessService:
         keep = max(0, int(keep))
         finished = [
             process_id
-            for process_id, item in self._processes.items()
+            for process_id, item in self._process_items_snapshot()
             if item.process.poll() is not None
         ]
         for process_id in finished:
@@ -1121,7 +1138,7 @@ class ProcessService:
                 self._finalize_job(process_id, item)
         excess = finished[:-keep] if keep else finished
         for process_id in excess:
-            item = self._processes.pop(process_id, None)
+            item = self._untrack_process(process_id)
             if item is None:
                 continue
             # Durable jobs keep their external log files for cursor-based retrieval.
@@ -1191,11 +1208,11 @@ class ProcessService:
         } else "UNKNOWN"
 
     def maintenance(self, keep_finished: int = 8) -> dict:
-        before_count = len(self._processes)
+        before_count = len(self._process_items_snapshot())
         self._prune_finished(keep=max(0, int(keep_finished)))
         active = {
             process_id
-            for process_id, item in self._processes.items()
+            for process_id, item in self._process_items_snapshot()
             if item.process.poll() is None
         }
         running = len(active)
@@ -1348,9 +1365,9 @@ class ProcessService:
         after_storage = self.storage_stats()
         return {
             "tracked_before": before_count,
-            "tracked_after": len(self._processes),
+            "tracked_after": len(self._process_items_snapshot()),
             "running": running,
-            "finished_retained": len(self._processes) - running,
+            "finished_retained": len(self._process_items_snapshot()) - running,
             "disk_before_bytes": before_storage["bytes"],
             "disk_after_bytes": after_storage["bytes"],
             "disk_max_bytes": self.max_runtime_bytes,
@@ -1361,7 +1378,7 @@ class ProcessService:
 
     def purge_durable_state(self) -> dict:
         """Remove only this workspace's external EasyChange runtime state."""
-        if any(item.process.poll() is None for item in self._processes.values()):
+        if any(item.process.poll() is None for item in self._process_values_snapshot()):
             raise RuntimeError("CANNOT_PURGE_RUNNING_EASYCHANGE_PROCESSES")
         root = Path(os.path.abspath(self.workspace_state_root))
         base = Path(
@@ -1404,7 +1421,7 @@ class ProcessService:
     def active_process_ids(self) -> set[str]:
         return {
             process_id
-            for process_id, item in self._processes.items()
+            for process_id, item in self._process_items_snapshot()
             if item.process.poll() is None
         }
 
@@ -1443,7 +1460,7 @@ class ProcessService:
 
         owned_by_pid = {
             int(item.process.pid): process_id
-            for process_id, item in self._processes.items()
+            for process_id, item in self._process_items_snapshot()
             if item.process is not None
         }
         blockers = []
@@ -1735,7 +1752,7 @@ class ProcessService:
                         except (OSError, ValueError):
                             pass
                 if cleanup_error is not None:
-                    self._processes[process_id] = RunningProcess(
+                    self._track_process(process_id, RunningProcess(
                         process_id=process_id,
                         argv=requested_argv,
                         process=proc,
@@ -1745,7 +1762,7 @@ class ProcessService:
                         redact_values=secure_values,
                         pump_threads=tuple(started_threads),
                         cleanup_paths=cleanup_paths,
-                    )
+                    ))
                     raise RuntimeError(
                         "PROCESS_PUMP_START_FAILED_CHILD_STILL_TRACKED"
                     ) from cleanup_error
@@ -1763,7 +1780,7 @@ class ProcessService:
             finally:
                 stdout_file.close()
                 stderr_file.close()
-        self._processes[process_id] = RunningProcess(
+        self._track_process(process_id, RunningProcess(
             process_id=process_id,
             argv=requested_argv,
             process=proc,
@@ -1773,7 +1790,7 @@ class ProcessService:
             redact_values=secure_values,
             pump_threads=pump_threads,
             cleanup_paths=cleanup_paths,
-        )
+        ))
         return {
             "process_id": process_id,
             "pid": proc.pid,
@@ -1788,7 +1805,7 @@ class ProcessService:
         self._prune_finished()
         output = []
         seen = set()
-        for key, item in list(self._processes.items()):
+        for key, item in self._process_items_snapshot():
             code = item.process.poll()
             seen.add(key)
             output.append({
@@ -1924,7 +1941,7 @@ class ProcessService:
             and thread is not threading.current_thread()
         ):
             thread.join(timeout=1.0)
-        for process_id, item in list(self._processes.items()):
+        for process_id, item in self._process_items_snapshot():
             if item.process.poll() is None:
                 self.stop(process_id)
         # CommandService is closing; background process logs are ephemeral.

@@ -17,6 +17,8 @@ def _store(tmp_path):
     service=object.__new__(ProcessService)
     service.jobs_root=tmp_path
     service._job_write_lock=threading.RLock()
+    service._processes_lock=threading.RLock()
+    service._processes={}
     return service
 
 
@@ -41,6 +43,51 @@ def test_job_manifest_writer_rejects_oversize_without_replacing_old_job(tmp_path
     with pytest.raises(ValueError,match="JOB_MANIFEST_TOO_LARGE"):
         jobs._write_job("JOBONE",{"job_id":"JOBONE","data":"x"*300})
     assert path.read_bytes()==persisted
+
+
+def test_process_map_snapshot_serializes_concurrent_registration():
+    entered_items = threading.Event()
+    release_items = threading.Event()
+    writer_started = threading.Event()
+    writer_done = threading.Event()
+
+    class PausingItemsDict(dict):
+        def items(self):
+            iterator = iter(super().items())
+            first = next(iterator)
+            yield first
+            entered_items.set()
+            assert release_items.wait(2)
+            yield from iterator
+
+    service = object.__new__(ProcessService)
+    service._processes_lock = threading.RLock()
+    service._processes = PausingItemsDict({"existing": object()})
+    snapshot_result = []
+
+    snapshot_thread = threading.Thread(
+        target=lambda: snapshot_result.extend(service._process_items_snapshot())
+    )
+    snapshot_thread.start()
+    assert entered_items.wait(2)
+
+    def register_process():
+        writer_started.set()
+        service._track_process("concurrent", object())
+        writer_done.set()
+
+    writer_thread = threading.Thread(target=register_process)
+    writer_thread.start()
+    assert writer_started.wait(2)
+    assert not writer_done.wait(0.05)
+    release_items.set()
+    snapshot_thread.join(2)
+    writer_thread.join(2)
+
+    assert not snapshot_thread.is_alive()
+    assert not writer_thread.is_alive()
+    assert [key for key, _item in snapshot_result] == ["existing"]
+    assert set(service._processes) == {"existing", "concurrent"}
 
 
 def test_distinct_process_like_job_writers_do_not_reuse_staging_files(tmp_path):
