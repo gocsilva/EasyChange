@@ -303,12 +303,9 @@ class FileService:
         actual_bytes = self._read_limited_text(target)
         actual_after_hash = hashlib.sha256(actual_bytes).hexdigest()
         if actual_after_hash != expected_after_hash:
-            # Best-effort restoration protects against an exotic short/corrupt
-            # local write even outside a higher-level transaction.
-            if created:
-                target.unlink(missing_ok=True)
-            else:
-                self._atomic_write_bytes(target,previous_bytes)
+            # Another process may have updated the target between our atomic
+            # replace and this verification. Never overwrite or delete its
+            # changes while handling a failed integrity check.
             raise IOError("POST_WRITE_HASH_MISMATCH")
 
         self._opened[path] = target
