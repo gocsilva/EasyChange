@@ -551,6 +551,52 @@ def test_job_cancel_is_terminal_and_idempotent_for_attached_job(tmp_path, monkey
     assert again["terminal"] is True
 
 
+def test_job_cancel_wins_over_concurrent_stale_finalizer(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+    job_id = "JCANCELRACE1"
+    manifest = {"job_id": job_id, "state": "RUNNING", "started_at": time.time()}
+    natural_read_logs = threading.Event()
+    allow_natural_finalizer = threading.Event()
+
+    def read_job(_job_id):
+        return dict(manifest)
+
+    def write_job(_job_id, data):
+        manifest.update(data)
+        return data
+
+    def tail_file(_path, _limit):
+        if threading.current_thread().name.startswith("natural-finalizer"):
+            natural_read_logs.set()
+            assert allow_natural_finalizer.wait(timeout=5)
+        return "", 0, "0" * 64
+
+    monkeypatch.setattr(service, "_read_job", read_job)
+    monkeypatch.setattr(service, "_write_job", write_job)
+    monkeypatch.setattr(service, "_tail_file", tail_file)
+    item = RunningProcess(
+        process_id=job_id,
+        argv=["fake"],
+        process=type("ExitedProcess", (), {"pid": 123, "poll": lambda self: 0})(),
+        stdout_path=workspace / "stdout.log",
+        stderr_path=workspace / "stderr.log",
+    )
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="natural-finalizer") as pool:
+        natural = pool.submit(service._finalize_job, job_id, item)
+        assert natural_read_logs.wait(timeout=5)
+        cancelled = service._finalize_job(job_id, item, cancelled=True)
+        allow_natural_finalizer.set()
+        natural_result = natural.result(timeout=5)
+
+    assert cancelled["state"] == "CANCELLED"
+    assert natural_result["state"] == "CANCELLED"
+    assert manifest["state"] == "CANCELLED"
+
+
 def test_job_tail_returns_only_new_bytes_and_preserves_cursor(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
     workspace = tmp_path / "workspace"

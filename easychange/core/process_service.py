@@ -759,27 +759,34 @@ class ProcessService:
         stderr, stderr_size, stderr_hash = self._tail_file(item.stderr_path, 32000 if code == 0 else 64000)
         stdout = _redact(stdout, item.redact_values)
         stderr = _redact(stderr, item.redact_values)
-        persisted_state = str(current.get("state") or "").upper()
-        cancelled = bool(cancelled or persisted_state == "CANCELLED")
-        state = "CANCELLED" if cancelled else ("SUCCEEDED" if code == 0 else "FAILED")
-        finished_at = time.time()
-        started_at = float(current.get("started_at") or finished_at)
-        result = {
-            **current, "job_id": job_id, "process_id": item.process_id, "pid": item.process.pid,
-            "argv": item.argv, "requested_argv": item.argv, "exec_argv": item.exec_argv,
-            "state": state, "returncode": code, "finished_at": finished_at,
-            "pid_alive": False,
-            "duration_ms": int(max(0.0, finished_at - started_at) * 1000),
-            "stdout": stdout, "stderr": stderr, "stdout_chars": stdout_size, "stderr_chars": stderr_size,
-            "stdout_bytes": stdout_size, "stderr_bytes": stderr_size,
-            "stdout_hash": stdout_hash, "stderr_hash": stderr_hash,
-            "diagnostics": _diagnostics(stdout, stderr),
-            "result_hash": hashlib.sha256((stdout_hash + ":" + stderr_hash + ":" + str(code)).encode("ascii")).hexdigest(),
-            "output_truncated": stdout_size > len(stdout.encode("utf-8", errors="replace"))
-                                or stderr_size > len(stderr.encode("utf-8", errors="replace")),
-            "terminal": True,
-        }
-        self._write_job(job_id, result)
+        # Serialize the terminal-state decision with the durable manifest read.
+        # Otherwise a finalizer that read RUNNING earlier can overwrite a
+        # concurrent cancellation after the cancellation has already won.
+        with self._job_write_lock:
+            latest = self._read_job(job_id) or current
+            persisted_state = str(latest.get("state") or "").upper()
+            if persisted_state in {"CANCELLED", "SUCCEEDED", "FAILED"}:
+                state = persisted_state
+            else:
+                state = "CANCELLED" if cancelled else ("SUCCEEDED" if code == 0 else "FAILED")
+            finished_at = time.time()
+            started_at = float(latest.get("started_at") or finished_at)
+            result = {
+                **latest, "job_id": job_id, "process_id": item.process_id, "pid": item.process.pid,
+                "argv": item.argv, "requested_argv": item.argv, "exec_argv": item.exec_argv,
+                "state": state, "returncode": code, "finished_at": finished_at,
+                "pid_alive": False,
+                "duration_ms": int(max(0.0, finished_at - started_at) * 1000),
+                "stdout": stdout, "stderr": stderr, "stdout_chars": stdout_size, "stderr_chars": stderr_size,
+                "stdout_bytes": stdout_size, "stderr_bytes": stderr_size,
+                "stdout_hash": stdout_hash, "stderr_hash": stderr_hash,
+                "diagnostics": _diagnostics(stdout, stderr),
+                "result_hash": hashlib.sha256((stdout_hash + ":" + stderr_hash + ":" + str(code)).encode("ascii")).hexdigest(),
+                "output_truncated": stdout_size > len(stdout.encode("utf-8", errors="replace"))
+                                    or stderr_size > len(stderr.encode("utf-8", errors="replace")),
+                "terminal": True,
+            }
+            self._write_job(job_id, result)
         self._cleanup_paths(item.cleanup_paths)
         return result
 
