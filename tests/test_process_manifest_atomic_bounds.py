@@ -223,3 +223,21 @@ def test_job_manifest_writer_rejects_nonfinite_metadata_without_file(tmp_path):
     with pytest.raises(ValueError):
         jobs._write_job("JOBONE", {"state": "RUNNING", "heartbeat_at": float("nan")})
     assert not (tmp_path / "JOBONE.json").exists()
+
+
+def test_job_manifest_writer_retries_transient_windows_replace_denial(tmp_path):
+    """Windows readers/AV can briefly deny an atomic manifest replacement."""
+    jobs = _store(tmp_path)
+    original = process_module.os.replace
+    calls = []
+
+    def transient(source, destination):
+        calls.append((source, destination))
+        if len(calls) == 1:
+            raise PermissionError(5, "temporary sharing violation", None, 5)
+        return original(source, destination)
+
+    with patch.object(process_module.os, "replace", side_effect=transient):
+        jobs._write_job("JOBONE", {"job_id": "JOBONE", "state": "RUNNING"})
+    assert len(calls) == 2
+    assert jobs._read_job("JOBONE")["state"] == "RUNNING"

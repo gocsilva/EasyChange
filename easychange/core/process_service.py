@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from dataclasses import dataclass
 
+from .atomic_files import replace_with_retry
 from .subprocess_utils import hidden_console_kwargs
 
 
@@ -581,7 +582,7 @@ class ProcessService:
                     if durable:
                         handle.flush()
                         os.fsync(handle.fileno())
-                temporary.replace(target)
+                replace_with_retry(temporary, target)
             finally:
                 if temporary is not None:
                     try:
