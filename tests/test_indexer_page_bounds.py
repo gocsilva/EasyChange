@@ -65,3 +65,17 @@ def test_legacy_100k_rename_window_and_empty_page_remain_supported(tmp_path):
         assert index.files(limit=0) == []
     finally:
         index.close()
+
+
+def test_zero_limit_remains_empty_with_protected_paths(tmp_path):
+    """A protected-path filter must not turn LIMIT 0 into one visible row."""
+    (tmp_path / "public.py").write_text("value=1\n", encoding="utf-8")
+    index = Indexer(tmp_path)
+    try:
+        index.update_path("public.py")
+        index.protect_path("secret.txt", scrub=False)
+        index._fully_indexed = True
+        assert index.files(limit=0) == []
+        assert [row["path"] for row in index.files(limit=1)] == ["public.py"]
+    finally:
+        index.close()

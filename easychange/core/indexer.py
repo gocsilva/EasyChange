@@ -560,6 +560,8 @@ class Indexer:
 
     def files(self, offset: int = 0, limit: int = 100) -> list[dict]:
         _validate_index_page(offset, limit)
+        if limit == 0:
+            return []
         self._sync_protected_paths()
         if not self._fully_indexed:
             self.refresh()
