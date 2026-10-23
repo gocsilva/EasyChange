@@ -89,6 +89,7 @@ class HumanTextService:
         decoder = codecs.getincrementaldecoder("utf-8")("strict")
         chars = 0
         newlines = 0
+        previous_cr = False
         saw_data = False
         last_byte = b""
         try:
@@ -103,7 +104,13 @@ class HumanTextService:
                     saw_data = True
                     last_byte = block[-1:]
                     digest.update(block)
-                    newlines += block.count(b"\n")
+                    # Count CR, LF and CRLF as one line boundary, including
+                    # CRLF split across two streaming read blocks.
+                    cr = block.count(b"\r")
+                    newlines += (block.count(b"\n") + cr
+                                 - (block.count(b"\r\n") if cr else 0)
+                                 - int(previous_cr and block.startswith(b"\n")))
+                    previous_cr = block.endswith(b"\r")
                     chars += len(decoder.decode(block, final=False))
                     if handle.tell()>self.max_bytes:
                         raise ValueError("HUMAN_TEXT_EXCEEDS_CONFIGURED_LIMIT")
@@ -124,7 +131,7 @@ class HumanTextService:
             raise ValueError("HUMAN_TEXT_INVALID_UTF8") from exc
 
         size = finished.st_size
-        lines = 0 if not saw_data else newlines + (0 if last_byte == b"\n" else 1)
+        lines = 0 if not saw_data else newlines + (0 if last_byte in (b"\n", b"\r") else 1)
         return {
             "exists": True,
             "bytes": size,
