@@ -441,6 +441,21 @@ def encode_result_chunks(
             not isinstance(indexes,(list,tuple))
             or len(indexes)>MAX_EC2_PACKETS):
         raise ValueError("OPTICAL_CHUNK_INDEX_REQUEST_TOO_LARGE")
+    # Reject malformed indexes before serializing/compressing a large result.
+    parsed_indexes = None
+    if indexes is not None:
+        parsed_indexes = []
+        for raw_index in indexes:
+            if (type(raw_index) is not int and
+                    not (isinstance(raw_index, str) and len(raw_index) <= 32
+                         and raw_index.strip().isdecimal())):
+                raise ValueError("invalid optical chunk index")
+            index = int(raw_index)
+            if index < 0:
+                raise IndexError("OPTICAL_CHUNK_OUT_OF_RANGE")
+            parsed_indexes.append(index)
+        if not parsed_indexes:
+            raise ValueError("at least one optical chunk index is required")
     if prepared is None:
         prepared = prepare_optical_result(result, chunk_chars=chunk_chars)
     elif not isinstance(prepared, PreparedOpticalResult):
@@ -463,19 +478,12 @@ def encode_result_chunks(
         # list membership scan (O(n^2) on long sparse windows).
         selected: list[int] = []
         seen: set[int] = set()
-        for raw_index in indexes:
-            if (type(raw_index) is not int and
-                    not (isinstance(raw_index, str) and len(raw_index) <= 32
-                         and raw_index.strip().isdecimal())):
-                raise ValueError("invalid optical chunk index")
-            index = int(raw_index)
-            if index < 0 or index >= total:
+        for index in parsed_indexes:
+            if index >= total:
                 raise IndexError("OPTICAL_CHUNK_OUT_OF_RANGE")
             if index not in seen:
                 seen.add(index)
                 selected.append(index)
-        if not selected:
-            raise ValueError("at least one optical chunk index is required")
         if max_packets is not None:
             selected = selected[:max(1, int(max_packets))]
     packets: list[str] = []
