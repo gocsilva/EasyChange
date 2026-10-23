@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QRegularExpression, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QTextCharFormat, QSyntaxHighlighter, QTextCursor
 from PySide6.QtWidgets import QPlainTextEdit, QTextEdit, QWidget
 
@@ -28,11 +28,12 @@ class BasicHighlighter(QSyntaxHighlighter):
         for word in "and as assert async await break class continue def del elif else except False finally for from global if import in is lambda None nonlocal not or pass raise return True try while with yield public private protected static void int string var const let function interface namespace using".split():
             self.rules.append((rf"\b{word}\b", keyword))
         self.rules.extend([(r"#[^\n]*", comment), (r"//[^\n]*", comment), (r"\"([^\"\\]|\\.)*\"|'([^'\\]|\\.)*'", string), (r"\b\d+(?:\.\d+)?\b", number)])
+        # Compile once per editor, not once per document line and rule.
+        self._compiled_rules = tuple((QRegularExpression(pattern), fmt) for pattern, fmt in self.rules)
 
     def highlightBlock(self, text: str) -> None:
-        from PySide6.QtCore import QRegularExpression
-        for expression, fmt in self.rules:
-            matches = QRegularExpression(expression).globalMatch(text)
+        for expression, fmt in self._compiled_rules:
+            matches = expression.globalMatch(text)
             while matches.hasNext():
                 match = matches.next()
                 self.setFormat(match.capturedStart(), match.capturedLength(), fmt)
