@@ -297,7 +297,8 @@ class HumanTextService:
             "lines": (
                 0
                 if not text
-                else text.count("\n") + (0 if text.endswith("\n") else 1)
+                else (text.count("\n") + text.count("\r") - text.count("\r\n")
+                      + (0 if text.endswith(("\n", "\r")) else 1))
             ),
             "sha256": hashlib.sha256(raw).hexdigest(),
             "updated_at": stat.st_mtime,
