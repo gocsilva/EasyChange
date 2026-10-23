@@ -241,6 +241,7 @@ class MaintenanceService:
         *,
         active_process_ids: set[str],
         referenced_blobs: set[str],
+        allow_orphan_blobs: bool,
     ) -> list[tuple[float, Path, str]]:
         """Return disposable EasyChange-owned entries, oldest first.
 
@@ -289,13 +290,15 @@ class MaintenanceService:
         except OSError:
             pass
 
-        blob_root = self.easy_root / "blobs"
-        try:
-            for path in blob_root.glob("*.zlib"):
-                if path.stem not in referenced_blobs:
-                    candidates.append((self._mtime(path), path, "orphan_blobs_pressure"))
-        except OSError:
-            pass
+        # Without a journal reference snapshot, no blob is provably orphaned.
+        if allow_orphan_blobs:
+            blob_root = self.easy_root / "blobs"
+            try:
+                for path in blob_root.glob("*.zlib"):
+                    if path.stem not in referenced_blobs:
+                        candidates.append((self._mtime(path), path, "orphan_blobs_pressure"))
+            except OSError:
+                pass
 
         # A path can appear in a TTL category and a pressure category only
         # before deletion; de-duplicate lexically here.
@@ -311,6 +314,7 @@ class MaintenanceService:
         *,
         active_process_ids: set[str],
         referenced_blobs: set[str],
+        allow_orphan_blobs: bool,
         dry_run: bool,
     ) -> None:
         evidence_before = sum(self._path_size(path) for path in self._evidence_dirs())
@@ -337,6 +341,7 @@ class MaintenanceService:
         for _mtime, path, category in self._pressure_candidates(
             active_process_ids=active_process_ids,
             referenced_blobs=referenced_blobs,
+            allow_orphan_blobs=allow_orphan_blobs,
         ):
             if projected_state <= self.max_state_bytes:
                 break
@@ -512,6 +517,7 @@ class MaintenanceService:
             report,
             active_process_ids=active_process_ids,
             referenced_blobs=referenced_blobs,
+            allow_orphan_blobs=cleanup_orphan_blobs,
             dry_run=dry_run,
         )
 
