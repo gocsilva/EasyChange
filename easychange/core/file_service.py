@@ -335,6 +335,10 @@ class FileService:
         }
 
     def replace(self, path: str, old: str, new: str, count: int = 0) -> dict:
+        if not isinstance(old, str) or not old:
+            raise ValueError("Search text must be a nonempty string")
+        if type(count) is not int or count < 0:
+            raise ValueError("Replacement count must be a nonnegative integer")
         _, relative, original = self._read_for_edit(path)
         occurrences = original.count(old)
         if not occurrences:
