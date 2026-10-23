@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import binascii
 import json
 import os
 import time
@@ -7,7 +8,10 @@ from collections import OrderedDict, deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-from easychange.remote.optical_protocol import encode_durable_result_header, encode_result_bundle
+from easychange.remote.optical_protocol import (
+    MAX_EC2_PACKETS, MAX_EC2_QR_RENDER_BYTES,
+    encode_durable_result_header, encode_result_bundle, valid_ec2_identity,
+)
 from easychange.remote.pixel_transport import encode_pixel_bitmap
 from easychange.remote.optical_raster import rasterize_optical_payload
 from easychange.remote.gatt_client import EasyChangeGattClient
@@ -64,32 +68,51 @@ def _direct_recovery_optical_payloads(result) -> list[str] | None:
         not isinstance(expected_sequence, str) or not expected_sequence
     ):
         return None
-    expected_total = None
+    expected_identity = None
     for packet in candidates:
         if not isinstance(packet, dict) or packet.get("p") != "EC2":
             return None
-        sequence = packet.get("s")
-        index, total = packet.get("i"), packet.get("n")
-        # int() silently truncates fractional chunk indices and accepts bools.
-        # Display only packets with their original, valid EC2 identity.
-        if (not isinstance(sequence, str) or not sequence
-                or type(index) is not int or type(total) is not int):
+        if not valid_ec2_identity(packet):
             return None
-        if index < 0 or total <= 0 or index >= total:
+        sequence = packet["s"]
+        index, total = packet.get("i"), packet.get("n")
+        # Preserve the exact EC2 identity; never render packets that the
+        # receiver will reject (invalid metadata, index or per-fragment CRC).
+        if (type(index) is not int or type(total) is not int
+                or not 1 <= total <= MAX_EC2_PACKETS
+                or not 0 <= index < total):
             return None
         if expected_sequence is not None and sequence != expected_sequence:
             return None
-        if expected_total is None:
-            expected_total = total
-            expected_sequence = sequence
-        elif total != expected_total or sequence != expected_sequence:
+        if "t" in packet and (type(packet["t"]) is not int or packet["t"] != 0):
+            return None
+        identity = (sequence, total, packet["h"], packet["c"], packet.get("t"))
+        if expected_identity is None:
+            expected_identity = identity
+        elif identity != expected_identity:
+            return None
+        piece = packet.get("d")
+        if type(piece) is not str:
             return None
         try:
-            payloads.append(json.dumps(
+            data_bytes = piece.encode("ascii")
+        except UnicodeEncodeError:
+            return None
+        if any(ch not in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for ch in data_bytes):
+            return None
+        if (type(packet.get("x")) is not str or
+                packet["x"] != f"{binascii.crc32(data_bytes) & 0xffffffff:08x}"):
+            return None
+        try:
+            rendered = json.dumps(
                 packet, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
-            ))
+            )
         except (TypeError, ValueError, OverflowError):
             return None
+        # A valid EC2 chunk still needs to fit the actual QR M-level capacity.
+        if len(rendered.encode("utf-8")) > MAX_EC2_QR_RENDER_BYTES:
+            return None
+        payloads.append(rendered)
     return payloads or None
 
 

@@ -264,17 +264,20 @@ def test_bounded_locate_and_recovery_results_up_to_8k_encode_inline(tmp_path, mo
     window.close(); app.processEvents()
 
 def test_optical_recovery_renders_original_packets_without_nested_envelope(tmp_path):
+    import binascii
     from easychange.core.result import Result
 
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
     packet0 = {
         "p": "EC2", "v": 2, "s": "QORIGINAL1", "i": 0, "n": 2,
-        "h": "abcd1234", "c": "11223344", "x": "55667788", "d": "AAA",
+        "h": "abcd1234abcd1234", "c": "11223344",
+        "x": f"{binascii.crc32(b'AAA') & 0xffffffff:08x}", "d": "AAA",
     }
     packet1 = {
         "p": "EC2", "v": 2, "s": "QORIGINAL1", "i": 1, "n": 2,
-        "h": "abcd1234", "c": "11223344", "x": "99aabbcc", "d": "BBB",
+        "h": "abcd1234abcd1234", "c": "11223344",
+        "x": f"{binascii.crc32(b'BBB') & 0xffffffff:08x}", "d": "BBB",
     }
     recovery = Result(
         True,

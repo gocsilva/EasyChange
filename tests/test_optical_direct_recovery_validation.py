@@ -17,7 +17,15 @@ def recovery(packets, target="QRECOVER"):
 
 
 def packet(index=0, total=2, sequence="QRECOVER"):
-    return {"p": "EC2", "s": sequence, "i": index, "n": total, "d": "test"}
+    import binascii
+
+    data = "test"
+    return {
+        "p": "EC2", "v": 2, "s": sequence, "i": index, "n": total,
+        "h": "a" * 16, "c": "b" * 8,
+        "d": data,
+        "x": f"{binascii.crc32(data.encode('ascii')) & 0xffffffff:08x}",
+    }
 
 
 def test_direct_recovery_preserves_original_noncontiguous_packets():
@@ -56,3 +64,37 @@ def test_direct_recovery_rejects_packets_not_json_serializable():
     assert _direct_recovery_optical_payloads(recovery([
         {**packet(), "d": float("nan")},
     ])) is None
+
+
+
+@pytest.mark.parametrize("field,value", [
+    ("v", 1), ("v", True),
+    ("h", "Z" * 16), ("c", "Z" * 8),
+    ("x", "00000000"), ("x", None),
+    ("d", "not-base64!"), ("t", True), ("t", 1),
+    ("n", 200001),
+])
+def test_direct_recovery_rejects_unreadable_or_unsafe_packets(field, value):
+    corrupt = packet()
+    corrupt[field] = value
+    assert _direct_recovery_optical_payloads(recovery([corrupt])) is None
+
+
+def test_direct_recovery_rejects_mixed_payload_digests():
+    left, right = packet(0, 2), packet(1, 2)
+    right["h"] = "c" * 16
+    assert _direct_recovery_optical_payloads(recovery([left, right])) is None
+
+
+def test_direct_recovery_accepts_real_crc_valid_ec2_packet():
+    from easychange.remote.optical_protocol import encode_result_chunks
+
+    actual = json.loads(encode_result_chunks({
+        "sequence": "QRECOVER", "ok": True,
+        "data": {"text": "verified recovery"},
+    })[0])
+    assert _direct_recovery_optical_payloads(recovery([actual])) == [
+        json.dumps(actual, ensure_ascii=False, separators=(",", ":"))
+    ]
+    actual["x"] = "00000000"
+    assert _direct_recovery_optical_payloads(recovery([actual])) is None
