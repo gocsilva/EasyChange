@@ -43,6 +43,8 @@ class GitService:
             branch_text = header[3:].strip()
             if branch_text.startswith("HEAD "):
                 branch = "HEAD"
+            elif branch_text.startswith(("No commits yet on ", "Initial commit on ")):
+                branch = branch_text.rsplit(" on ", 1)[-1]
             else:
                 branch = branch_text.split("...", 1)[0].split(" ", 1)[0]
         result = {"branch": branch, "changes": changes, "clean": not changes}
