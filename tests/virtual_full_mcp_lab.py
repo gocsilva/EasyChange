@@ -19,7 +19,8 @@ import time
 
 def run(mcp_source: str, mode: str = "QR", command: str = ":state --compact",
         evidence_dir: str = "", timeout: float = 24.0,
-        replay_identical: bool = False, tesseract: str = "") -> dict:
+        replay_identical: bool = False, tesseract: str = "",
+        easychange_source: str = "") -> dict:
     # The real EasyChange CommandService supports process jobs and host
     # commands. Forbid those entirely: the lab must only touch disposable
     # source/read/search or its one allowlisted output file.
@@ -31,6 +32,12 @@ def run(mcp_source: str, mode: str = "QR", command: str = ":state --compact",
     )
     if not allowed:
         raise ValueError("VIRTUAL_LAB_COMMAND_NOT_ALLOWLISTED")
+    if easychange_source:
+        source_root=Path(easychange_source).resolve()
+        if not (source_root/"easychange"/"ui"/"main_window.py").is_file():
+            raise FileNotFoundError("VIRTUAL_EASYCHANGE_SOURCE_NOT_FOUND")
+        # Run the exact chosen EasyChange source without changing the live GUI.
+        sys.path.insert(0,str(source_root))
     os.environ["QT_QPA_PLATFORM"]="offscreen"
     os.environ["QT_SCALE_FACTOR"]="1"
     import cv2
@@ -306,9 +313,11 @@ def main():
     arg.add_argument("--timeout",type=float,default=24)
     arg.add_argument("--replay-identical",action="store_true")
     arg.add_argument("--tesseract",default="")
+    arg.add_argument("--easychange-source",default="")
     args=arg.parse_args()
     result=run(args.mcp_source,args.mode,args.command,args.evidence_dir,
-               args.timeout,args.replay_identical,args.tesseract)
+               args.timeout,args.replay_identical,args.tesseract,
+               args.easychange_source)
     print(json.dumps(result,ensure_ascii=False,indent=2))
     if not result["mcp_result_complete"]:raise SystemExit(2)
     if not result["remote_executed"] or result["remote_execution_count"]!=1:

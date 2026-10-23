@@ -199,3 +199,4 @@ delivered with CRC/SHA verification for small tasks. A QR read of 900 lines
 completed via multiple durable-result recovery HID requests with a SINGLE
 original remote execution and correct content. No physical ESP/HDMI claims
 are implied by these virtual successes.
+\nFor local worktrees with concurrent edits, pass --easychange-source to test\nan exact isolated EasyChange checkout instead of the canonical directory.\n
