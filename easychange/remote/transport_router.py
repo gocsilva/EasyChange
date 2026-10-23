@@ -45,12 +45,14 @@ class TransportRouter:
 
     def gatt_heartbeat(self, *, authenticated: bool, session_id: str, now: float | None = None) -> None:
         instant = time.monotonic() if now is None else float(now)
-        if not authenticated or not str(session_id):
+        # Reject unverified/malformed session identities instead of coercing
+        # None, bytes, whitespace and truthy non-boolean authentication.
+        if authenticated is not True or not isinstance(session_id, str) or not session_id.strip():
             self.revoke_gatt()
             return
         self._gatt_authenticated = True
         self._gatt_ready_at = instant
-        self._gatt_session = str(session_id)
+        self._gatt_session = session_id
 
     def revoke_gatt(self) -> None:
         self._gatt_authenticated = False

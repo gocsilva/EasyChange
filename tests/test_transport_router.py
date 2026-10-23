@@ -1,9 +1,6 @@
 import pytest
 
-try:
-    from app.easychange_transport_router import TransportRouter, TransportUnavailable
-except ImportError:
-    from easychange.remote.transport_router import TransportRouter, TransportUnavailable
+from easychange.remote.transport_router import TransportRouter, TransportUnavailable
 
 
 def test_auto_keeps_existing_optical_without_verified_gatt():
@@ -49,3 +46,18 @@ def test_never_new_transport_after_mutation_started():
 def test_invalid_mode_rejected():
     with pytest.raises(ValueError):
         TransportRouter("UNKNOWN")
+
+@pytest.mark.parametrize("invalid_session", [None, "", "  \t", 0, b"sid", []])
+def test_invalid_gatt_session_never_enables_transport(invalid_session):
+    router = TransportRouter("AUTO")
+    router.gatt_heartbeat(authenticated=True, session_id=invalid_session, now=10)
+    assert router.select(now=11).transport == "OPTICAL"
+    router.set_mode("GATT")
+    with pytest.raises(TransportUnavailable, match="AUTHENTICATED"):
+        router.select(now=11)
+
+
+def test_gatt_requires_boolean_authentication_even_when_session_looks_valid():
+    router = TransportRouter("AUTO")
+    router.gatt_heartbeat(authenticated="false", session_id="s1", now=10)
+    assert router.select(now=11).transport == "OPTICAL"
