@@ -2213,6 +2213,13 @@ class CommandService:
                             return Result(False,query_kind,
                                           error="INVALID_CHUNK_INDEX",
                                           code="INVALID_RESULT_CHUNK")
+                        # Fail before expensive durable read and EC2 compression.
+                        from ..remote.optical_protocol import MAX_EC2_PACKETS
+                        if any(int(item) < 0 or int(item) >= MAX_EC2_PACKETS
+                               for item in raw_indexes):
+                            return Result(False,query_kind,
+                                          error="OPTICAL_CHUNK_OUT_OF_RANGE",
+                                          code="INVALID_RESULT_CHUNK")
                     original_result = self.result_store.result(target_sequence)
                     if original_result is None:
                         data = None
