@@ -208,9 +208,10 @@ class DatabaseService:
                 connection.execute("PRAGMA query_only=ON")
             cursor = connection.execute(sql)
             columns = [item[0] for item in (cursor.description or [])]
-            rows = cursor.fetchmany(max(1, min(5000, int(max_rows))) + 1) if cursor.description else []
-            truncated = len(rows) > max_rows
-            rows = rows[:max_rows]
+            limit = max(1, min(5000, int(max_rows)))
+            rows = cursor.fetchmany(limit + 1) if cursor.description else []
+            truncated = len(rows) > limit
+            rows = rows[:limit]
             if allow_write:
                 connection.commit()
             return {"provider": "sqlite", "database": _rel(self.workspace.root_path, path),
