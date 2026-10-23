@@ -478,12 +478,63 @@ class UbuntuService:
         command = Path(str(argv[0])).name.casefold()
         if command not in cls._READ_ONLY_UBUNTU:
             return False
-        lowered = [str(value).casefold() for value in argv[1:]]
-        if command == "find" and any(
-            value in {"-delete", "-exec", "-execdir", "-ok", "-okdir"}
-            for value in lowered
-        ):
-            return False
+        args = [str(value) for value in argv[1:]]
+        lowered = [value.casefold() for value in args]
+        # These binaries are not intrinsically read-only. Keep their safe
+        # inspection forms, but require explicit mutation authorization for
+        # argv that can execute commands, edit files, or change OS state.
+        if command == "env":
+            # "env PROGRAM ..." executes PROGRAM, including arbitrary writes.
+            return not args
+        if command == "yq":
+            return not any(
+                value.startswith("--inplace")
+                or (value.startswith("-") and not value.startswith("--")
+                    and "i" in value[1:])
+                for value in args
+            )
+        if command == "rg":
+            # ripgrep --pre executes the specified external preprocessor.
+            return not any(
+                value == "--pre" or value.startswith("--pre=")
+                for value in lowered
+            )
+        if command == "ip":
+            # "ip link set", "ip netns exec", "ip route replace" etc. are
+            # mutating despite being direct argv (no shell involved).
+            options = {"-4", "-6", "-s", "-d", "-br", "-j", "-p", "-o", "-c", "-t"}
+            rest = list(lowered)
+            while rest and rest[0] in options:
+                rest.pop(0)
+            if len(rest) == 1 and rest[0] in {"-h", "--help", "-v", "--version"}:
+                return True
+            nouns = {"addr", "address", "link", "route", "rule",
+                     "neigh", "neighbor", "netns", "maddr", "monitor"}
+            return bool(rest and rest[0] in nouns
+                        and (len(rest) == 1 or rest[1] in
+                             {"show", "list", "get", "monitor"}))
+        if command == "ss":
+            # -K/--kill actively terminates TCP connections.
+            return not any(
+                value.startswith("--kill")
+                or (value.startswith("-") and not value.startswith("--")
+                    and "K" in value[1:])
+                for value in args
+            )
+        if command == "hostname":
+            return all(value in {
+                "-f", "--fqdn", "-s", "--short", "-i", "--ip-address",
+                "-I", "--all-ip-addresses", "-A", "--all-fqdns",
+                "--help", "--version",
+            } for value in args)
+        if command == "date":
+            # -s / --set can change the system clock.
+            return not any(
+                value.startswith("--set")
+                or (value.startswith("-") and not value.startswith("--")
+                    and "s" in value[1:])
+                for value in args
+            )
         return True
 
     def _exec_job(
