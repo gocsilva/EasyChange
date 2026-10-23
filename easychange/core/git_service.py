@@ -120,6 +120,12 @@ class GitService:
     @staticmethod
     def _utf8_page(payload: bytes, cursor: int, max_bytes: int) -> tuple[str, int]:
         start = max(0, min(len(payload), int(cursor)))
+        # Callers may resume from an arbitrary byte cursor (for example
+        # after a changed diff). Starting on a UTF-8 continuation byte
+        # previously returned an empty page with next_cursor == cursor,
+        # permanently stalling pagination. Advance to the next valid lead.
+        while start < len(payload) and payload[start] & 0xC0 == 0x80:
+            start += 1
         end = min(len(payload), start + max(256, min(2 * 1024 * 1024, int(max_bytes))))
         if end < len(payload):
             while end > start:
