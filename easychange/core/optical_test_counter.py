@@ -7,6 +7,7 @@ remote display manifest without exporting command output or source text.
 from __future__ import annotations
 
 from collections import Counter
+from itertools import islice
 import hashlib
 import json
 import re
@@ -89,12 +90,12 @@ class OpticalTestCounter:
                 raise ValueError("INVALID_QR_TEST_LIMIT")
             # Counter retains first-display insertion order. New QR digests
             # append instead of shifting previously issued cursor offsets.
-            keys = list(self._digests)
-            part = keys[cursor:cursor+limit]
+            total = len(self._digests)
+            part = list(islice(self._digests, cursor, cursor + limit))
             return {
                 **self._summary(),
                 "manifest": [{"sha256": key, "displays": self._digests[key]} for key in part],
-                "next_cursor": cursor+len(part) if cursor+len(part) < len(keys) else None,
+                "next_cursor": cursor+len(part) if cursor+len(part) < total else None,
                 "cursor": cursor,
             }
 
