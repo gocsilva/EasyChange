@@ -125,14 +125,25 @@ def decode_pixel_frame(frame) -> list[str]:
         for x, y, w, h in candidates[:120]:
             cropped = gray[y:y+h, x:x+w]
             text = None
-            # On a white UI, the external quiet zone merges with the page
-            # background. A contour may begin at the black registration ring
-            # and exclude 1px of the encoded symbol. Preserve the original
-            # zero-padding path for existing dark-background screenshots;
-            # retry with exactly 1px border only if all CRCs failed.
+            # On a light UI the external quiet zone merges with the page.
+            # The contour then starts at the black registration ring, so the
+            # one-pixel expanded crop usually decodes on its first attempt.
+            # Prefer it only when all four surrounding corners are bright;
+            # otherwise keep the original dark-background path first.
+            # Both crops remain CRC-checked fallbacks for noisy HDMI frames.
             candidates_to_decode = [cropped]
             if x > 0 and y > 0 and x+w < width and y+h < height:
-                candidates_to_decode.append(gray[y-1:y+h+1, x-1:x+w+1])
+                expanded = gray[y-1:y+h+1, x-1:x+w+1]
+                on_light_background = (
+                    int(gray[y-1, x-1]) >= 190
+                    and int(gray[y-1, x+w]) >= 190
+                    and int(gray[y+h, x-1]) >= 190
+                    and int(gray[y+h, x+w]) >= 190
+                )
+                if on_light_background:
+                    candidates_to_decode.insert(0, expanded)
+                else:
+                    candidates_to_decode.append(expanded)
             for image in candidates_to_decode:
                 # Old 56px ECP1 first; 72px compact is a CRC-checked fallback.
                 for side in (SIDE, LARGE_SIDE):
