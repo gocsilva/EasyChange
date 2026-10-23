@@ -42,3 +42,18 @@ def test_remote_command_and_structured_audit_query(tmp_path,monkeypatch):
         assert not service.execute(":transport_log -4").ok
     finally:
         service.close()
+
+
+def test_transport_log_command_dispatch_requires_exact_token(tmp_path):
+    """Near misses must not invoke diagnostic log reader by prefix."""
+    service=CommandService(Workspace.open(tmp_path))
+    try:
+        for candidate in (":transport_logger", ":transport_logeverything 0 1"):
+            result=service.execute(candidate)
+            assert not result.ok
+            assert result.command!="transport_log"
+            assert result.code != "INVALID_TRANSPORT_LOG_REQUEST"
+        legitimate=service.execute(":transport_log 0 1")
+        assert legitimate.ok and legitimate.command=="transport_log"
+    finally:
+        service.close()

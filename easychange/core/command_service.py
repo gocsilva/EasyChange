@@ -435,7 +435,7 @@ class CommandService:
         if not raw: return Result(False, "", error="Empty command", code="INVALID_COMMAND")
         if raw.casefold().startswith(":u1 "):
             return self._execute_inbound_upload_control(raw)
-        if raw.casefold().startswith(":transport_log"):
+        if raw.split(maxsplit=1)[0].casefold() == ":transport_log":
             from easychange.core.transport_audit import snapshot, log
             tokens=raw.split()
             try:
