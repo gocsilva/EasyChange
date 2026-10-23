@@ -25,6 +25,7 @@ class OpticalTestCounter:
         self.pages = 0
         self._digests = Counter()
         self.overflow = False
+        self.non_qr_displays = 0
 
     def start(self, session_id: str) -> dict:
         if not isinstance(session_id, str) or not re.fullmatch(r"[a-f0-9]{16,40}", session_id):
@@ -40,6 +41,7 @@ class OpticalTestCounter:
             self.pages = 0
             self._digests.clear()
             self.overflow = False
+            self.non_qr_displays = 0
             return self._summary()
 
     def record(self, payloads: list[str]) -> None:
@@ -65,6 +67,11 @@ class OpticalTestCounter:
                     break
                 self._digests[digest] += 1
                 self.displays += 1
+
+    def mark_non_qr(self, count: int = 1) -> None:
+        with self._guard:
+            if self.state == "RUNNING":
+                self.non_qr_displays += max(0, int(count))
 
     def pause(self, session_id: str) -> dict:
         with self._guard:
@@ -101,5 +108,6 @@ class OpticalTestCounter:
             "qr_unique": len(self._digests),
             "pages_presented": self.pages,
             "overflow": self.overflow,
+            "non_qr_displays": self.non_qr_displays,
             "counter_semantics": "QLabel pixmap assignment, not guaranteed HDMI delivery",
         }

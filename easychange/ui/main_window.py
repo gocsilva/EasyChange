@@ -112,6 +112,7 @@ class MainWindow(QMainWindow):
         )
         self._optical_test_counter = OpticalTestCounter()
         self.service.optical_test_counter = self._optical_test_counter
+        self._optical_rendered_wire = OrderedDict()
         # Capture native handle on Qt thread (the worker must not call QWidget.winId).
         native_window_handle = int(self.winId())
         self.service.browser.set_focus_window_handle_provider(
@@ -1269,7 +1270,7 @@ class MainWindow(QMainWindow):
         label.setVisible(True)
         # Provisional durable EC2H also reaches the physical HDMI canvas.
         # Count it even if later replaced by the complete EC2 bundle.
-        self._optical_test_counter.record([payload])
+        self._record_painted_qrs([payload])
         return True
     def _update_machine_qr(self, result) -> None:
         self._optical_timer.stop()
@@ -1572,7 +1573,28 @@ class MainWindow(QMainWindow):
             return
         self._commit_optical_page(pending)
 
+    def _remember_optical_wire(self, original: str, encoded: str, kind: str) -> None:
+        mapping = self._optical_rendered_wire
+        mapping[original] = (encoded, kind)
+        mapping.move_to_end(original)
+        while len(mapping) > 64:
+            mapping.popitem(last=False)
+
+    def _record_painted_qrs(self, originals: list[str]) -> None:
+        qr_payloads = []
+        pixel_count = 0
+        for original in originals:
+            wire, kind = self._optical_rendered_wire.get(original, (original, "QR"))
+            if kind == "QR":
+                qr_payloads.append(wire)
+            else:
+                pixel_count += 1
+        self._optical_test_counter.record(qr_payloads)
+        if pixel_count:
+            self._optical_test_counter.mark_non_qr(pixel_count)
+
     def _build_optical_pixmap(self, payload: str) -> QPixmap:
+        original_payload = payload
         # The remote GUI's explicit routing choice travels inside the optical
         # EC2 data already visible to MCP. This is metadata ONLY; it cannot
         # authorize execution or change a result's durable SHA/CRC contract.
@@ -1601,6 +1623,7 @@ class MainWindow(QMainWindow):
                 # preserves 100% of the existing protocol's payload capacity.
                 pass
             else:
+                self._remember_optical_wire(original_payload, payload, "PIXEL")
                 from easychange.remote.pixel_transport import SIDE
                 image = QImage(
                     pixels, SIDE, SIDE, SIDE, QImage.Format.Format_Grayscale8
@@ -1611,6 +1634,7 @@ class MainWindow(QMainWindow):
                     Qt.AspectRatioMode.IgnoreAspectRatio,
                     Qt.TransformationMode.FastTransformation,
                 )
+        self._remember_optical_wire(original_payload, payload, "QR")
         import qrcode
         code = qrcode.QRCode(
             error_correction=qrcode.constants.ERROR_CORRECT_M,
@@ -1654,7 +1678,7 @@ class MainWindow(QMainWindow):
                 label.setPixmap(pixmap)
                 label.setVisible(True)
                 shown.append(payload)
-        self._optical_test_counter.record(shown)
+        self._record_painted_qrs(shown)
         self._optical_page = (page + 1) % page_count
         self._optical_render_pending = None
         if page_count > 1 and self._machine and self._optical_payloads:

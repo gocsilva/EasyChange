@@ -98,3 +98,32 @@ def test_real_qt_page_commit_is_counted_after_pixmap_assignment(tmp_path):
     finally:
         window.close()
         app.processEvents()
+
+def test_explicit_qr_selector_hashes_actual_painted_wire(tmp_path):
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+    from easychange.ui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    try:
+        window.remote_transport_mode = "QR"
+        window._optical_test_counter.start(SID)
+        raw = json.dumps({"p":"EC2","s":"QACTUALQR1","i":0},separators=(",",":"))
+        window._optical_payloads = [raw]
+        window._optical_header_payload = None
+        window._optical_render_generation += 1
+        window._render_optical_page()
+        for _ in range(30):
+            app.processEvents()
+            if window._optical_render_pending is None:
+                break
+        assert window._optical_render_pending is None
+        result = window._optical_test_counter.status(SID)
+        expected = json.dumps({"p":"EC2","s":"QACTUALQR1","i":0,
+                               "tm":"QR","rm":"QR"},separators=(",",":"))
+        assert result["manifest"][0]["sha256"] == hashlib.sha256(expected.encode()).hexdigest()
+        assert result["non_qr_displays"] == 0
+    finally:
+        window.close()
+        app.processEvents()
