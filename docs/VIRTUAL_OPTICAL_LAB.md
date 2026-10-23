@@ -45,3 +45,19 @@ Remaining concern: Base32 glyph recognition still fails in Tesseract at 720p.
 The simulator reproduces this limitation without impacting remote operation.
 
 No successful simulated test substitutes for physical HDMI testing later.
+
+
+## Testing a different local EasyChange checkout
+
+To avoid overwriting a locally modified official worktree, pass an explicit
+source checkout. The harness imports the selected source *inside its own
+subprocess*; neither the user's opened EasyChange nor live MCP is replaced.
+
+    tests\run_virtual_optical_lab.bat --easychange-source C:\path\to\EasyChange --mcp-source C:\path\to\MCP_PC_CONTROLLER --max-cases 1
+
+Use --start-case 3 --max-cases 2 for only the long-read and expected-error
+tests. For local Windows this option is preferred when the main checkout has
+uncommitted changes from concurrent development.
+
+The launcher changes its process working directory to the repo root so Python
+can import the actual EasyChange package, without requiring pip install.

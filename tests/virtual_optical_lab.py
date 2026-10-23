@@ -16,7 +16,15 @@ import time
 
 
 def run(*, mcp_source: str, ocr_binary: str, evidence_dir: str = "",
-        optical_width: int = 1280, optical_height: int = 720, max_cases: int = 4, start_case: int = 1) -> dict:
+        optical_width: int = 1280, optical_height: int = 720, max_cases: int = 4, start_case: int = 1,
+        easychange_source: str = "") -> dict:
+    # Import only the explicitly selected local checkout. This prevents an
+    # older/dirty canonical tree from being mistaken for the tested main.
+    if easychange_source:
+        selected=Path(easychange_source).resolve()
+        if not (selected/"easychange"/"ui"/"main_window.py").is_file():
+            raise FileNotFoundError("EASYCHANGE_SOURCE_NOT_FOUND")
+        sys.path.insert(0,str(selected))
     # Set platform before importing Qt, so no visible/remote GUI is affected.
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     os.environ["QT_SCALE_FACTOR"] = "1"
@@ -189,8 +197,9 @@ if __name__=="__main__":
     parser.add_argument("--evidence-dir",default="")
     parser.add_argument("--max-cases",type=int,default=4)
     parser.add_argument("--start-case",type=int,default=1)
+    parser.add_argument("--easychange-source",default="")
     args=parser.parse_args()
     report=run(mcp_source=args.mcp_source,ocr_binary=args.tesseract,
                evidence_dir=args.evidence_dir,max_cases=args.max_cases,
-               start_case=args.start_case)
+               start_case=args.start_case,easychange_source=args.easychange_source)
     print(json.dumps(report,ensure_ascii=False,indent=2),flush=True)

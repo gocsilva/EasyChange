@@ -13,5 +13,8 @@ if not exist "%TESSERACT%" (
   echo [FAIL] Tesseract missing: %TESSERACT%
   exit /b 3
 )
+pushd "%~dp0.."
 "%PYTHON%" "%~dp0virtual_optical_lab.py" --mcp-source "%MCP_SOURCE%" --tesseract "%TESSERACT%" %*
-exit /b %ERRORLEVEL%
+set "LAB_EXIT=%ERRORLEVEL%"
+popd
+exit /b %LAB_EXIT%
