@@ -204,3 +204,40 @@ def test_job_id_preflight_rejects_windows_devices_unicode_and_overlong_names(tmp
 def test_job_id_preflight_preserves_valid_ascii_ids(tmp_path):
     jobs = _store(tmp_path)
     assert jobs._job_path("J-abc_123") == tmp_path / "J-abc_123.json"
+
+
+@pytest.mark.parametrize("raw", [
+    '{"job_id":"JOBONE","state":"RUNNING","heartbeat_at":NaN}',
+    '{"job_id":"JOBONE","state":"RUNNING","heartbeat_at":Infinity}',
+    '{"job_id":"JOBONE","state":"RUNNING","heartbeat_at":1e999}',
+    '{"job_id":"JOBONE","state":"RUNNING","state":"SUCCEEDED"}',
+])
+def test_job_manifest_reader_rejects_ambiguous_or_nonfinite_json(tmp_path, raw):
+    jobs = _store(tmp_path)
+    (tmp_path / "JOBONE.json").write_text(raw, encoding="utf-8")
+    assert jobs._read_job("JOBONE") is None
+
+
+def test_job_manifest_writer_rejects_nonfinite_metadata_without_file(tmp_path):
+    jobs = _store(tmp_path)
+    with pytest.raises(ValueError):
+        jobs._write_job("JOBONE", {"state": "RUNNING", "heartbeat_at": float("nan")})
+    assert not (tmp_path / "JOBONE.json").exists()
+
+
+def test_job_manifest_writer_retries_transient_windows_replace_denial(tmp_path):
+    """Windows readers/AV can briefly deny an atomic manifest replacement."""
+    jobs = _store(tmp_path)
+    original = process_module.os.replace
+    calls = []
+
+    def transient(source, destination):
+        calls.append((source, destination))
+        if len(calls) == 1:
+            raise PermissionError(5, "temporary sharing violation", None, 5)
+        return original(source, destination)
+
+    with patch.object(process_module.os, "replace", side_effect=transient):
+        jobs._write_job("JOBONE", {"job_id": "JOBONE", "state": "RUNNING"})
+    assert len(calls) == 2
+    assert jobs._read_job("JOBONE")["state"] == "RUNNING"
