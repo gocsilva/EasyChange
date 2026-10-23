@@ -1871,7 +1871,10 @@ class MainWindow(QMainWindow):
 
     def preview_selected(self, current, previous=None) -> None:
         if current:
-            try: self._load_editor(self.service.files.read(current.text(0)))
+            # _load_editor only needs a path. FileService.read() would first
+            # load, decode, hash and cache the entire file, even when the
+            # editor will reject it as larger than 2 MiB.
+            try: self._load_editor({"path": current.text(0)})
             except (OSError, ValueError): pass
 
     def open_selected(self, item, column=0) -> None:
@@ -1883,14 +1886,27 @@ class MainWindow(QMainWindow):
         if not path:
             return
         target = self.service.workspace.resolve(path, must_exist=True)
-        if target.stat().st_size > 2 * 1024 * 1024:
+        limit = 2 * 1024 * 1024
+        if target.stat().st_size > limit:
             self._active_path = None
             self.editor.clear()
             self.output.setPlainText("FILE_TOO_LARGE: editor limit is 2 MiB; use :read with a line range")
             return
+        # Bound the descriptor read too: a file can grow after stat().
+        # Keep FileService's binary-file rejection when loading directly.
+        with target.open("rb") as source:
+            raw = source.read(limit + 1)
+        if len(raw) > limit:
+            self._active_path = None
+            self.editor.clear()
+            self.output.setPlainText("FILE_TOO_LARGE: editor limit is 2 MiB; use :read with a line range")
+            return
+        if b"\0" in raw:
+            raise ValueError("Binary files cannot be edited as text")
+        content = raw.decode("utf-8-sig")
         self.service.files.remember(path, replace=True)
         self._active_path = path
-        self.editor.setPlainText(target.read_text(encoding="utf-8-sig"))
+        self.editor.setPlainText(content)
         self.editor.document().setModified(False)
 
     def save_editor(self) -> None:
