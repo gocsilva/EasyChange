@@ -119,8 +119,6 @@ def test_duplicate_completion_avoids_large_result_serialization(tmp_path, monkey
 
 
 def test_cross_process_terminal_race_rechecks_claim_after_json_encoding(tmp_path, monkeypatch):
-    import easychange.core.result_store as store_module
-
     folder=tmp_path/"receipts"
     first=DurableResultStore(folder)
     second=DurableResultStore(folder)
@@ -128,17 +126,17 @@ def test_cross_process_terminal_race_rechecks_claim_after_json_encoding(tmp_path
     original={"ok":True,"sequence":seq,"data":{"writer":"first"}}
     competing={"ok":True,"sequence":seq,"data":{"writer":"second"}}
     first.claim_running(seq,"a"*64,":operation",mutation=False)
-    json_dumps=store_module.json.dumps
+    encode_result=first._encode_result_json
     injected=[]
 
-    def during_first_encoding(value, *args, **kwargs):
+    def during_first_encoding(value):
         if not injected and value is original:
             injected.append(True)
             second.complete(seq,"a"*64,":operation",competing)
-        return json_dumps(value,*args,**kwargs)
+        return encode_result(value)
 
     with monkeypatch.context() as context:
-        context.setattr(store_module.json,"dumps",during_first_encoding)
+        context.setattr(first,"_encode_result_json",during_first_encoding)
         returned=first.complete(seq,"a"*64,":operation",original)
     assert injected==[True]
     assert returned["result"]["data"]["writer"]=="second"
