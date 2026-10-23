@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 import sys
@@ -10,7 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from easychange.core.process_service import ProcessService, _durable_job_start_lock
+from easychange.core.process_service import (
+    ProcessService,
+    RunningProcess,
+    _durable_job_start_lock,
+)
 
 
 def test_structured_argv_preserves_argument_with_spaces(tmp_path, monkeypatch):
@@ -133,6 +138,198 @@ def test_job_heartbeat_updates_while_process_is_alive(tmp_path, monkeypatch):
     assert status["attached"] is True
 
     service.job_cancel("JHEART01")
+
+
+def test_failed_running_manifest_write_stops_new_child_before_raising(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+
+    class Child:
+        pid = 99991
+
+        def __init__(self):
+            self.returncode = None
+            self.terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            assert timeout is not None
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    child = Child()
+    original_write_job = service._write_job
+
+    def fail_running_manifest(job_id, data, *, durable=True):
+        if data.get("state") == "RUNNING":
+            raise OSError("MANIFEST_DISK_FULL")
+        return original_write_job(job_id, data, durable=durable)
+
+    def fake_start(argv, process_id, **_kwargs):
+        stdout = service.root / f"{process_id}.out"
+        stderr = service.root / f"{process_id}.err"
+        service._processes[process_id] = RunningProcess(
+            process_id=process_id,
+            argv=list(argv),
+            process=child,
+            stdout_path=stdout,
+            stderr_path=stderr,
+        )
+        return {"pid": child.pid, "argv": list(argv), "exec_argv": list(argv)}
+
+    monkeypatch.setattr(service, "_write_job", fail_running_manifest)
+    monkeypatch.setattr(service, "start", fake_start)
+
+    with pytest.raises(OSError, match="MANIFEST_DISK_FULL"):
+        service.job_start([sys.executable, "-c", "print('must stop')"], "JWRITEFAIL")
+
+    assert child.terminated is True
+    assert child.returncode == -15
+    assert service._read_job("JWRITEFAIL")["state"] == "CANCELLED"
+
+
+@pytest.mark.parametrize("failure_phase", ["construction", "start"])
+def test_failed_redaction_pump_setup_reaps_child_and_closes_pipes(
+    tmp_path, monkeypatch, failure_phase
+):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+
+    class Child:
+        pid = 99992
+
+        def __init__(self):
+            self.returncode = None
+            self.stdout = io.BytesIO()
+            self.stderr = io.BytesIO()
+            self.terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            assert timeout is not None
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    class FailedThread:
+        def __init__(self, **_kwargs):
+            if failure_phase == "construction":
+                raise RuntimeError("THREAD_CONSTRUCTION_FAILED")
+
+        def start(self):
+            raise RuntimeError("THREAD_START_FAILED")
+
+    child = Child()
+    monkeypatch.setattr(
+        "easychange.core.process_service.subprocess.Popen",
+        lambda *args, **kwargs: child,
+    )
+    monkeypatch.setattr(
+        "easychange.core.process_service.threading.Thread", FailedThread
+    )
+
+    expected_error = (
+        "THREAD_CONSTRUCTION_FAILED"
+        if failure_phase == "construction"
+        else "THREAD_START_FAILED"
+    )
+    with pytest.raises(RuntimeError, match=expected_error):
+        service.start(
+            [sys.executable, "-c", "print('must stop')"],
+            "JTHREADFAIL",
+            redact_values=["secret"],
+        )
+
+    assert child.terminated is True
+    assert child.returncode == -15
+    assert child.stdout.closed is True
+    assert child.stderr.closed is True
+    assert "JTHREADFAIL" not in service._processes
+
+
+def test_failed_pump_cleanup_keeps_live_pid_tracked_for_retry(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+
+    class Child:
+        pid = 99993
+
+        def __init__(self):
+            self.returncode = None
+            self.stdout = io.BytesIO()
+            self.stderr = io.BytesIO()
+            self.fail_terminate = True
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            if self.fail_terminate:
+                raise OSError("TERMINATE_DENIED")
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            assert timeout is not None
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    class FailedThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("THREAD_START_FAILED")
+
+    child = Child()
+    monkeypatch.setattr(
+        "easychange.core.process_service.subprocess.Popen",
+        lambda *args, **kwargs: child,
+    )
+    monkeypatch.setattr(
+        "easychange.core.process_service.threading.Thread", FailedThread
+    )
+
+    with pytest.raises(
+        RuntimeError, match="PROCESS_PUMP_START_FAILED_CHILD_STILL_TRACKED"
+    ):
+        service.job_start(
+            [sys.executable, "-c", "print('must remain tracked')"],
+            "JTHREADRETRY",
+            redact_values=["secret"],
+        )
+
+    assert service._processes["JTHREADRETRY"].process is child
+    manifest = service._read_job("JTHREADRETRY")
+    assert manifest["state"] == "RUNNING"
+    assert manifest["pid"] == child.pid
+
+    child.fail_terminate = False
+    assert service.job_cancel("JTHREADRETRY")["state"] == "CANCELLED"
 
 
 def test_concurrent_job_start_does_not_expose_queued_manifest_as_orphaned(

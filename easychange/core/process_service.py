@@ -835,6 +835,22 @@ class ProcessService:
                 no_window=bool(no_window),
             )
         except Exception as exc:
+            item = self._processes.get(job_id)
+            if item is not None and item.process.poll() is None:
+                # A cleanup failure during post-launch setup must still leave
+                # a truthful durable PID record for later status/cancellation.
+                started_at = time.time()
+                running = {
+                    **queued,
+                    "pid": item.process.pid,
+                    "exec_argv": list(item.exec_argv or requested_argv),
+                    "state": "RUNNING",
+                    "started_at": started_at,
+                    "heartbeat_at": started_at,
+                    "start_error": f"{type(exc).__name__}:{str(exc)[:500]}",
+                }
+                self._write_job(job_id, running)
+                raise
             failed = {
                 **queued,
                 "state": "FAILED",
@@ -854,7 +870,23 @@ class ProcessService:
             "started_at": started_at,
             "heartbeat_at": started_at,
         }
-        return self._write_job(job_id, record)
+        try:
+            return self._write_job(job_id, record)
+        except Exception as manifest_error:
+            # Do not leave a newly launched child running behind a durable
+            # QUEUED record if publishing its PID/state failed.
+            item = self._processes.get(job_id)
+            if item is not None:
+                try:
+                    if item.process.poll() is None:
+                        self.job_cancel(job_id)
+                    else:
+                        self._finalize_job(job_id, item)
+                except Exception as cleanup_error:
+                    raise RuntimeError(
+                        "JOB_RUNNING_MANIFEST_PUBLISH_FAILED_PROCESS_STATE_UNRESOLVED"
+                    ) from cleanup_error
+            raise manifest_error
 
     def job_status(self, job_id: str, *, _start_lock_held: bool = False) -> dict:
         current = self._read_job(job_id)
@@ -1662,22 +1694,63 @@ class ProcessService:
                 **popen_extra,
             )
             assert proc.stdout is not None and proc.stderr is not None
-            pump_threads = (
-                threading.Thread(
-                    target=_stream_redacted,
-                    args=(proc.stdout, stdout_path, secure_values),
-                    daemon=True,
-                    name=f"easychange-redact-out-{process_id}",
-                ),
-                threading.Thread(
-                    target=_stream_redacted,
-                    args=(proc.stderr, stderr_path, secure_values),
-                    daemon=True,
-                    name=f"easychange-redact-err-{process_id}",
-                ),
-            )
-            for thread in pump_threads:
-                thread.start()
+            started_threads = []
+            pump_threads = ()
+            try:
+                pump_threads = (
+                    threading.Thread(
+                        target=_stream_redacted,
+                        args=(proc.stdout, stdout_path, secure_values),
+                        daemon=True,
+                        name=f"easychange-redact-out-{process_id}",
+                    ),
+                    threading.Thread(
+                        target=_stream_redacted,
+                        args=(proc.stderr, stderr_path, secure_values),
+                        daemon=True,
+                        name=f"easychange-redact-err-{process_id}",
+                    ),
+                )
+                for thread in pump_threads:
+                    thread.start()
+                    started_threads.append(thread)
+            except Exception as start_error:
+                cleanup_error = None
+                try:
+                    if proc.poll() is None:
+                        proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=2)
+                except Exception as exc:
+                    cleanup_error = exc
+                finally:
+                    for thread in started_threads:
+                        thread.join(timeout=1)
+                    for stream in (proc.stdout, proc.stderr):
+                        try:
+                            stream.close()
+                        except (OSError, ValueError):
+                            pass
+                if cleanup_error is not None:
+                    self._processes[process_id] = RunningProcess(
+                        process_id=process_id,
+                        argv=requested_argv,
+                        process=proc,
+                        stdout_path=stdout_path,
+                        stderr_path=stderr_path,
+                        exec_argv=exec_argv,
+                        redact_values=secure_values,
+                        pump_threads=tuple(started_threads),
+                        cleanup_paths=cleanup_paths,
+                    )
+                    raise RuntimeError(
+                        "PROCESS_PUMP_START_FAILED_CHILD_STILL_TRACKED"
+                    ) from cleanup_error
+                self._cleanup_paths(cleanup_paths)
+                raise start_error
         else:
             stdout_file, stderr_file = stdout_path.open("wb"), stderr_path.open("wb")
             try:
