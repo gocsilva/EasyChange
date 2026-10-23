@@ -420,3 +420,29 @@ def test_machine_command_queues_update_and_keeps_receipt_visible(monkeypatch, tm
     packets, _header = encode_result_bundle(result.to_wire_dict())
     assert len(packets) == 1
     assert len(json.dumps(result.to_wire_dict(), separators=(",", ":"))) < 180
+
+
+def test_update_wait_parent_openprocess_access_denied_does_not_allow_update(monkeypatch):
+    """Access-denied is NOT proof old EasyChange GUI exited."""
+    from types import SimpleNamespace
+    kernel=SimpleNamespace(
+        OpenProcess=lambda *_:0,
+        GetLastError=lambda:5,  # ERROR_ACCESS_DENIED
+    )
+    monkeypatch.setattr(self_update.os,"name","nt")
+    monkeypatch.setattr(self_update.ctypes,"windll",SimpleNamespace(kernel32=kernel),
+                        raising=False)
+    assert self_update._wait_for_parent_exit(4567) is False
+
+
+def test_update_wait_parent_pid_not_found_permits_safe_handoff(monkeypatch):
+    """ERROR_INVALID_PARAMETER means no such parent PID exists."""
+    from types import SimpleNamespace
+    kernel=SimpleNamespace(
+        OpenProcess=lambda *_:0,
+        GetLastError=lambda:87,  # ERROR_INVALID_PARAMETER / no process
+    )
+    monkeypatch.setattr(self_update.os,"name","nt")
+    monkeypatch.setattr(self_update.ctypes,"windll",SimpleNamespace(kernel32=kernel),
+                        raising=False)
+    assert self_update._wait_for_parent_exit(4567) is True

@@ -248,7 +248,11 @@ def _wait_for_parent_exit(pid: int, timeout_seconds: int = 90) -> bool:
     synchronize = 0x00100000
     handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, int(pid))
     if not handle:
-        return True
+        # ERROR_INVALID_PARAMETER (87): the PID no longer exists.
+        # ERROR_ACCESS_DENIED (5), or any other failure, does NOT
+        # prove the GUI exited. Updating files underneath a running
+        # EasyChange instance can corrupt the handoff or freeze its UI.
+        return ctypes.windll.kernel32.GetLastError() == 87
     try:
         result = ctypes.windll.kernel32.WaitForSingleObject(
             handle, int(timeout_seconds * 1000)
