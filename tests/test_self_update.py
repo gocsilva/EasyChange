@@ -202,6 +202,7 @@ def test_update_worker_runs_github_updater_then_reopens_same_workspace(tmp_path,
     assert calls["update_argv"] == ["cmd-test.exe", "/d", "/c", str(updater.resolve())]
     assert calls["update_kwargs"]["cwd"] == str(repo.resolve())
     assert calls["update_kwargs"]["env"]["EASYCHANGE_NONINTERACTIVE"] == "1"
+    assert int(calls["update_kwargs"]["creationflags"]) & 0x08000000
     assert calls["restart_argv"] == [
         "pythonw.exe", "-m", "easychange.gui", str(workspace.resolve()), "--machine", "--hid"
     ]

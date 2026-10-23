@@ -318,6 +318,11 @@ def run_update_worker(
                 stderr=subprocess.STDOUT,
                 timeout=UPDATE_TIMEOUT_SECONDS,
                 check=False,
+                # The updater runs from a detached background Python worker.
+                # Without this flag Windows creates a *visible* cmd.exe window
+                # over EasyChange, steals HID keyboard focus and makes MCP
+                # capture only the previous EC2 QR for tens of seconds.
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
             )
             return_code = int(completed.returncode)
         except (OSError, subprocess.SubprocessError) as exc:
