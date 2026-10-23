@@ -175,14 +175,30 @@ class FileService:
             relative,stat.st_size,stat.st_mtime_ns,stat.st_dev,stat.st_ino)
         cache_hit = cached is not None
         if cached is None:
-            data = self._read_limited_text(target)
+            # An external editor can atomically replace a file between our
+            # original stat and descriptor read. Never cache old bytes using
+            # the new file's size/mtime/inode: that would make subsequent EC1
+            # reads report stale source and an incorrect edit baseline.
+            for attempt in range(2):
+                before = stat if attempt == 0 else target.stat()
+                if before.st_size > MAX_TEXT_FILE_BYTES:
+                    raise ValueError(f"File exceeds text read limit ({MAX_TEXT_FILE_BYTES} bytes)")
+                data = self._read_limited_text(target)
+                post = target.stat()
+                stamp = lambda value: (
+                    value.st_size, value.st_mtime_ns, value.st_dev, value.st_ino
+                )
+                if stamp(before) != stamp(post):
+                    if attempt == 0:
+                        continue
+                    raise OSError("FILE_CHANGED_DURING_READ")
+                break
             if b"\0" in data:
                 raise ValueError("Binary files cannot be read as text")
             if len(data) > MAX_TEXT_FILE_BYTES:
                 raise ValueError(f"File exceeds text read limit ({MAX_TEXT_FILE_BYTES} bytes)")
             lines = data.decode("utf-8-sig").splitlines()
             digest = hashlib.sha256(data).hexdigest()
-            post = target.stat()
             self._read_cache_put(
                 relative,post.st_size,post.st_mtime_ns,digest,lines,
                 device=post.st_dev,inode=post.st_ino)
