@@ -225,3 +225,35 @@ def test_tail_reader_preserves_torn_record_and_complete_recent_rows(tmp_path):
     assert len(recent) == 2000
     assert json.loads(recent[-2])["id"] == 2499
     assert recent[-1].endswith(b'\xff"}')
+
+
+
+def test_snapshot_reads_newest_rotation_first_preserving_event_order(tmp_path, monkeypatch):
+    folder = tmp_path / "audit"
+    folder.mkdir()
+    monkeypatch.setattr(audit, "ROOT", folder)
+    monkeypatch.setattr(audit, "FILE", folder / "transport_audit.jsonl")
+
+    def row(identifier):
+        return json.dumps({
+            "id": identifier, "at": "2026-10-23", "stage": "ec2_page_painted",
+            "sequence": "QORDER", "direction": "EASYCHANGE_TO_MCP",
+        }) + "\n"
+
+    audit.FILE.with_suffix(".jsonl.2").write_text(
+        row(1) + row(2), encoding="utf-8"
+    )
+    audit.FILE.with_suffix(".jsonl.1").write_text(
+        row(3) + row(4), encoding="utf-8"
+    )
+    audit.FILE.write_text(row(5) + row(6), encoding="utf-8")
+    assert [entry["id"] for entry in audit.snapshot(limit=16)["events"]] == list(range(1, 7))
+    following = audit.snapshot(after=2, limit=2)
+    assert [entry["id"] for entry in following["events"]] == [3, 4]
+    assert following["more"] is True
+
+    # The newest 2,000 physical rows completely cover the bounded snapshot.
+    audit.FILE.write_text("".join(row(number) for number in range(10, 2020)),
+                          encoding="utf-8")
+    result = audit.snapshot(limit=16)
+    assert [entry["id"] for entry in result["events"]] == list(range(2004, 2020))

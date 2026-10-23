@@ -138,13 +138,20 @@ def snapshot(after=0,limit=8,sequence="",direction=""):
         raise ValueError("INVALID_TRANSPORT_LOG_CURSOR_OR_LIMIT")
     if not isinstance(sequence,str) or len(sequence)>64 or not isinstance(direction,str) or len(direction)>40:
         raise ValueError("INVALID_TRANSPORT_LOG_FILTER")
-    rows=deque(maxlen=2000)
+    # Most sessions have >=2,000 entries in the active file. Read newest
+    # first, then older rotations only if needed; preserve the exact last
+    # 2,000 physical lines and chronological order used by the original deque.
+    rows=deque()
     with _LOCK:
-        for p in (FILE.with_suffix(".jsonl.2"),FILE.with_suffix(".jsonl.1"),FILE):
-            try:
-                with p.open("r",encoding="utf-8",errors="replace") as source:
-                    rows.extend(source)
-            except OSError:pass
+        for p in (FILE,FILE.with_suffix(".jsonl.1"),FILE.with_suffix(".jsonl.2")):
+            needed=2000-len(rows)
+            if needed<=0:
+                break
+            recent=_recent_log_lines(p,limit=needed)
+            rows.extendleft(
+                line.decode("utf-8",errors="replace")
+                for line in reversed(recent)
+            )
     found=[]
     for line in rows:
         if "\ufffd" in line:
