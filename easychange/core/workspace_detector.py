@@ -16,6 +16,7 @@ _SKIP_DIRS = {
     ".git", ".easychange", "bin", "obj", "node_modules", ".venv", "venv",
     "dist", "build", "packages", "TestResults", ".vs",
 }
+_SKIP_DIRS_FOLDED = frozenset(name.casefold() for name in _SKIP_DIRS)
 _MAX_MARKER_DEPTH = 5
 
 
@@ -51,7 +52,7 @@ def _project_markers(root: Path) -> list[tuple[str, str]]:
         dirs[:] = [
             value
             for value in dirs
-            if value not in _SKIP_DIRS
+            if value.casefold() not in _SKIP_DIRS_FOLDED
             and not value.startswith(".")
         ]
         if depth >= _MAX_MARKER_DEPTH:
