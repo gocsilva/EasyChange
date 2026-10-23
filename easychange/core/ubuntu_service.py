@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
+from urllib.parse import unquote
 
 from .process_service import ProcessService
 from .subprocess_utils import hidden_console_kwargs
@@ -978,6 +979,25 @@ class UbuntuService:
         if verb != "get":
             return
         lowered = [str(item).casefold() for item in args]
+        # kubectl get --raw bypasses the normal resource argument entirely:
+        # /api/v1/namespaces/NS/secrets/NAME returns the full Secret JSON.
+        # Inspect URL-decoded path segments, including nested %-encoding.
+        for index, option in enumerate(lowered):
+            raw_path = ""
+            if option == "--raw" and index + 1 < len(args):
+                raw_path = str(args[index + 1])
+            elif option.startswith("--raw="):
+                raw_path = str(args[index]).split("=", 1)[1]
+            if not raw_path:
+                continue
+            for _ in range(5):
+                decoded = unquote(raw_path)
+                if decoded == raw_path:
+                    break
+                raw_path = decoded
+            path_segments = raw_path.split("?", 1)[0].split("#", 1)[0].split("/")
+            if any(part.casefold() in {"secret", "secrets"} for part in path_segments):
+                raise UbuntuError("K8S_SECRET_VALUE_READ_FORBIDDEN")
         verb_index = cls._kubectl_command_index(args)
         if verb_index < 0:
             return
