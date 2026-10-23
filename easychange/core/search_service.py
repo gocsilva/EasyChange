@@ -17,7 +17,9 @@ class SearchService:
         needle = query if case_sensitive else query.casefold()
         ignored = {".git", ".venv", "venv", "node_modules", "__pycache__", ".easychange"}
         for path in self.workspace.root_path.rglob("*"):
-            if any(part in ignored for part in path.parts):
+            # Windows path matching is case-insensitive: .GIT, .VENV or
+            # .EASYCHANGE must never bypass ignored metadata/runtime dirs.
+            if any(part.casefold() in ignored for part in path.parts):
                 continue
             descriptor = -1
             try:

@@ -27,3 +27,18 @@ def test_zero_or_negative_search_limits_produce_no_file_reads(tmp_path, monkeypa
     service=SearchService(Workspace.open(project))
     assert service.search("SEARCH_LIMIT_SECRET",limit=0)==[]
     assert service.search("SEARCH_LIMIT_SECRET",limit=-8)==[]
+
+
+
+def test_search_skips_case_variant_git_and_runtime_directories(tmp_path):
+    """Case-variant ignored folders must not leak Git metadata or runtime keys."""
+    root=tmp_path/"project"
+    root.mkdir()
+    for folder in (".GIT", ".VENV", ".EASYCHANGE"):
+        path=root/folder
+        path.mkdir()
+        (path/"sensitive.txt").write_text("PRIVATE_RUNTIME_MARKER_2026",encoding="utf-8")
+    (root/"normal.py").write_text("PUBLIC_RUNTIME_MARKER_2026",encoding="utf-8")
+    workspace=Workspace(root,root.name)
+    assert SearchService(workspace).search("PRIVATE_RUNTIME_MARKER_2026")==[]
+    assert len(SearchService(workspace).search("PUBLIC_RUNTIME_MARKER_2026"))==1
