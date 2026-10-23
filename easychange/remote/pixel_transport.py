@@ -37,10 +37,10 @@ def encode_pixel_bitmap(text: str, *, side: int = SIDE) -> bytes:
         for x in range(1, side - 1):
             if x == 1 or x == side - 2 or y == 1 or y == side - 2:
                 bitmap[y * side + x] = 0
-    for index in range(data_side * data_side):
-        byte_index = index // 8
-        black = bool(byte_index < len(body) and body[byte_index] & (0x80 >> (index % 8)))
-        if black:
+    # The background is already white: only transmitted bits can be black.
+    # Avoid scanning the unused capacity on small EC2/EC2H pages.
+    for index in range(len(body) * 8):
+        if body[index // 8] & (0x80 >> (index % 8)):
             x = DATA_START + index % data_side
             y = DATA_START + index // data_side
             bitmap[y * side + x] = 0
@@ -65,18 +65,27 @@ def decode_pixel_bitmap(bitmap, *, side: int = SIDE) -> str | None:
                 return None
             if dark(n, 2) or dark(n, side - 3) or dark(2, n) or dark(side - 3, n):
                 return None
-        data = bytearray((data_side * data_side + 7) // 8)
-        for index in range(data_side * data_side):
+        # Reject incorrect magic/length after the 10-byte header rather
+        # than unpacking every unused module from every candidate contour.
+        header = bytearray(HEADER_BYTES)
+        for index in range(HEADER_BYTES * 8):
             x = DATA_START + index % data_side
             y = DATA_START + index // data_side
             if dark(x, y):
-                data[index // 8] |= 0x80 >> (index % 8)
-        if data[:4] != MAGIC:
+                header[index // 8] |= 0x80 >> (index % 8)
+        if header[:4] != MAGIC:
             return None
-        length, crc = struct.unpack(">HI", data[4:HEADER_BYTES])
+        length, crc = struct.unpack(">HI", header[4:HEADER_BYTES])
         if not 0 < length <= capacity:
             return None
-        raw = bytes(data[HEADER_BYTES:HEADER_BYTES + length])
+        payload = bytearray(length)
+        for bit in range(length * 8):
+            index = HEADER_BYTES * 8 + bit
+            x = DATA_START + index % data_side
+            y = DATA_START + index // data_side
+            if dark(x, y):
+                payload[bit // 8] |= 0x80 >> (bit % 8)
+        raw = bytes(payload)
         if binascii.crc32(raw) & 0xffffffff != crc:
             return None
         return raw.decode("utf-8")
