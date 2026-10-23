@@ -10,61 +10,71 @@ import binascii
 import struct
 
 SIDE = 56
+LARGE_SIDE = 72
 DATA_START = 3
 DATA_SIDE = SIDE - 2 * DATA_START
 MAGIC = b"ECP1"
 HEADER_BYTES = 10
 MAX_PAYLOAD = (DATA_SIDE * DATA_SIDE) // 8 - HEADER_BYTES
+LARGE_MAX_PAYLOAD = ((LARGE_SIDE - 2 * DATA_START) ** 2) // 8 - HEADER_BYTES
 
 
-def encode_pixel_bitmap(text: str) -> bytes:
-    """Return 56x56 grayscale image pixels, black=0 and white=255."""
+def encode_pixel_bitmap(text: str, *, side: int = SIDE) -> bytes:
+    """Return 56x56 or 72x72 grayscale pixels without changing ECP1 wire bytes."""
+    if type(side) is not int or side not in (SIDE, LARGE_SIDE):
+        raise ValueError("PIXEL_SIDE_INVALID")
     if not isinstance(text, str):
         raise TypeError("PIXEL_PACKET_MUST_BE_TEXT")
+    data_side = side - 2 * DATA_START
+    capacity = data_side * data_side // 8 - HEADER_BYTES
     payload = text.encode("utf-8")
-    if not payload or len(payload) > MAX_PAYLOAD:
+    if not payload or len(payload) > capacity:
         raise ValueError("PIXEL_PACKET_CAPACITY_EXCEEDED")
     body = MAGIC + struct.pack(">HI", len(payload), binascii.crc32(payload) & 0xffffffff) + payload
-    bitmap = bytearray([255]) * (SIDE * SIDE)
+    bitmap = bytearray([255]) * (side * side)
     # White outer quiet zone, solid black registration ring, white separator.
-    for y in range(1, SIDE - 1):
-        for x in range(1, SIDE - 1):
-            if x == 1 or x == SIDE - 2 or y == 1 or y == SIDE - 2:
-                bitmap[y * SIDE + x] = 0
-    for index in range(DATA_SIDE * DATA_SIDE):
+    for y in range(1, side - 1):
+        for x in range(1, side - 1):
+            if x == 1 or x == side - 2 or y == 1 or y == side - 2:
+                bitmap[y * side + x] = 0
+    for index in range(data_side * data_side):
         byte_index = index // 8
         black = bool(byte_index < len(body) and body[byte_index] & (0x80 >> (index % 8)))
         if black:
-            x = DATA_START + index % DATA_SIDE
-            y = DATA_START + index // DATA_SIDE
-            bitmap[y * SIDE + x] = 0
+            x = DATA_START + index % data_side
+            y = DATA_START + index // data_side
+            bitmap[y * side + x] = 0
     return bytes(bitmap)
 
 
-def decode_pixel_bitmap(bitmap) -> str | None:
-    """Validate registration, length and CRC; accept no unauthenticated payload."""
+def decode_pixel_bitmap(bitmap, *, side: int = SIDE) -> str | None:
+    """Validate registration, length and CRC on either bounded ECP1 cell."""
+    if type(side) is not int or side not in (SIDE, LARGE_SIDE):
+        return None
+    data_side = side - 2 * DATA_START
+    capacity = data_side * data_side // 8 - HEADER_BYTES
     try:
-        if len(bitmap) != SIDE * SIDE:
+        if len(bitmap) != side * side:
             return None
-        dark = lambda x, y: int(bitmap[y * SIDE + x]) < 128
-        for n in (3, 8, 20, 35, SIDE - 4):
-            if not (dark(n, 1) and dark(n, SIDE - 2)
-                    and dark(1, n) and dark(SIDE - 2, n)):
+        dark = lambda x, y: int(bitmap[y * side + x]) < 128
+        for n in (3, 8, 20, 35, side - 4):
+            if not (dark(n, 1) and dark(n, side - 2)
+                    and dark(1, n) and dark(side - 2, n)):
                 return None
-            if dark(n, 0) or dark(n, SIDE - 1) or dark(0, n) or dark(SIDE - 1, n):
+            if dark(n, 0) or dark(n, side - 1) or dark(0, n) or dark(side - 1, n):
                 return None
-            if dark(n, 2) or dark(n, SIDE - 3) or dark(2, n) or dark(SIDE - 3, n):
+            if dark(n, 2) or dark(n, side - 3) or dark(2, n) or dark(side - 3, n):
                 return None
-        data = bytearray((DATA_SIDE * DATA_SIDE + 7) // 8)
-        for index in range(DATA_SIDE * DATA_SIDE):
-            x = DATA_START + index % DATA_SIDE
-            y = DATA_START + index // DATA_SIDE
+        data = bytearray((data_side * data_side + 7) // 8)
+        for index in range(data_side * data_side):
+            x = DATA_START + index % data_side
+            y = DATA_START + index // data_side
             if dark(x, y):
                 data[index // 8] |= 0x80 >> (index % 8)
         if data[:4] != MAGIC:
             return None
         length, crc = struct.unpack(">HI", data[4:HEADER_BYTES])
-        if not 0 < length <= MAX_PAYLOAD:
+        if not 0 < length <= capacity:
             return None
         raw = bytes(data[HEADER_BYTES:HEADER_BYTES + length])
         if binascii.crc32(raw) & 0xffffffff != crc:
@@ -103,11 +113,22 @@ def decode_pixel_frame(frame) -> list[str]:
         seen = set()
         for x, y, w, h in candidates[:120]:
             cropped = gray[y:y+h, x:x+w]
-            small = cv2.resize(cropped, (SIDE, SIDE), interpolation=cv2.INTER_AREA)
-            text = decode_pixel_bitmap(small.ravel())
+            text = None
+            # Old 56px wire format first; the 72px compact option is
+            # attempted only on a failed CRC, never assumed from GUI mode.
+            for side in (SIDE, LARGE_SIDE):
+                for interpolation in (cv2.INTER_AREA, cv2.INTER_LINEAR):
+                    small = cv2.resize(cropped, (side, side), interpolation=interpolation)
+                    text = decode_pixel_bitmap(small.ravel(), side=side)
+                    if text is not None:
+                        break
+                if text is not None:
+                    break
             if text is not None and text not in seen:
                 found.append(text)
                 seen.add(text)
-        return found[:32]
+                if len(found) >= 32:
+                    break
+        return found
     except (cv2.error, ValueError, TypeError, MemoryError):
         return []
