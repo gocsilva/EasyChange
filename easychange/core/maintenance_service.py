@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -220,6 +221,8 @@ class MaintenanceService:
         try:
             configured = float(value.get(key) or fallback)
         except (TypeError, ValueError):
+            configured = float(fallback)
+        if not math.isfinite(configured):
             configured = float(fallback)
         return max(1.0, configured)
     @classmethod
