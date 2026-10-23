@@ -7,12 +7,13 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from easychange.remote.optical_protocol import encode_durable_result_header, encode_result_bundle
+from easychange.remote.pixel_transport import encode_pixel_bitmap
 from easychange.remote.gatt_client import EasyChangeGattClient
 from easychange.ui.gatt_diagnostic_window import GattDiagnosticWindow
 
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QMessageBox, QPushButton, QSpinBox,
                                QPlainTextEdit, QSplitter, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
@@ -310,8 +311,21 @@ class MainWindow(QMainWindow):
             "nem alterar a configuracao do Windows.")
         self.gatt_retry_button.clicked.connect(self._retry_gatt_connection)
         self.gatt_retry_button.setEnabled(False)
+        # Remote operator chooses the route/optical format. Bluetooth remains
+        # independently opt-in and never starts merely because the GUI opens.
+        self.remote_transport_mode = "AUTO"
+        self.remote_transport_selector = QComboBox()
+        self.remote_transport_selector.setObjectName("easychangeRemoteTransportMode")
+        self.remote_transport_selector.addItems(["AUTO", "GATT", "QR", "PIXEL"])
+        self.remote_transport_selector.setToolTip(
+            "AUTO usa GATT se autenticado e QR como retorno visual; QR conserva "
+            "o EC2 atual; PIXEL desenha os mesmos pacotes EC2 em celulas ECP1. "
+            "A leitura MCP aceita ambos sem alterar comandos nem ESP.")
+        self.remote_transport_selector.currentTextChanged.connect(
+            self._set_remote_transport_mode)
         gatt_status_row = QHBoxLayout()
         gatt_status_row.addWidget(self._gatt_status, 1)
+        gatt_status_row.addWidget(self.remote_transport_selector)
         gatt_status_row.addWidget(self.gatt_toggle_button)
         gatt_status_row.addWidget(self.gatt_retry_button)
         gatt_status_row.addWidget(self.gatt_diagnostic_button)
@@ -833,6 +847,30 @@ class MainWindow(QMainWindow):
             self._queue_machine_command(text)
         else:
             self._run_command(text)
+
+    def _set_remote_transport_mode(self, value: str) -> None:
+        """Change only how this GUI presents results, never replay a command.
+
+        The MCP recognizes ECP1 or EC2 QR from HDMI, so a remote operator's
+        choice takes effect even if the local selection has not been refreshed.
+        """
+        chosen = str(value or "").upper()
+        if chosen not in {"AUTO", "QR", "PIXEL", "GATT"}:
+            return
+        self.remote_transport_mode = chosen
+        # An explicit GATT selection is an operator request to enable it;
+        # never start Bluetooth on the default AUTO GUI launch.
+        if chosen == "GATT" and not self._gatt_enabled:
+            self._enable_gatt_connection()
+        self._optical_timer.stop()
+        self._optical_render_generation += 1
+        self._optical_render_pending = None
+        self._optical_pixmaps.clear()
+        self._optical_page = 0
+        # Existing EC2 packets remain valid and can be repainted without
+        # invoking CommandService or executing the original mutation again.
+        if self._machine and self._optical_payloads:
+            self._render_optical_page()
 
     def _toggle_gatt_connection(self) -> None:
         if self._gatt_enabled:
@@ -1508,6 +1546,24 @@ class MainWindow(QMainWindow):
         self._commit_optical_page(pending)
 
     def _build_optical_pixmap(self, payload: str) -> QPixmap:
+        if getattr(self, "remote_transport_mode", "AUTO") == "PIXEL":
+            try:
+                pixels = encode_pixel_bitmap(payload)
+            except ValueError:
+                # Large legacy EC2/EC2H packets remain QR readable. This
+                # preserves 100% of the existing protocol's payload capacity.
+                pass
+            else:
+                from easychange.remote.pixel_transport import SIDE
+                image = QImage(
+                    pixels, SIDE, SIDE, SIDE, QImage.Format.Format_Grayscale8
+                ).copy()
+                label = self.machine_qrs[0]
+                return QPixmap.fromImage(image).scaled(
+                    label.width(), label.height(),
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.FastTransformation,
+                )
         import qrcode
         code = qrcode.QRCode(
             error_correction=qrcode.constants.ERROR_CORRECT_M,
