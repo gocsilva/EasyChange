@@ -494,3 +494,27 @@ def test_self_update_same_checkout_different_workspace_reuses_worker(tmp_path,mo
     assert len(launches)==1
     assert second.get("already_scheduled") is True
     assert second["workspace"]==str(workspace_a.resolve())
+
+
+def test_oversized_update_receipt_is_rejected_without_git_or_worker_handoff(tmp_path, monkeypatch):
+    """Corrupt local receipts must not force unbounded JSON reads on GUI status."""
+    receipt_path = tmp_path / "update-receipt.json"
+    root = tmp_path / "repo"
+    root.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    receipt_path.write_text(json.dumps({
+        "schema": self_update.UPDATE_RECEIPT_SCHEMA,
+        "repo_root": str(root),
+        "workspace": str(workspace),
+        "state": "SCHEDULED",
+        "started_at_utc": self_update._utc_now(),
+        "padding": "X" * 100_000,
+    }), encoding="utf-8")
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "_read_git_revisions",
+                        lambda *_args: (_ for _ in ()).throw(AssertionError("NO_GIT_ON_INVALID_RECEIPT")))
+    status = self_update.read_update_status(repo_root=root)
+    assert status["receipt_available"] is False
+    assert status["state"] == "UPDATE_RECEIPT_UNREADABLE"
+    assert self_update._active_update_handoff(root, workspace) is None

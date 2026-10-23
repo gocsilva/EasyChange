@@ -20,6 +20,7 @@ from typing import Callable, Sequence
 RESTART_GRACE_SECONDS = 45
 UPDATE_TIMEOUT_SECONDS = 900
 UPDATE_RECEIPT_SCHEMA = "easychange.update_receipt.v1"
+MAX_UPDATE_RECEIPT_BYTES = 64 * 1024
 _SCHEDULE_LOCK = threading.RLock()
 
 
@@ -61,6 +62,15 @@ def _write_update_receipt(receipt: dict) -> None:
         raise
 
 
+def _read_update_receipt_bounded(path: Path) -> dict:
+    """Read a local update receipt without trusting its on-disk byte size."""
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_UPDATE_RECEIPT_BYTES + 1)
+    if len(raw) > MAX_UPDATE_RECEIPT_BYTES:
+        raise ValueError("UPDATE_RECEIPT_SIZE_LIMIT")
+    return json.loads(raw.decode("utf-8"))
+
+
 def _read_git_revisions(repo_root: str | Path) -> dict:
     try:
         completed = subprocess.run(
@@ -87,10 +97,10 @@ def read_update_status(*, repo_root: str | Path | None = None) -> dict:
     """Return the latest self-update receipt and compare it with the checkout."""
     path = update_receipt_path()
     try:
-        receipt = json.loads(path.read_text(encoding="utf-8"))
+        receipt = _read_update_receipt_bounded(path)
     except FileNotFoundError:
         return {"receipt_available": False, "state": "NO_UPDATE_RECEIPT"}
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         return {
             "receipt_available": False,
             "state": "UPDATE_RECEIPT_UNREADABLE",
@@ -141,7 +151,7 @@ def schedule_self_update(
 
 def _active_update_handoff(root: Path, workspace: Path) -> dict | None:
     try:
-        existing = json.loads(update_receipt_path().read_text(encoding="utf-8"))
+        existing = _read_update_receipt_bounded(update_receipt_path())
         if not isinstance(existing, dict):
             return None
         if (existing.get("schema") != UPDATE_RECEIPT_SCHEMA
@@ -269,7 +279,7 @@ def _schedule_self_update_once(
     scheduled_receipt["worker_pid"] = int(getattr(worker, "pid", 0) or 0) or None
     try:
         receipt_path = update_receipt_path()
-        latest = json.loads(receipt_path.read_text(encoding="utf-8"))
+        latest = _read_update_receipt_bounded(receipt_path)
         if (
             isinstance(latest, dict)
             and latest.get("schema") == UPDATE_RECEIPT_SCHEMA
@@ -283,7 +293,7 @@ def _schedule_self_update_once(
         # with RUNNING and its final update outcome when it begins. Do not
         # overwrite a newer worker receipt if the detached child started fast.
         pass
-    except (UnicodeError, json.JSONDecodeError):
+    except (UnicodeError, ValueError, json.JSONDecodeError):
         pass
     log.close()
     return {
