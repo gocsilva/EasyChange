@@ -120,3 +120,28 @@ def test_durable_output_pages_do_not_split_utf8_codepoints(tmp_path, monkeypatch
         else:
             raise AssertionError("UTF-8 paging did not terminate")
         assert "".join(reconstructed).encode("utf-8") == payload
+
+
+def test_job_log_pages_reject_hardlinks_to_foreign_files(tmp_path, monkeypatch):
+    """Remote EC2 log retrieval must not expose an aliased private file."""
+    import os
+    import pytest
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+    output_id = "JHARDLINK01"
+    private = tmp_path / "private.txt"
+    private.write_text("SENSITIVE_FOREIGN_CONTENT", encoding="utf-8")
+    alias = service.root / f"{output_id}.out"
+    try:
+        os.link(private, alias)
+    except OSError as exc:
+        pytest.skip(f"hardlinks unavailable on this filesystem: {exc}")
+    monkeypatch.setattr(service, "_read_job", lambda _job_id: {"state": "SUCCEEDED"})
+
+    page = service.job_logs(output_id)
+    assert "SENSITIVE_FOREIGN_CONTENT" not in page["text"]
+    with pytest.raises(LookupError):
+        service.run_output(output_id)

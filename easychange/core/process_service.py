@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import shutil
+import stat
 import tempfile
 from heapq import nlargest
 from itertools import islice
@@ -75,6 +76,33 @@ def _read_utf8_page(handle, start: int, page_bytes: int, total: int) -> bytes:
         if pending and len(pending) < len(raw):
             raw = raw[:-len(pending)]
     return raw
+
+
+def _read_verified_log_page(path: Path, cursor: int, page_bytes: int) -> tuple[int, int, bytes]:
+    """Page only an owned regular output file, never a symlink or hardlink."""
+    if path.is_symlink():
+        raise OSError("UNSAFE_PROCESS_OUTPUT_LINK")
+    flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0)
+             | getattr(os, "O_NOFOLLOW", 0)
+             | (getattr(os, "O_NONBLOCK", 0) if os.name == "posix" else 0))
+    fd = os.open(path, flags)
+    try:
+        handle = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    with handle:
+        opened = os.fstat(handle.fileno())
+        named = path.lstat()
+        if (not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(named.st_mode)
+                or opened.st_nlink != 1 or named.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+            raise OSError("UNSAFE_PROCESS_OUTPUT_FILE")
+        total = handle.seek(0, 2)
+        start = min(max(0, cursor), total)
+        raw = _read_utf8_page(handle, start, page_bytes, total)
+        return total, start, raw
 
 
 def _stream_redacted(source, target_path: Path, values) -> None:
@@ -783,10 +811,7 @@ class ProcessService:
         )
         if path.exists():
             try:
-                with path.open("rb") as handle:
-                    total = handle.seek(0, 2)
-                    start = min(cursor, total)
-                    raw = _read_utf8_page(handle, start, page_bytes, total)
+                total, start, raw = _read_verified_log_page(path, cursor, page_bytes)
             except OSError:
                 raw = b""
                 total = 0
@@ -1588,10 +1613,7 @@ class ProcessService:
         cursor = max(0, int(cursor or 0))
         page_bytes = max(256, min(1024 * 1024, int(max_bytes or 16384)))
         try:
-            with path.open("rb") as handle:
-                total = handle.seek(0, 2)
-                start = min(cursor, total)
-                raw = _read_utf8_page(handle, start, page_bytes, total)
+            total, start, raw = _read_verified_log_page(path, cursor, page_bytes)
         except OSError as exc:
             raise LookupError(f"Run output not found: {output_id}") from exc
         next_cursor = start + len(raw)
