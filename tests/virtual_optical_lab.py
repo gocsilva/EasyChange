@@ -15,7 +15,7 @@ import tempfile
 import time
 
 
-def run(*, mcp_source: str, ocr_binary: str, evidence_dir: str = "",
+def run(*, mcp_source: str = "", ocr_binary: str = "tesseract", evidence_dir: str = "",
         optical_width: int = 1280, optical_height: int = 720, max_cases: int = 4, start_case: int = 1,
         easychange_source: str = "") -> dict:
     # Import only the explicitly selected local checkout. This prevents an
@@ -37,23 +37,64 @@ def run(*, mcp_source: str, ocr_binary: str, evidence_dir: str = "",
     from easychange.core.workspace import Workspace
     from easychange.ui.main_window import MainWindow
 
-    # Import the REAL MCP optical reader, with the real EasyChange running
-    # inside this subprocess. No call is made to the MCP network/host.
-    mcp_root = Path(mcp_source).resolve()
-    if not (mcp_root / "mcp_server" / "easychange_tools.py").is_file():
-        raise FileNotFoundError("MCP_SOURCE_REQUIRED")
-    sys.path.insert(0, str(mcp_root))
-    from mcp_server.easychange_tools import (
-        _active_machine_mode_status, _decode_ubuntu_ocr_lines
-    )
-    from capture.local_vision import TesseractCLIProvider
-
-    provider = TesseractCLIProvider(ocr_binary)
+    # True MCP decoder is used when its private source is accessible.
+    # Public EasyChange CI uses the independent published wire-contract
+    # oracle. The private source is NEVER fetched into public CI.
+    if mcp_source:
+        mcp_root=Path(mcp_source).resolve()
+        if not (mcp_root/"mcp_server"/"easychange_tools.py").is_file():
+            raise FileNotFoundError("MCP_SOURCE_REQUIRED")
+        sys.path.insert(0,str(mcp_root))
+        from mcp_server.easychange_tools import (
+            _active_machine_mode_status, _decode_ubuntu_ocr_lines
+        )
+        from capture.local_vision import TesseractCLIProvider
+        provider=TesseractCLIProvider(ocr_binary)
+        decoder="real-private-mcp"
+    else:
+        sys.path.insert(0,str(Path(__file__).resolve().parent))
+        from virtual_optical_contract import (
+            focus_valid as _active_machine_mode_status,
+            decode_lines as _decode_ubuntu_ocr_lines,
+        )
+        import subprocess
+        from types import SimpleNamespace
+        class PublicTesseractProvider:
+            """MCP-equivalent 720p preprocessing, no private code or service."""
+            def __init__(self, executable):
+                self.executable=executable
+            def available(self):
+                return bool(self.executable)
+            def recognize(self, frame, timeout, profile="terminal_code_25x6"):
+                factor=3 if "3x" in profile else 2.5
+                gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY) if frame.ndim==3 else frame
+                gray=cv2.resize(gray,None,fx=factor,fy=factor,
+                                interpolation=cv2.INTER_CUBIC)
+                if float(gray.mean())<127:gray=cv2.bitwise_not(gray)
+                gray=cv2.threshold(gray,0,255,
+                    cv2.THRESH_BINARY+cv2.THRESH_OTSU)[1]
+                ok,data=cv2.imencode(".png",gray)
+                if not ok:raise RuntimeError("VIRTUAL_OCR_IMAGE_ENCODING_FAILED")
+                cmd=[self.executable,"stdin","stdout","-l","eng","--psm","6"]
+                out=subprocess.run(cmd,input=data.tobytes(),capture_output=True,
+                                   timeout=max(.1,float(timeout)),check=True)
+                return SimpleNamespace(text=out.stdout.decode("utf8",errors="replace"),
+                                       confidence=0.0)
+        provider=PublicTesseractProvider(ocr_binary)
+        decoder="public-wire-contract"
     if not provider.available():
         raise RuntimeError("TESSERACT_NOT_AVAILABLE_IN_LAB")
     app = QApplication.instance() or QApplication([])
-    loaded=QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\consola.ttf")
-    if loaded<0: raise RuntimeError("LAB_FONT_NOT_AVAILABLE")
+    font_candidates=(
+        Path(r"C:\Windows\Fonts\consola.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+        Path("/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf"),
+    )
+    font_file=next((p for p in font_candidates if p.is_file()),None)
+    if font_file is None:raise RuntimeError("LAB_MONOSPACED_FONT_NOT_AVAILABLE")
+    loaded=QFontDatabase.addApplicationFont(str(font_file))
+    if loaded<0:raise RuntimeError("LAB_FONT_LOAD_FAILED")
+    family=QFontDatabase.applicationFontFamilies(loaded)[0]
     evidence = Path(evidence_dir).resolve() if evidence_dir else None
     if evidence:
         evidence.mkdir(parents=True, exist_ok=True)
@@ -78,7 +119,7 @@ def run(*, mcp_source: str, ocr_binary: str, evidence_dir: str = "",
         window.show()
         app.processEvents()
         window.remote_transport_selector.setCurrentText("UBUNTU")
-        output_font=QFont("Consolas")
+        output_font=QFont(family)
         output_font.setPixelSize(17)
         output_font.setWeight(QFont.Weight.DemiBold)
         window.output.setFont(output_font)
@@ -156,6 +197,7 @@ def run(*, mcp_source: str, ocr_binary: str, evidence_dir: str = "",
                 )
                 parsed,attempts=ocr_read(frame,sequence)
                 entry={
+                    "decoder":decoder,
                     "qt_native_size":[window.width(),window.height()],
                     "sequence":sequence,"command":command,
                     "executed":True,"service_ok":bool(result.ok),
@@ -179,6 +221,7 @@ def run(*, mcp_source: str, ocr_binary: str, evidence_dir: str = "",
                         (parsed.get("data") or {}).get("payload_truncated"))
                 measurements.append(entry)
             return {
+                "decoder":decoder,
                 "isolated":True,"physical_transport_used":physical_transport_used,
                 "virtual_esp_commands":sent_by_esp,
                 "workspace_kind":window.service.workspace.kind,
@@ -192,8 +235,10 @@ def run(*, mcp_source: str, ocr_binary: str, evidence_dir: str = "",
 
 if __name__=="__main__":
     parser=argparse.ArgumentParser()
-    parser.add_argument("--mcp-source",required=True)
-    parser.add_argument("--tesseract",required=True)
+    parser.add_argument("--mcp-source",default="")
+    parser.add_argument("--tesseract",default="tesseract")
+    parser.add_argument("--strict-ocr",action="store_true",
+                        help="Fail if any simulated HDMI OCR result fails CRC32")
     parser.add_argument("--evidence-dir",default="")
     parser.add_argument("--max-cases",type=int,default=4)
     parser.add_argument("--start-case",type=int,default=1)
@@ -203,3 +248,11 @@ if __name__=="__main__":
                evidence_dir=args.evidence_dir,max_cases=args.max_cases,
                start_case=args.start_case,easychange_source=args.easychange_source)
     print(json.dumps(report,ensure_ascii=False,indent=2),flush=True)
+    cases=report["reports"]
+    # Safety-critical protocol regressions always fail CI.
+    if not cases or any(not r["virtual_hid_confirmed"]
+                        or not r["qt_frame_has_envelope"]
+                        or not r["direct_frame_crc_valid"] for r in cases):
+        raise SystemExit(2)
+    if args.strict_ocr and any(not r["ocr_crc_valid"] for r in cases):
+        raise SystemExit(3)

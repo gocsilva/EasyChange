@@ -1,0 +1,139 @@
+name: EasyChange Virtual ESP-HDMI-MCP Laboratory
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      strict_ocr:
+        description: Fail if any 720p OCR receipt fails CRC32
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      source_kind:
+        type: string
+        required: true
+      strict_ocr:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: optical-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  virtual-optical:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QT_SCALE_FACTOR: '1'
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - name: Checkout caller repository at triggering commit
+        uses: actions/checkout@v4
+        with:
+          path: component
+          persist-credentials: false
+      - name: Checkout latest public EasyChange virtual lab
+        uses: actions/checkout@v4
+        with:
+          repository: gocsilva/EasyChange
+          ref: main
+          path: easychange
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated GUI and optical dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr fonts-dejavu-core libgl1 libglib2.0-0
+          python -m pip install -U pip
+          python -m pip install -e './easychange[gui,dev]' opencv-python-headless 'numpy>=1.26,<2'
+      - name: Identify caller and install component dependencies
+        shell: bash
+        env:
+          KIND: ${{ inputs.source_kind }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$KIND" && "$GITHUB_REPOSITORY" == "gocsilva/EasyChange" ]]; then KIND=easychange; fi
+          case "$KIND" in easychange|mcp|esp) ;; *) echo "Unknown caller" >&2; exit 2 ;; esac
+          echo "LAB_KIND=$KIND" >> "$GITHUB_ENV"
+          if [[ "$KIND" == "mcp" ]]; then
+            python -m pip install 'mcp>=1.9,<2' 'jsonschema>=4.20,<5' 'psutil>=6,<8' \
+              'pyserial>=3.5,<4' 'requests>=2.32,<3' 'websocket-client>=1.8,<2' \
+              'zxing-cpp>=3.1,<4' 'qrcode[pil]>=8' 'cryptography>=42,<51' \
+              'pypdf>=6' 'rapidocr>=2,<3' 'onnxruntime>=1.17,<2'
+          elif [[ "$KIND" == "esp" ]]; then
+            python -m pip install 'pyserial>=3.5,<4'
+          fi
+      - name: Test public optical wire contract
+        run: python -m pytest -q easychange/tests/test_virtual_optical_contract.py
+      - name: Test real private MCP optical decoder
+        if: env.LAB_KIND == 'mcp'
+        run: |
+          python -m pytest -q \
+            component/tests/test_virtual_optical_focus_header.py \
+            component/tests/test_easychange_ubuntu_ocr_transport.py
+      - name: Test ESP serial host bridge without USB
+        if: env.LAB_KIND == 'esp'
+        run: |
+          python -m pytest -q \
+            component/tests/test_serial_port_state.py \
+            component/tests/test_serial_target_preflight.py
+      - name: Exercise actual EasyChange GUI through virtual HID HDMI and OCR
+        shell: bash
+        env:
+          STRICT_OCR: ${{ inputs.strict_ocr }}
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          args=(--tesseract /usr/bin/tesseract --max-cases 4
+                --easychange-source "$GITHUB_WORKSPACE/easychange"
+                --evidence-dir "$GITHUB_WORKSPACE/reports")
+          if [[ "$LAB_KIND" == "easychange" ]]; then
+            args+=(--easychange-source "$GITHUB_WORKSPACE/component")
+          elif [[ "$LAB_KIND" == "mcp" ]]; then
+            args+=(--mcp-source "$GITHUB_WORKSPACE/component")
+          fi
+          if [[ "$STRICT_OCR" == "true" ]]; then args+=(--strict-ocr); fi
+          python easychange/tests/virtual_optical_lab.py "${args[@]}" > reports/optical-report.json
+      - name: Report validated CRC and unresolved OCR failures
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          p=Path("reports/optical-report.json")
+          lines=["## Virtual ESP-HDMI-MCP Optical Lab", ""]
+          if p.is_file():
+              try:
+                  data=json.loads(p.read_text(encoding="utf8"))
+                  lines.extend(["Decoder: **"+data.get("decoder","unknown")+"**","",
+                                "| Case | Direct CRC | OCR focus | OCR CRC |",
+                                "|---|---|---|---|"])
+                  for r in data.get("reports",[]):
+                      status=lambda k: "PASS" if r.get(k) else "FAIL"
+                      lines.append(f"| {r['sequence']} | {status('direct_frame_crc_valid')} | {status('ocr_focus_valid')} | {status('ocr_crc_valid')} |")
+                      if not r.get("ocr_crc_valid"):
+                          print(f"::warning title=Unverified Ubuntu OCR::CRC32 failed on {r['sequence']}; receipt rejected")
+              except Exception as e:
+                  lines.append("Invalid report: "+type(e).__name__)
+          else:
+              lines.append("No report: see failed workflow step.")
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a",encoding="utf8") as f:
+              f.write("\n".join(lines)+"\n")
+          print("\n".join(lines))
+          PY
+      - name: Upload screenshots and test report (never source code)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: optical-lab-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 7

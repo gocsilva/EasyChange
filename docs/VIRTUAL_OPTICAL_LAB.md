@@ -61,3 +61,48 @@ uncommitted changes from concurrent development.
 
 The launcher changes its process working directory to the repo root so Python
 can import the actual EasyChange package, without requiring pip install.
+
+
+## GitHub Actions: automatic updates from three mains
+
+The reusable workflow is \`.github/workflows/virtual-optical-lab.yml\`.
+GitHub Actions natively triggers it after pushes to **EasyChange/main**,
+or manually from **EasyChange > Actions > EasyChange Virtual ESP-HDMI-MCP
+Laboratory > Run workflow**. Each run retrieves the new EasyChange source
+and creates a fresh offscreen instance; no running process is updated in
+place.
+
+Both private repositories \`gocsilva/MCP_PC_CONTROLLER\` and
+\`gocsilva/ESP32-PC-CONTROLLER\` also install a small
+\`.github/workflows/easychange-virtual-optical-lab.yml\` caller.
+Any push to their respective \`main\` triggers the **same** reusable
+workflow; its runner is attached to the **caller** private repository,
+checks out that push's exact revision as \`component\`, and obtains the
+latest *public* EasyChange test harness separately. This does **not**
+commit a private MCP file to public EasyChange. All GitHub tokens are
+read-only, and published test artifacts contain only synthetic workspaces'
+screenshots and summaries.
+
+For private MCP runs the lab imports the true MCP Ubuntu decoder and its
+existing regression tests. For EasyChange and ESP runs the lab uses the
+public self-contained wire-contract oracle; the ESP run additionally runs
+serial-host unit tests. A virtual ESP keyboard never proves real firmware
+behavior on the physical board.
+
+A default run **fails** on missing/out-of-sequence/corrupted Qt receipts.
+Optical OCR that cannot pass CRC32 is **reported as a warning** (it is
+currently a known problem), never marked as a validated successful
+delivery. Manual runs can enable \`strict_ocr\` to make any OCR failure
+fail the workflow. Both modes upload a JSON result and synthetic
+framebuffer captures for seven days, and add a summary to the Actions
+run. No hardware or the local MCP/tunnel is involved.
+
+The workflow updates its dependencies and fetches current sources on
+each GitHub Actions run. It does **not** mutate or automatically publish
+software fixes; source changes must be reviewed, committed and pushed
+normally. Each trigger is a *new short-lived virtual test environment*
+and does not overwrite the currently running local MCP GUI.
+
+To add a fourth repository, create a read-only caller workflow analogous
+to the MCP/ESP examples and define an appropriate kind/validator in the
+reusable workflow before enabling it.
