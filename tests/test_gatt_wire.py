@@ -45,3 +45,38 @@ def test_invalid_utf8_frame_clears_buffer():
     with pytest.raises(ValueError, match="GATT_INVALID_FRAME_JSON"):
         reader.feed(b"\x00\x00\x00\x01" + malformed)
     assert reader.feed(frame_object({"healthy": True})) == [{"healthy": True}]
+
+@pytest.mark.parametrize("malformed", [
+    b'{"action":"read","action":"write"}',
+    b'{"obj":{"x":1,"x":2}}',
+    b'{"value":NaN}',
+    b'{"value":Infinity}',
+    b'{"value":-Infinity}',
+])
+def test_gatt_wire_rejects_ambiguous_or_nonfinite_json(malformed):
+    reader = FramedMessages()
+    packet = len(malformed).to_bytes(4, "big") + malformed
+    with pytest.raises(ValueError, match="GATT_INVALID_FRAME_JSON"):
+        reader.feed(packet)
+    assert reader.feed(frame_object({"ok": True})) == [{"ok": True}]
+
+
+@pytest.mark.parametrize("number", [float("nan"), float("inf"), -float("inf")])
+def test_gatt_wire_refuses_to_encode_nonfinite_json(number):
+    with pytest.raises(ValueError):
+        frame_object({"value": number})
+    with pytest.raises(ValueError):
+        gatt_wire.seal_json(object(), {"value": number})
+
+
+@pytest.mark.parametrize("malformed", [b'{"a":1,"a":2}', b'{"value":NaN}'])
+def test_open_sealed_requires_unambiguous_json(malformed):
+    import base64
+
+    class DecryptedPayload:
+        def decrypt(self, packet):
+            return packet
+
+    message = {"v": base64.b64encode(b"J" + malformed).decode("ascii")}
+    with pytest.raises(ValueError, match="GATT_(DUPLICATE_JSON_FIELD|NONFINITE_JSON_NUMBER)"):
+        gatt_wire.open_sealed(DecryptedPayload(), message)

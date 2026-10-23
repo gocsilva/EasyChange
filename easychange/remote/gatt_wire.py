@@ -7,8 +7,30 @@ MAX_MESSAGE = 1024 * 1024
 MAX_BUFFER = MAX_MESSAGE + 4
 CHUNK_BYTES = 160
 
+
+def _unique_object_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("GATT_DUPLICATE_JSON_FIELD")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value):
+    raise ValueError("GATT_NONFINITE_JSON_NUMBER")
+
+
+def _strict_json_loads(data: bytes):
+    try:
+        return json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object_pairs,
+                          parse_constant=_reject_json_constant)
+    except RecursionError as exc:
+        raise ValueError("GATT_JSON_NESTING_LIMIT") from exc
+
+
 def frame_object(item: dict) -> bytes:
-    raw = json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    raw = json.dumps(item, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
     if not 0 < len(raw) <= MAX_MESSAGE:
         raise ValueError("GATT_MESSAGE_TOO_LARGE")
     return struct.pack(">I", len(raw)) + raw
@@ -43,7 +65,7 @@ class FramedMessages:
             data = bytes(self._pending[4:4 + count])
             del self._pending[:4 + count]
             try:
-                result = json.loads(data.decode("utf-8"))
+                result = _strict_json_loads(data)
             except (ValueError, UnicodeError) as exc:
                 # Do not retain a later frame behind a rejected frame: a
                 # subsequent feed must never replay stale queued commands.
@@ -63,7 +85,7 @@ def seal_json(session, data: dict) -> dict:
     """Compress repetitive source before authenticated encryption."""
     import base64
     import zlib
-    raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    raw = json.dumps(data, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
     if len(raw) > MAX_MESSAGE:
         raise ValueError("GATT_UNCOMPRESSED_TOO_LARGE")
     payload = (b"Z" + zlib.compress(raw, 3)) if len(raw) > 256 else b"J" + raw
@@ -88,7 +110,7 @@ def open_sealed(session, message: dict) -> dict:
             raise ValueError("GATT_MESSAGE_TOO_LARGE")
     else:
         raise ValueError("GATT_UNSUPPORTED_ENCODING")
-    decoded = json.loads(clear.decode("utf-8"))
+    decoded = _strict_json_loads(clear)
     if not isinstance(decoded, dict):
         raise ValueError("GATT_SEALED_NOT_OBJECT")
     return decoded
