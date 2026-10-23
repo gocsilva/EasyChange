@@ -25,8 +25,10 @@ class BasicHighlighter(QSyntaxHighlighter):
         string = QTextCharFormat(); string.setForeground(QColor("#4caf79" if not high_contrast else "#d5f5a5"))
         comment = QTextCharFormat(); comment.setForeground(QColor("#84909b" if not high_contrast else "#c4cbd2"))
         number = QTextCharFormat(); number.setForeground(QColor("#d39bff" if not high_contrast else "#ffe29a"))
-        for word in "and as assert async await break class continue def del elif else except False finally for from global if import in is lambda None nonlocal not or pass raise return True try while with yield public private protected static void int string var const let function interface namespace using".split():
-            self.rules.append((rf"\b{word}\b", keyword))
+        # All keywords share the same format. A single alternation avoids
+        # ~50 QRegularExpression.globalMatch calls for every document line.
+        keywords = "and as assert async await break class continue def del elif else except False finally for from global if import in is lambda None nonlocal not or pass raise return True try while with yield public private protected static void int string var const let function interface namespace using".split()
+        self.rules.append((r"\b(?:" + "|".join(keywords) + r")\b", keyword))
         self.rules.extend([(r"#[^\n]*", comment), (r"//[^\n]*", comment), (r"\"([^\"\\]|\\.)*\"|'([^'\\]|\\.)*'", string), (r"\b\d+(?:\.\d+)?\b", number)])
         # Compile once per editor, not once per document line and rule.
         self._compiled_rules = tuple((QRegularExpression(pattern), fmt) for pattern, fmt in self.rules)
