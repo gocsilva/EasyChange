@@ -224,6 +224,30 @@ class GitService:
             raise ValueError("INVALID_GIT_REF")
         return ref
 
+    def _diff_paths_z(self, *args: str) -> list[bytes]:
+        """Read Git file paths losslessly; C-quoted lines are not real paths."""
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=self.workspace.root_path,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=45,
+            check=False,
+            **hidden_console_kwargs(),
+        )
+        if completed.returncode:
+            raise RuntimeError(
+                completed.stderr.decode("utf-8", errors="replace").strip()
+                or "Git diff file list failed"
+            )
+        raw = completed.stdout
+        if not raw:
+            return []
+        if raw[-1] != 0:
+            raise RuntimeError("GIT_DIFF_NUL_OUTPUT_INCOMPLETE")
+        return raw[:-1].split(bytes([0]))
+
     def _diff_range(self, base_ref: str, head_ref: str) -> str:
         base = self._safe_ref(base_ref)
         head = self._safe_ref(head_ref or "HEAD")
@@ -254,21 +278,28 @@ class GitService:
         diff_range = self._diff_range(base_ref, head_ref)
         common = ["diff", "--no-ext-diff"]
         if name_status:
-            output = self._run(*common, "--name-status", diff_range, "--", *([path] if path else []))
+            tokens = self._diff_paths_z(
+                *common, "--name-status", "-z", diff_range, "--",
+                *([path] if path else []),
+            )
             items = []
-            for line in output.splitlines():
-                parts = line.split("	")
-                if not parts:
-                    continue
-                status = parts[0]
-                if status.startswith(("R", "C")) and len(parts) >= 3:
-                    items.append({
-                        "status": status,
-                        "old_path": parts[1],
-                        "path": parts[2],
-                    })
-                elif len(parts) >= 2:
-                    items.append({"status": status, "path": parts[-1]})
+            index = 0
+            while index < len(tokens):
+                status = tokens[index].decode("ascii", errors="replace")
+                index += 1
+                paths_needed = 2 if status.startswith(("R", "C")) else 1
+                if not status or index + paths_needed > len(tokens):
+                    raise RuntimeError("GIT_DIFF_NUL_OUTPUT_INCOMPLETE")
+                paths = [
+                    part.decode("utf-8", errors="replace")
+                    for part in tokens[index:index + paths_needed]
+                ]
+                index += paths_needed
+                if paths_needed == 2:
+                    items.append({"status": status, "old_path": paths[0],
+                                  "path": paths[1]})
+                else:
+                    items.append({"status": status, "path": paths[0]})
             limit = max(1, min(5000, int(max_items or 500)))
             selected = items[cursor:cursor + limit]
             next_cursor = cursor + len(selected)
@@ -288,8 +319,12 @@ class GitService:
                 "complete": complete,
             }
         if name_only:
-            output = self._run(*common, "--name-only", diff_range, "--", *([path] if path else []))
-            items = [{"path": line} for line in output.splitlines() if line]
+            tokens = self._diff_paths_z(
+                *common, "--name-only", "-z", diff_range, "--",
+                *([path] if path else []),
+            )
+            items = [{"path": part.decode("utf-8", errors="replace")}
+                     for part in tokens if part]
             limit = max(1, min(5000, int(max_items or 500)))
             selected = items[cursor:cursor + limit]
             next_cursor = cursor + len(selected)

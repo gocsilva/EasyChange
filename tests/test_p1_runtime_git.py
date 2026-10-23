@@ -315,3 +315,39 @@ def test_git_diff_refs_patch_preserves_utf8_when_page_splits_long_line(tmp_path)
     assert page["complete"]
     assert "\ufffd" not in "".join(parts)
     assert "".join(parts).strip()==expected.strip()
+
+
+def test_git_diff_refs_file_lists_return_real_unicode_paths(tmp_path):
+    _init_repo(tmp_path)
+    name="relat\u00f3rio.cs"
+    target=tmp_path/name
+    target.write_text("before\n",encoding="utf-8")
+    _git(tmp_path,"add",".")
+    _git(tmp_path,"commit","-m","base")
+    base=_git(tmp_path,"rev-parse","HEAD")
+    target.write_text("after\n",encoding="utf-8")
+    _git(tmp_path,"add",".")
+    _git(tmp_path,"commit","-m","update")
+    head=_git(tmp_path,"rev-parse","HEAD")
+    service=GitService(Workspace.open(tmp_path))
+    names=service.diff_refs(base_ref=base,head_ref=head,name_only=True)
+    statuses=service.diff_refs(base_ref=base,head_ref=head,name_status=True)
+    assert names["items"]==[{"path":name}]
+    assert statuses["items"]==[{"status":"M","path":name}]
+
+
+def test_git_diff_refs_name_status_preserves_unicode_rename_pair(tmp_path):
+    _init_repo(tmp_path)
+    old="vers\u00e3o-antiga.cs"
+    new="vers\u00e3o-nova.cs"
+    (tmp_path/old).write_text("unchanged body\n",encoding="utf-8")
+    _git(tmp_path,"add",".")
+    _git(tmp_path,"commit","-m","base")
+    base=_git(tmp_path,"rev-parse","HEAD")
+    (tmp_path/old).rename(tmp_path/new)
+    _git(tmp_path,"add","-A")
+    _git(tmp_path,"commit","-m","rename")
+    head=_git(tmp_path,"rev-parse","HEAD")
+    result=GitService(Workspace.open(tmp_path)).diff_refs(
+        base_ref=base,head_ref=head,name_status=True)
+    assert result["items"]==[{"status":"R100","old_path":old,"path":new}]
