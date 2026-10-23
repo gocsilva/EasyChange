@@ -3349,7 +3349,7 @@ return {swaggerUi:!!document.querySelector('.swagger-ui'),url:location.href,titl
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        script = """(async()=> {
+        script = r"""(async()=> {
 const cfg=CONFIG;
 const blocks=[...document.querySelectorAll('.opblock')];
 const b=blocks.find(x=>(x.querySelector('.opblock-summary-method')?.textContent||'').trim().toUpperCase()===cfg.method
