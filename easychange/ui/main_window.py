@@ -1678,10 +1678,16 @@ class MainWindow(QMainWindow):
         # pixels, enabling future per-command dwell hints on the MCP.
         try:
             item = json.loads(payload)
-            if isinstance(item, dict) and item.get("p") in {"EC2", "EC2H"}:
+            if isinstance(item, dict) and item.get("p") == "EC2H":
+                # Negotiate once per broadcast page via the persistent EC2H.
+                # Re-serializing every EC2 data cell with tm/rm/vh adds tens
+                # of bytes and pushes dense 32-tile 720p QR codes to higher
+                # versions, reducing physical module size and correlation
+                # reliability. ECP1 capacity suffers too. Keep all EC2 data
+                # fragments bit-for-bit unchanged (including CRC/digest).
                 item["tm"] = optical_mode
-                item["rm"] = requested  # explicit remote selector, not host hint
-                item["vh"] = 2  # supports inline :view MODE :dwell N
+                item["rm"] = requested
+                item["vh"] = 2
                 payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
         except (ValueError, TypeError):
             pass
