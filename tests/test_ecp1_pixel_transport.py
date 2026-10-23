@@ -36,7 +36,8 @@ def test_capacity_and_corruption_are_fail_closed():
     with pytest.raises(ValueError, match="CAPACITY"):
         encode_pixel_bitmap("")
     image = bytearray(encode_pixel_bitmap('{"p":"EC2H","v":1}'))
-    image[10 * SIDE + 10] ^= 255
+    # Flip the first bit of the *payload*, past the 10-byte frame header.
+    image[(3 + (10 * 8) // 50) * SIDE + 3 + (10 * 8) % 50] ^= 255
     assert decode_pixel_bitmap(image) is None
     assert decode_pixel_bitmap(bytes(SIDE * SIDE)) is None
     assert decode_pixel_bitmap(b"") is None
