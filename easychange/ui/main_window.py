@@ -1914,7 +1914,9 @@ class MainWindow(QMainWindow):
         if b"\0" in raw:
             raise ValueError("Binary files cannot be edited as text")
         content = raw.decode("utf-8-sig")
-        self.service.files.remember(path, replace=True)
+        # The edit baseline must describe exactly what is displayed, even if
+        # another process replaces the file between our read and this call.
+        self.service.files.remember(path, replace=True, snapshot_bytes=raw)
         self._active_path = path
         self.editor.setPlainText(content)
         self.editor.document().setModified(False)

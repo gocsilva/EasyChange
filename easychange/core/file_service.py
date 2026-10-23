@@ -481,9 +481,16 @@ class FileService:
         with self._guard: self._baselines.pop(relative, None)
         self._read_cache_drop(relative)
 
-    def remember(self, path: str, *, replace: bool = False) -> str:
+    def remember(self, path: str, *, replace: bool = False,
+                 snapshot_bytes: bytes | None = None) -> str:
         target = self.workspace.resolve(path, must_exist=True)
-        digest = self._hash_file_stream(target)
+        if snapshot_bytes is not None and type(snapshot_bytes) is not bytes:
+            raise TypeError("EDIT_BASELINE_SNAPSHOT_MUST_BE_BYTES")
+        # GUI preview has already read the editor buffer. Hash those *same*
+        # bytes, not a second file read that could observe a concurrent edit
+        # and mistakenly authorize saving stale editor content over new work.
+        digest = (hashlib.sha256(snapshot_bytes).hexdigest()
+                  if snapshot_bytes is not None else self._hash_file_stream(target))
         relative = target.relative_to(self.workspace.root_path).as_posix()
         with self._guard:
             if replace or relative not in self._baselines: self._baselines[relative] = digest
