@@ -377,6 +377,7 @@ class MainWindow(QMainWindow):
         # independently opt-in and never starts merely because the GUI opens.
         self.remote_transport_mode = "AUTO"
         self._host_optical_preference = "QR"
+        self._host_forced_ui = False
         self.remote_transport_selector = QComboBox()
         self.remote_transport_selector.setObjectName("easychangeRemoteTransportMode")
         self.remote_transport_selector.addItems(["AUTO", "GATT", "QR", "PIXEL", "PIXEL+QR", "UBUNTU"])
@@ -922,6 +923,9 @@ class MainWindow(QMainWindow):
         if chosen not in {"AUTO", "QR", "PIXEL", "PIXEL+QR", "GATT", "UBUNTU"}:
             return
         self.remote_transport_mode = chosen
+        # A human remote selector change releases a previous MCP GUI lock.
+        # The next MCP manual operation may explicitly force it again.
+        self._host_forced_ui = False
         # An explicit GATT selection is an operator request to enable it;
         # never start Bluetooth on the default AUTO GUI launch.
         if chosen == "GATT" and not self._gatt_enabled:
@@ -1062,32 +1066,37 @@ class MainWindow(QMainWindow):
         Never change the sequence, command body or at-most-once journal.
         Unknown or malformed control envelopes fail closed and are not sent.
         """
-        parts = text.strip().split(maxsplit=6)
+        parts = text.strip().split(maxsplit=4)
         inline_ms = None
-        if (len(parts) == 7 and parts[0].casefold() == ":ec"
-                and parts[2].casefold() == ":view"
-                and parts[3].upper() in {"QR", "PIXEL", "HYBRID", "UBUNTU"}
-                and parts[4].casefold() == ":dwell"):
-            try:
-                candidate = int(parts[5])
-                if not 300 <= candidate <= 5000:
-                    return None
-            except (ValueError, TypeError):
+        forced = False
+        automatic = False
+        if len(parts) >= 3 and parts[2].casefold() == ":view":
+            if (len(parts) != 5 or parts[0].casefold() != ":ec"
+                    or parts[3].upper() not in {"QR", "PIXEL", "HYBRID", "UBUNTU"}):
                 return None
-            inline_ms = candidate
             preference = parts[3].upper()
-            text = f":ec {parts[1]} {parts[6]}"
+            command = parts[4]
+            if command.startswith(":force "):
+                forced, command = True, command[len(":force "):]
+            elif command.startswith(":auto "):
+                automatic, command = True, command[len(":auto "):]
+            if command.startswith(":dwell "):
+                dwell_parts = command.split(maxsplit=2)
+                if len(dwell_parts) != 3:
+                    return None
+                try:
+                    candidate = int(dwell_parts[1])
+                    if not 300 <= candidate <= 5000:
+                        return None
+                except (ValueError, TypeError):
+                    return None
+                inline_ms = candidate
+                command = dwell_parts[2]
+            if not command or command.startswith((":force ", ":auto ", ":dwell ")):
+                return None
+            text = f":ec {parts[1]} {command}"
         else:
-            legacy = text.strip().split(maxsplit=4)
-            if (len(legacy) == 5 and legacy[0].casefold() == ":ec"
-                    and legacy[2].casefold() == ":view"
-                    and legacy[3].upper() in {"QR", "PIXEL", "HYBRID", "UBUNTU"}):
-                preference = legacy[3].upper()
-                text = f":ec {legacy[1]} {legacy[4]}"
-            elif len(parts) >= 3 and parts[2].casefold() == ":view":
-                return None  # unknown hint must never reach CommandService
-            else:
-                preference = None
+            preference = None
         if inline_ms is not None:
             current = self.service.optical_transport_config()
             if current["adaptive_enabled"]:
@@ -1097,9 +1106,22 @@ class MainWindow(QMainWindow):
                         current_ms=target, adjusted_by="mcp_inline_auto"
                     )
                     self._sync_optical_transport_controls()
-        if preference is not None and preference != self._host_optical_preference:
+        if preference is not None:
+            changed = preference != self._host_optical_preference
             self._host_optical_preference = preference
-            if self.remote_transport_mode == "AUTO":
+            if forced or (automatic and self._host_forced_ui):
+                # A forced MCP choice is applied to the ACTUAL EasyChange GUI
+                # before the command runs; it is not merely a pending hint.
+                chosen = ("PIXEL+QR" if preference == "HYBRID" else preference) if forced else "AUTO"
+                if self.remote_transport_mode != chosen:
+                    was_blocked = self.remote_transport_selector.blockSignals(True)
+                    try:
+                        self.remote_transport_selector.setCurrentText(chosen)
+                    finally:
+                        self.remote_transport_selector.blockSignals(was_blocked)
+                    self._set_remote_transport_mode(chosen)
+                self._host_forced_ui = forced
+            if changed and self.remote_transport_mode == "AUTO":
                 # Freeze the old EC2 receipt exactly as painted. Do not re-
                 # encode a stale result in a different visual mode just before
                 # a new command starts; only its OWN receipt gets the new mode.

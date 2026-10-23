@@ -138,3 +138,37 @@ def test_queued_hint_cannot_replace_previous_optical_receipt(tmp_path):
         window._command_future = None
         window.close()
         app.processEvents()
+
+
+
+def test_forced_mcp_ubuntu_syncs_real_easychange_gui(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    try:
+        window._set_remote_transport_mode("QR")
+        window.remote_transport_selector.setCurrentText("QR")
+        cmd = window._activate_machine_display_hint(
+            ":ec QFORCE01 :view UBUNTU :force :state --compact"
+        )
+        assert cmd == ":ec QFORCE01 :state --compact"
+        assert window.remote_transport_mode == "UBUNTU"
+        assert window.remote_transport_selector.currentText() == "UBUNTU"
+        assert window._host_forced_ui is True
+        # AUTO releases only a GUI mode installed by MCP; it does not
+        # overwrite a mode chosen manually on the remote GUI.
+        cmd = window._activate_machine_display_hint(
+            ":ec QFORCE02 :view QR :auto :state --compact"
+        )
+        assert cmd == ":ec QFORCE02 :state --compact"
+        assert window.remote_transport_mode == "AUTO"
+        assert window._host_forced_ui is False
+        window.remote_transport_selector.setCurrentText("UBUNTU")
+        assert window.remote_transport_mode == "UBUNTU"
+        cmd = window._activate_machine_display_hint(
+            ":ec QFORCE03 :view QR :auto :state --compact"
+        )
+        assert cmd == ":ec QFORCE03 :state --compact"
+        assert window.remote_transport_mode == "UBUNTU"
+    finally:
+        window.close()
+        app.processEvents()
