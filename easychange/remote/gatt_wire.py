@@ -30,9 +30,8 @@ class FramedMessages:
         if not isinstance(payload, bytes) or len(payload) > CHUNK_BYTES:
             raise ValueError("GATT_INVALID_FRAGMENT")
         self._pending.extend(payload)
-        if len(self._pending) > MAX_BUFFER:
-            self.reset()
-            raise ValueError("GATT_MESSAGE_TOO_LARGE")
+        # A legal fragment can finish a maximum-sized frame AND start the
+        # next one. Drain complete frames before enforcing pending capacity.
         results = []
         while len(self._pending) >= 4:
             count = int.from_bytes(self._pending[:4], "big")
@@ -43,11 +42,20 @@ class FramedMessages:
                 break
             data = bytes(self._pending[4:4 + count])
             del self._pending[:4 + count]
-            result = json.loads(data.decode("utf-8"))
+            try:
+                result = json.loads(data.decode("utf-8"))
+            except (ValueError, UnicodeError) as exc:
+                # Do not retain a later frame behind a rejected frame: a
+                # subsequent feed must never replay stale queued commands.
+                self.reset()
+                raise ValueError("GATT_INVALID_FRAME_JSON") from exc
             if not isinstance(result, dict):
                 self.reset()
                 raise ValueError("GATT_FRAME_NOT_OBJECT")
             results.append(result)
+        if len(self._pending) > MAX_BUFFER:
+            self.reset()
+            raise ValueError("GATT_MESSAGE_TOO_LARGE")
         return results
 
 
