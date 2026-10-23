@@ -977,19 +977,27 @@ class MainWindow(QMainWindow):
                 self._machine_command_queue.append((text, sequence))
                 self._start_next_machine_command()
     def _queue_machine_command(self, text: str) -> None:
-        """Keep Qt responsive while preserving sequential HID execution."""
+        """Queue EC1 bytes unchanged; never repaint an unfinished response.
+
+        Visual hints belong to the command being DEQUEUED, not the command
+        arriving while an earlier optical receipt is still on HDMI. Changing
+        the renderer on enqueue can replace a prior sequence's EC2 cells and
+        make its MCP correlation fail with RESULT_NOT_CORRELATED.
+        """
         if not text.strip():
             return
         if len(self._machine_command_queue) >= 128:
-            # Do not execute or silently reassign an untracked EC1 sequence.
             self.optical_status.setText("EC1 COMMAND QUEUE FULL - RETRY")
             return
-        # Optional EC1 transport-display hint from the local MCP. The
-        # CommandService receives the exact original ':ec <seq> <command>';
-        # no new command executes and the journal/mutation sequence is stable.
-        # A manual selector on this GUI takes precedence over this hint.
-        # In-band display-only control, parsed on the Qt thread BEFORE
-        # queuing the unchanged EC1 command. This never replays a mutation.
+        self._machine_command_queue.append(text)
+        self._start_next_machine_command()
+
+    def _activate_machine_display_hint(self, text: str) -> str | None:
+        """Unwrap display-only EC1 directives once, immediately before execute.
+
+        Never change the sequence, command body or at-most-once journal.
+        Unknown or malformed control envelopes fail closed and are not sent.
+        """
         parts = text.strip().split(maxsplit=6)
         inline_ms = None
         if (len(parts) == 7 and parts[0].casefold() == ":ec"
@@ -998,12 +1006,11 @@ class MainWindow(QMainWindow):
                 and parts[4].casefold() == ":dwell"):
             try:
                 candidate = int(parts[5])
-                if 300 <= candidate <= 5000:
-                    inline_ms = candidate
-                else:
-                    return  # invalid presentation envelope, fail closed
+                if not 300 <= candidate <= 5000:
+                    return None
             except (ValueError, TypeError):
-                return
+                return None
+            inline_ms = candidate
             preference = parts[3].upper()
             text = f":ec {parts[1]} {parts[6]}"
         else:
@@ -1013,6 +1020,8 @@ class MainWindow(QMainWindow):
                     and legacy[3].upper() in {"QR", "PIXEL", "HYBRID"}):
                 preference = legacy[3].upper()
                 text = f":ec {legacy[1]} {legacy[4]}"
+            elif len(parts) >= 3 and parts[2].casefold() == ":view":
+                return None  # unknown hint must never reach CommandService
             else:
                 preference = None
         if inline_ms is not None:
@@ -1027,15 +1036,15 @@ class MainWindow(QMainWindow):
         if preference is not None and preference != self._host_optical_preference:
             self._host_optical_preference = preference
             if self.remote_transport_mode == "AUTO":
+                # Freeze the old EC2 receipt exactly as painted. Do not re-
+                # encode a stale result in a different visual mode just before
+                # a new command starts; only its OWN receipt gets the new mode.
                 self._optical_timer.stop()
                 self._optical_render_generation += 1
                 self._optical_render_pending = None
                 self._optical_pixmaps.clear()
                 self._optical_page = 0
-                if self._machine and self._optical_payloads:
-                    self._render_optical_page()
-        self._machine_command_queue.append(text)
-        self._start_next_machine_command()
+        return text
 
     def _start_next_machine_command(self) -> None:
         if self._command_future is not None:
@@ -1045,13 +1054,24 @@ class MainWindow(QMainWindow):
             if self._close_when_idle:
                 QTimer.singleShot(0, self.close)
             return
-        self._active_command = self._machine_command_queue.popleft()
-        to_execute = (self._active_command[0] if isinstance(self._active_command, tuple)
-                      else self._active_command)
-        self._command_future = self._command_executor.submit(
-            self.service.execute, to_execute
-        )
-        self._command_poll_timer.start()
+        while self._machine_command_queue:
+            pending = self._machine_command_queue.popleft()
+            if isinstance(pending, tuple):  # GATT is independent of HDMI.
+                self._active_command = pending
+                to_execute = pending[0]
+            else:
+                to_execute = self._activate_machine_display_hint(pending)
+                if to_execute is None:
+                    self.optical_status.setText("EC1 INVALID DISPLAY HINT")
+                    continue
+                self._active_command = to_execute
+            self._command_future = self._command_executor.submit(
+                self.service.execute, to_execute
+            )
+            self._command_poll_timer.start()
+            return
+        self._active_command = None
+        self._command_poll_timer.stop()
 
     def _poll_machine_command(self) -> None:
         future = self._command_future
