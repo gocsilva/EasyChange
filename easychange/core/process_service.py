@@ -2,6 +2,7 @@ from __future__ import annotations
 import hashlib
 import codecs
 import json
+import math
 import os
 
 import re
@@ -41,6 +42,26 @@ class RunningProcess:
     def __post_init__(self) -> None:
         if self.exec_argv is None:
             self.exec_argv = list(self.argv)
+
+
+def _strict_job_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("DUPLICATE_JOB_MANIFEST_KEY")
+        result[key] = value
+    return result
+
+
+def _strict_job_float(token: str) -> float:
+    value = float(token)
+    if not math.isfinite(value):
+        raise ValueError("NONFINITE_JOB_MANIFEST_NUMBER")
+    return value
+
+
+def _reject_job_constant(_token: str):
+    raise ValueError("NONFINITE_JOB_MANIFEST_NUMBER")
 
 
 def _redact(text: str, values) -> str:
@@ -542,6 +563,7 @@ class ProcessService:
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
+            allow_nan=False,
         ).encode("utf-8")
         if len(payload) > self.MAX_JOB_MANIFEST_BYTES:
             raise ValueError("JOB_MANIFEST_TOO_LARGE")
@@ -577,7 +599,12 @@ class ProcessService:
                 raw=stream.read(self.MAX_JOB_MANIFEST_BYTES+1)
             if len(raw)>self.MAX_JOB_MANIFEST_BYTES:
                 return None
-            data = json.loads(raw)
+            data = json.loads(
+                raw,
+                object_pairs_hook=_strict_job_pairs,
+                parse_float=_strict_job_float,
+                parse_constant=_reject_job_constant,
+            )
         except (OSError, ValueError, UnicodeError):
             return None
         return data if isinstance(data, dict) else None
