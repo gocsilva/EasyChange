@@ -18,3 +18,27 @@ def test_replace_line_preserves_classic_cr_line_endings(tmp_path):
     service=FileService(Workspace(tmp_path,tmp_path.name))
     service.replace_line("sample.txt",2,"new")
     assert target.read_bytes()==b"first\rnew\rthird\r"
+
+
+
+def test_read_never_caches_old_bytes_under_new_file_stat(tmp_path, monkeypatch):
+    """A concurrent local editor cannot make the hot cache serve stale C# code."""
+    target=tmp_path/"payment.cs"
+    target.write_bytes(b"OLD_REMOTE_CODE\n")
+    service=FileService(Workspace(tmp_path,tmp_path.name))
+    original=service._read_limited_text
+    mutated=[False]
+
+    def mutate_once(path):
+        snapshot=original(path)
+        if not mutated[0]:
+            mutated[0]=True
+            path.write_bytes(b"NEW_REMOTE_CODE_WITH_PATCH\n")
+        return snapshot
+
+    monkeypatch.setattr(service,"_read_limited_text",mutate_once)
+    first=service.read("payment.cs")
+    second=service.read("payment.cs")
+    assert "NEW_REMOTE_CODE_WITH_PATCH" in str(first["lines"])
+    assert "NEW_REMOTE_CODE_WITH_PATCH" in str(second["lines"])
+    assert second["hash"]==first["hash"]
