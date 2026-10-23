@@ -36,6 +36,54 @@ def test_structured_argv_preserves_argument_with_spaces(tmp_path, monkeypatch):
     assert result["exec_argv"][-1] == value
 
 
+def test_concurrent_start_rejects_duplicate_live_process_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+    first_popen_entered = threading.Event()
+    second_popen_entered = threading.Event()
+    allow_first_popen = threading.Event()
+    call_lock = threading.Lock()
+    popen_calls = 0
+
+    class Child:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def poll(self):
+            return None
+
+    def fake_popen(*_args, **_kwargs):
+        nonlocal popen_calls
+        with call_lock:
+            popen_calls += 1
+            call_number = popen_calls
+        if call_number == 1:
+            first_popen_entered.set()
+            assert allow_first_popen.wait(timeout=5)
+        else:
+            second_popen_entered.set()
+        return Child(500 + call_number)
+
+    monkeypatch.setattr("easychange.core.process_service.subprocess.Popen", fake_popen)
+    argv = [sys.executable, "-c", "pass"]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(service.start, argv, "JDUPSTART1")
+        assert first_popen_entered.wait(timeout=5)
+        second = pool.submit(service.start, argv, "JDUPSTART1")
+        try:
+            assert not second_popen_entered.wait(timeout=0.2)
+        finally:
+            allow_first_popen.set()
+        assert first.result(timeout=5)["pid"] == 501
+        with pytest.raises(RuntimeError, match="Process already running: JDUPSTART1"):
+            second.result(timeout=5)
+
+    assert popen_calls == 1
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows .cmd semantics")
 @pytest.mark.parametrize("suffix", [".cmd", ".bat"])
 def test_cmd_and_bat_are_wrapped_by_cmd_and_execute_with_quoted_args(

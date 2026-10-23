@@ -1713,6 +1713,24 @@ class ProcessService:
         redact_values: list[str] | tuple[str, ...] | None = None,
         no_window: bool = True,
     ) -> dict:
+        with self._job_start_lock:
+            return self._start_locked(
+                argv,
+                process_id,
+                env=env,
+                redact_values=redact_values,
+                no_window=no_window,
+            )
+
+    def _start_locked(
+        self,
+        argv: list[str],
+        process_id: str,
+        *,
+        env: dict[str, str] | None = None,
+        redact_values: list[str] | tuple[str, ...] | None = None,
+        no_window: bool = True,
+    ) -> dict:
         requested_argv, exec_argv, launch_env, cleanup_paths = self._prepare_launch(
             argv, env=env
         )
