@@ -13,6 +13,7 @@ ROOT=Path(os.environ.get("LOCALAPPDATA") or Path.home())/"EasyChange"/"logs"
 FILE=ROOT/"transport_audit.jsonl"
 _LOCK=threading.RLock()
 _MAX_FILE=2*1024*1024
+_LAST_ID=0
 SAFE_FIELDS=frozenset(("stage","sequence","direction","medium","mode","command_type",
     "attempt","ok","cause","code","state","result_state","duplicate","duration_ms",
     "elapsed_ms","bytes","sha256","frames","packets","chunks","page","pages",
@@ -23,7 +24,7 @@ def signature(value):
     return {"bytes":len(raw),"sha256":hashlib.sha256(raw).hexdigest()}
 
 def log(stage,sequence="",direction="",**kwargs):
-    rec={"id":time.time_ns(),"at":datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+    rec={"at":datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
          "stage":str(stage)[:64],"sequence":str(sequence or "")[:64],
          "direction":str(direction or "")[:40]}
     for k,v in kwargs.items():
@@ -37,8 +38,24 @@ def log(stage,sequence="",direction="",**kwargs):
             elif k in {"cause","code"}:rec[k]="".join(c if c.isalnum() or c in "._-" else "_" for c in v)[:80]
             elif k in {"medium","mode","command_type","state","result_state"}:rec[k]=v[:65]
     try:
+        global _LAST_ID
         with _LOCK:
             ROOT.mkdir(parents=True,exist_ok=True)
+            if _LAST_ID == 0:
+                for path in (FILE.with_suffix(".jsonl.2"),FILE.with_suffix(".jsonl.1"),FILE):
+                    try:
+                        with path.open("r",encoding="utf-8") as source:
+                            for stored in deque(source,maxlen=2000):
+                                try:
+                                    stored_id=json.loads(stored).get("id")
+                                    if type(stored_id) is int and stored_id > _LAST_ID:
+                                        _LAST_ID=stored_id
+                                except (TypeError,ValueError,AttributeError):
+                                    continue
+                    except OSError:
+                        continue
+            _LAST_ID=max(time.time_ns(),_LAST_ID+1)
+            rec["id"]=_LAST_ID
             line=json.dumps(rec,ensure_ascii=True,separators=(",",":"),allow_nan=False)
             if len(line)>1800:return
             if FILE.exists() and FILE.stat().st_size+len(line)>_MAX_FILE:

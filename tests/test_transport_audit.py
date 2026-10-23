@@ -146,3 +146,19 @@ def test_snapshot_validates_persisted_field_types_before_returning(tmp_path, mon
     rendered=json.dumps(result)
     assert "nested-sensitive-value" not in rendered
     assert "private-payload" not in rendered
+
+
+def test_audit_event_ids_remain_monotonic_when_clock_moves_backward(tmp_path,monkeypatch):
+    """Cursor pagination must not lose newer entries on clock adjustments."""
+    directory=tmp_path/"audit"
+    monkeypatch.setattr(audit,"ROOT",directory)
+    monkeypatch.setattr(audit,"FILE",directory/"ec-audit.jsonl")
+    monkeypatch.setattr(audit.time,"time_ns",iter((900000000000000000,899999999999999998)).__next__)
+    audit.log("ec1_received","QCLOCK001","MCP_TO_EASYCHANGE")
+    first=audit.snapshot(limit=1)["events"][0]["id"]
+    audit.log("ec2_page_painted","QCLOCK001","EASYCHANGE_TO_MCP",packets=8)
+    second=audit.snapshot(limit=2)["events"][-1]["id"]
+    assert second > first
+    paged=audit.snapshot(after=first,limit=4)
+    assert paged["count"]==1
+    assert paged["events"][0]["stage"]=="ec2_page_painted"
