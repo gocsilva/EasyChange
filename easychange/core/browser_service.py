@@ -2777,6 +2777,8 @@ __BODY__
         return self.wait_ready(session_id, timeout)
 
     def history(self, session_id: str, direction: int, timeout: float = 15.0) -> dict:
+        if type(direction) is not int or direction == 0:
+            raise ValueError("INVALID_BROWSER_HISTORY_DIRECTION")
         result = self._session(session_id).cdp.call("Page.getNavigationHistory", timeout=5.0)
         entries = result.get("entries") if isinstance(result.get("entries"), list) else []
         current = int(result.get("currentIndex") or 0)
