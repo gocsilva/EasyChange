@@ -277,7 +277,9 @@ class Indexer:
 
     @staticmethod
     def _normalize_relative_path(relative_path: str) -> str:
-        value = str(relative_path or "").replace("\\", "/").strip()
+        # Leading whitespace is a legal filename character; stripping it can
+        # protect/index the wrong file and expose a sensitive original path.
+        value = str(relative_path or "").replace("\\", "/")
         if value.startswith("/") or re.match(r"^[a-zA-Z]:", value):
             raise ValueError("INVALID_PROTECTED_INDEX_PATH")
         while value.startswith("./"):
