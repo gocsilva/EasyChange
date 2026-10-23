@@ -162,3 +162,26 @@ def test_audit_event_ids_remain_monotonic_when_clock_moves_backward(tmp_path,mon
     paged=audit.snapshot(after=first,limit=4)
     assert paged["count"]==1
     assert paged["events"][0]["stage"]=="ec2_page_painted"
+
+def test_corrupt_utf8_audit_line_cannot_break_snapshot_or_restart_writer(tmp_path, monkeypatch):
+    """A torn/non-UTF8 JSONL entry must not take down EC1 log recovery."""
+    import json
+    from easychange.core import transport_audit as audit
+
+    folder = tmp_path / "audit"
+    folder.mkdir()
+    monkeypatch.setattr(audit, "ROOT", folder)
+    monkeypatch.setattr(audit, "FILE", folder / "transport_audit.jsonl")
+    monkeypatch.setattr(audit, "_LAST_ID", 0)
+
+    with audit.FILE.open("wb") as raw:
+        raw.write(b'{"id":1,"at":"2026-10-23","stage":"ec1_received",'
+                  b'"sequence":"QCORRUPT1","direction":"MCP_TO_EASYCHANGE",'
+                  b'"payload":"\xff"}\n')
+    # No remote services or HDMI calls: filesystem-only replay.
+    before = audit.snapshot(limit=8)
+    assert before["events"] == []
+    audit.log("ec1_received", "QVALID123", "MCP_TO_EASYCHANGE", packets=1)
+    after = audit.snapshot(limit=8, sequence="QVALID123")
+    assert after["count"] == 1
+    assert after["events"][0]["sequence"] == "QVALID123"

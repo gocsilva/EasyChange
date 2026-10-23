@@ -44,8 +44,10 @@ def log(stage,sequence="",direction="",**kwargs):
             if _LAST_ID == 0:
                 for path in (FILE.with_suffix(".jsonl.2"),FILE.with_suffix(".jsonl.1"),FILE):
                     try:
-                        with path.open("r",encoding="utf-8") as source:
+                        with path.open("r",encoding="utf-8",errors="replace") as source:
                             for stored in deque(source,maxlen=2000):
+                                if "\ufffd" in stored:
+                                    continue
                                 try:
                                     stored_id=json.loads(stored).get("id")
                                     if type(stored_id) is int and stored_id > _LAST_ID:
@@ -117,10 +119,13 @@ def snapshot(after=0,limit=8,sequence="",direction=""):
     with _LOCK:
         for p in (FILE.with_suffix(".jsonl.2"),FILE.with_suffix(".jsonl.1"),FILE):
             try:
-                with p.open("r",encoding="utf-8") as source:rows.extend(source)
+                with p.open("r",encoding="utf-8",errors="replace") as source:
+                    rows.extend(source)
             except OSError:pass
     found=[]
     for line in rows:
+        if "\ufffd" in line:
+            continue
         try:entry=json.loads(line)
         except (TypeError,ValueError):continue
         if not isinstance(entry,dict):
