@@ -13,6 +13,10 @@ def encode_command(command: str, threshold_bytes: int = 256) -> tuple[str, dict]
         raw = command.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ValueError("EC1_COMMAND_INVALID_UTF8") from exc
+    # Keep the sender's limit aligned with decode_command's default budget.
+    # Otherwise compressible oversized commands produce undecodable :z1 frames.
+    if len(raw) > 262144:
+        raise ValueError("EC1_COMMAND_SIZE_LIMIT")
     metadata = {"encoding": "raw", "raw_bytes": len(raw), "wire_bytes": len(raw), "crc32": f"{binascii.crc32(raw) & 0xffffffff:08x}"}
     if len(raw) < max(0, int(threshold_bytes)):
         return command, metadata

@@ -64,3 +64,19 @@ def test_z1_legitimate_compressed_command_still_round_trips():
     restored,report=transport_codec.decode_command(packet,max_raw_bytes=4096)
     assert restored==command
     assert report["raw_bytes"]==len(command.encode("utf-8"))
+
+
+
+def test_ec1_encoder_rejects_payload_above_default_decoder_budget():
+    # A highly compressible command previously encoded into a valid-looking
+    # :z1 frame that CommandService's default decoder could never accept.
+    command = ":write oversized.txt " + ("A" * 262145)
+    with pytest.raises(ValueError, match="EC1_COMMAND_SIZE_LIMIT"):
+        transport_codec.encode_command(command, threshold_bytes=0)
+
+
+def test_ec1_encoder_size_guard_counts_utf8_bytes_not_characters():
+    # The receiver checks uncompressed byte length, not Unicode code points.
+    command = "é" * 131073
+    with pytest.raises(ValueError, match="EC1_COMMAND_SIZE_LIMIT"):
+        transport_codec.encode_command(command, threshold_bytes=0)
