@@ -87,7 +87,9 @@ class OpticalTestCounter:
                 raise ValueError("INVALID_QR_TEST_CURSOR")
             if type(limit) is not int or limit < 1 or limit > 128:
                 raise ValueError("INVALID_QR_TEST_LIMIT")
-            keys = sorted(self._digests)
+            # Counter retains first-display insertion order. New QR digests
+            # append instead of shifting previously issued cursor offsets.
+            keys = list(self._digests)
             part = keys[cursor:cursor+limit]
             return {
                 **self._summary(),
