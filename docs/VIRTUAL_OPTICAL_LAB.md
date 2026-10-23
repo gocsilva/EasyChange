@@ -155,3 +155,47 @@ header. The private MCP change unifies both proofs with a regression test.
 
 Default GitHub Actions now runs all eight synthetic cases. It records
 the unresolved OCR issues instead of misreporting them as delivery.
+
+
+## FULL MCP command/return pipeline — isolated local tests
+
+The `tests/run_virtual_full_mcp_lab.bat` launcher calls the REAL
+MCP `_send_and_correlate` against the REAL EasyChange Qt GUI in
+a disposable subprocess using only synthetic hardware.
+
+    tests\run_virtual_full_mcp_lab.bat --mode QR --command ":state --compact"
+    tests\run_virtual_full_mcp_lab.bat --mode PIXEL --command ":write saved.txt SafeVirtualReplay" --replay-identical
+    tests\run_virtual_full_mcp_lab.bat --mode QR --command ":read large.txt 1 900" --timeout 20
+
+The controller's *device interfaces only* are replaced by virtual HID and
+a condition-variable-fed 1280x720 Qt framebuffer. The GUI focus proof
+is taken from virtual Qt widget state (not asserted to be physical OCR).
+UBUNTU receipts invoke genuine Tesseract when selected. A production
+permission modal and real device connectivity are outside this lab.
+
+Security: a unique named optical OS mutex is created for each subprocess;
+the host execution journal, LOCALAPPDATA and EasyChange audit logs use
+TemporaryDirectory. All initial commands are **strictly allowlisted**:
+state, disposable-source read and search, or write of safe ASCII test text
+to the disposable `saved.txt`. No local/remote process commands,
+admin operations, BLE, COM ports, capture cards or TCP listeners.
+
+Each run checks the original remote execution occurred ONCE, that the MCP
+returns a complete correctly sequenced response, and that any physical
+write effects are exactly present on the temporary disk.
+Large reads compare all 900 returned numbered lines to the source file.
+`--replay-identical` repeats the SAME sequence and asserts the
+host journal serves the second reply without another HID send.
+
+The GitHub Actions reusable workflow runs state, search, PIXEL write plus
+identical replay, hybrid search and 900-line durable recovery whenever
+invoked from the private MCP repo. Public EasyChange does NOT access the
+private source; no private code appears in public artifacts. A GitHub
+Actions job requires eligible runners; creating the YAML trigger does not
+guarantee a runner is allocated.
+
+Results from the isolated simulation: QR, PIXEL and hybrid responses were
+delivered with CRC/SHA verification for small tasks. A QR read of 900 lines
+completed via multiple durable-result recovery HID requests with a SINGLE
+original remote execution and correct content. No physical ESP/HDMI claims
+are implied by these virtual successes.

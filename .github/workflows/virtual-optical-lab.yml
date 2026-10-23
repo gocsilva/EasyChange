@@ -101,6 +101,18 @@ jobs:
           fi
           if [[ "$STRICT_OCR" == "true" ]]; then args+=(--strict-ocr); fi
           python "$GITHUB_WORKSPACE/$LAB_SOURCE_DIR/tests/virtual_optical_lab.py" "${args[@]}" > reports/optical-report.json
+      - name: Exercise actual private MCP send/correlate against virtual Qt GUI
+        if: env.LAB_KIND == 'mcp'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mcp_source="$GITHUB_WORKSPACE/component"
+          engine="$GITHUB_WORKSPACE/$LAB_SOURCE_DIR/tests/virtual_full_mcp_lab.py"
+          python "$engine" --mcp-source "$mcp_source" --mode QR --command ':state --compact'
+          python "$engine" --mcp-source "$mcp_source" --mode QR --command ':search greeting'
+          python "$engine" --mcp-source "$mcp_source" --mode PIXEL --command ':write saved.txt SafeVirtualReplay' --replay-identical
+          python "$engine" --mcp-source "$mcp_source" --mode PIXEL+QR --command ':search greeting'
+          python "$engine" --mcp-source "$mcp_source" --mode QR --command ':read large.txt 1 900' --timeout 20
       - name: Report validated CRC and unresolved OCR failures
         if: always()
         shell: bash
