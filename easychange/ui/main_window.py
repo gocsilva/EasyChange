@@ -1418,10 +1418,29 @@ class MainWindow(QMainWindow):
                 inline_compact_state = False
         inline_small_terminal_result = False
         inline_command = str(getattr(result, "command", "") or "").casefold()
+        # :j1 wraps even a single read as outer Result(command="structured").
+        # Use only its verified inner read type to paint bounded results
+        # immediately instead of leaving the prior sequence on HDMI until an
+        # encoder Future finishes and the MCP issues a second request.
+        inline_kind = inline_command
+        if inline_command == "structured" and isinstance(state_data, dict):
+            primary = state_data.get("primary")
+            results = state_data.get("results")
+            if (state_data.get("operation") == "operation"
+                    and isinstance(primary, dict)
+                    and isinstance(results, list) and len(results) == 1):
+                inline_kind = str(primary.get("command") or "").casefold()
+        readonly_inline = {
+            "state", "health", "command_schema", "discover_many",
+            "search", "locate", "study", "definition", "references",
+            "read", "read_many", "read_regions", "result_get",
+            "capabilities", "optical_transport_get",
+        }
         inline_limit = (
             8192
-            if inline_command in (
-                STRUCTURED_RECOVERY_TYPES | {"locate", "search", "read_many"}
+            if inline_kind in (
+                STRUCTURED_RECOVERY_TYPES | {"locate", "search", "read_many",
+                                             "discover_many", "command_schema"}
             )
             else 4096
         )
@@ -1429,11 +1448,14 @@ class MainWindow(QMainWindow):
             getattr(result, "ok", False)
             and getattr(result, "sequence", None)
             and isinstance(state_data, dict)
-            and inline_command in (
-                STRUCTURED_MUTATION_TYPES
-                | STRUCTURED_RECOVERY_TYPES
-                | TEXT_MUTATION_COMMANDS
-                | {"locate", "search", "read_many"}
+            and (
+                inline_command in (
+                    STRUCTURED_MUTATION_TYPES
+                    | STRUCTURED_RECOVERY_TYPES
+                    | TEXT_MUTATION_COMMANDS
+                    | {"locate", "search", "read_many"}
+                )
+                or inline_kind in readonly_inline
             )
         ):
             try:
