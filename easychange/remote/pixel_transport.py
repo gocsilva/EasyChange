@@ -105,7 +105,9 @@ def decode_pixel_frame(frame) -> list[str]:
         candidates = []
         for contour in contours:
             x, y, w, h = cv2.boundingRect(contour)
-            if 120 <= w <= 370 and 120 <= h <= 370 and abs(w - h) <= max(7, w // 12):
+            # A 56x56 ECP1 symbol is still decodable around 105px across.
+            # The previous 120px floor rejected legitimate 110px cells.
+            if 100 <= w <= 370 and 100 <= h <= 370 and abs(w - h) <= max(7, w // 12):
                 candidates.append((x, y, w, h))
         # Descending size makes real full-size tiles outrank small nested blobs.
         candidates.sort(key=lambda item: item[2] * item[3], reverse=True)
@@ -114,17 +116,23 @@ def decode_pixel_frame(frame) -> list[str]:
         for x, y, w, h in candidates[:120]:
             cropped = gray[y:y+h, x:x+w]
             text = None
-            # Old 56px wire format first; the 72px compact option is
-            # attempted only on a failed CRC, never assumed from GUI mode.
-            for side in (SIDE, LARGE_SIDE):
-                # INTER_NEAREST_EXACT samples logical module centers. At
-                # 125px per tile / 56 modules, AREA and LINEAR can blend
-                # a handful of neighboring bits, breaking the whole CRC.
-                # Keep blur-tolerant AREA/LINEAR as bounded fallbacks.
-                exact = getattr(cv2, "INTER_NEAREST_EXACT", cv2.INTER_NEAREST)
-                for interpolation in (exact, cv2.INTER_AREA, cv2.INTER_LINEAR):
-                    small = cv2.resize(cropped, (side, side), interpolation=interpolation)
-                    text = decode_pixel_bitmap(small.ravel(), side=side)
+            # On a white UI, the external quiet zone merges with the page
+            # background. A contour may begin at the black registration ring
+            # and exclude 1px of the encoded symbol. Preserve the original
+            # zero-padding path for existing dark-background screenshots;
+            # retry with exactly 1px border only if all CRCs failed.
+            candidates_to_decode = [cropped]
+            if x > 0 and y > 0 and x+w < width and y+h < height:
+                candidates_to_decode.append(gray[y-1:y+h+1, x-1:x+w+1])
+            for image in candidates_to_decode:
+                # Old 56px ECP1 first; 72px compact is a CRC-checked fallback.
+                for side in (SIDE, LARGE_SIDE):
+                    exact = getattr(cv2, "INTER_NEAREST_EXACT", cv2.INTER_NEAREST)
+                    for interpolation in (exact, cv2.INTER_AREA, cv2.INTER_LINEAR):
+                        small = cv2.resize(image, (side, side), interpolation=interpolation)
+                        text = decode_pixel_bitmap(small.ravel(), side=side)
+                        if text is not None:
+                            break
                     if text is not None:
                         break
                 if text is not None:
