@@ -129,6 +129,11 @@ class InboundCommandStore:
             raise InboundTransferError(code) from exc
 
     @classmethod
+    def _valid_chunk_layout(cls, compressed_bytes: int, chunk_count: int) -> bool:
+        """Each nonempty staged part is bounded by MAX_CHUNK_BYTES."""
+        return chunk_count <= compressed_bytes <= chunk_count * cls.MAX_CHUNK_BYTES
+
+    @classmethod
     def _transfer_id(cls, value: str) -> str:
         # Normalize only after confirming the original identifier is ASCII:
         # Unicode uppercasing can expand characters (e.g. ß -> SS), aliasing
@@ -252,6 +257,8 @@ class InboundCommandStore:
                     or not 1 <= value["raw_bytes"] <= self.MAX_RAW_BYTES
                     or type(value.get("compressed_bytes")) is not int
                     or not 1 <= value["compressed_bytes"] <= self.MAX_COMPRESSED_BYTES
+                    or not self._valid_chunk_layout(
+                        value["compressed_bytes"], value["chunk_count"])
                     or not isinstance(value.get("sha256"), str)
                     or not self._SHA_RE.fullmatch(value["sha256"])):
                 raise ValueError("INBOUND_META_FIELDS_INVALID")
@@ -323,6 +330,10 @@ class InboundCommandStore:
             )
         if not self._SHA_RE.fullmatch(sha256):
             raise InboundTransferError("INVALID_INBOUND_SHA256")
+        if not self._valid_chunk_layout(compressed_bytes, chunk_count):
+            # An impossible manifest can never reach COMMIT but still occupies
+            # one of the 32 staging slots until its hour-long TTL expires.
+            raise InboundTransferError("INBOUND_COMPRESSED_CHUNK_LAYOUT_INVALID")
 
         expected = {
             "version": 1,
