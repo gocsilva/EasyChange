@@ -939,17 +939,38 @@ class UbuntuService:
         return False
 
     @staticmethod
-    def _requested_namespace(args: list[str]) -> str:
+    def _namespace_flags(args: list[str]) -> list[str]:
+        """Parse every kubectl namespace spelling; never trust only the first."""
         values = [str(item) for item in args]
-        for index, value in enumerate(values):
+        namespaces: list[str] = []
+        index = 0
+        while index < len(values):
+            value = values[index]
             lowered = value.casefold()
-            if lowered in {"-n", "--namespace"} and index + 1 < len(values):
-                return str(values[index + 1]).strip()
-            if lowered.startswith("--namespace="):
-                return value.split("=", 1)[1].strip()
-            if lowered.startswith("-n="):
-                return value.split("=", 1)[1].strip()
-        return ""
+            if lowered in {"-n", "--namespace"}:
+                if index + 1 >= len(values):
+                    raise UbuntuError("KUBECTL_NAMESPACE_VALUE_REQUIRED")
+                namespaces.append(values[index + 1].strip())
+                index += 2
+                continue
+            if lowered.startswith("--namespace=") or lowered.startswith("-n="):
+                namespaces.append(value.split("=", 1)[1].strip())
+            elif lowered.startswith("-n") and len(value) > 2 and not lowered.startswith("--"):
+                # Cobra/pflag accepts compact -nprod as -n prod.
+                namespaces.append(value[2:].strip())
+            index += 1
+        if any(not value for value in namespaces):
+            raise UbuntuError("KUBECTL_NAMESPACE_VALUE_REQUIRED")
+        if len(set(namespaces)) > 1:
+            # Depending on CLI parsing, first or last may win. Reject all
+            # conflicting repetitions rather than guessing the target.
+            raise UbuntuError("KUBECTL_NAMESPACE_OVERRIDE_CONFLICT")
+        return namespaces
+
+    @classmethod
+    def _requested_namespace(cls, args: list[str]) -> str:
+        values = cls._namespace_flags(args)
+        return values[-1] if values else ""
 
     @classmethod
     def _guard_secret_read(cls, args: list[str]) -> None:
@@ -982,17 +1003,12 @@ class UbuntuService:
         namespace: str = "",
     ) -> tuple[list[str], str]:
         requested = self._validate_kubectl_args(args)
-        ns = str(namespace or session.namespace or "").strip()
+        requested_namespace = self._requested_namespace(requested)
+        ns = str(requested_namespace or namespace or session.namespace or "").strip()
         effective: list[str] = []
         if session.context:
             effective.extend(["--context", session.context])
-        has_namespace = any(
-            value == "-n"
-            or value == "--namespace"
-            or value.startswith("--namespace=")
-            for value in requested
-        )
-        if ns and not has_namespace:
+        if ns and not requested_namespace:
             effective.extend(["--namespace", ns])
         effective.extend(requested)
         return effective, ns
