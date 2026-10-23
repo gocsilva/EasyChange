@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 
-MODES = frozenset(("AUTO", "OPTICAL", "PIXEL", "GATT"))
+MODES = frozenset(("AUTO", "OPTICAL", "PIXEL", "HYBRID", "GATT"))
 
 
 class TransportUnavailable(RuntimeError):
@@ -76,7 +76,7 @@ class TransportRouter:
             and self._gatt_session
             and 0 <= instant - self._gatt_ready_at <= 5.0
         )
-        if self.mode in {"OPTICAL", "PIXEL"}:
+        if self.mode in {"OPTICAL", "PIXEL", "HYBRID"}:
             return Choice("OPTICAL", "OPERATOR_FORCED_" + self.mode, False)
         if self.mode == "GATT":
             if not gatt_ready:
