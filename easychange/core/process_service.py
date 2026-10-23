@@ -489,10 +489,16 @@ class ProcessService:
             return
 
     def _job_path(self, job_id: str) -> Path:
-        safe = "".join(ch for ch in str(job_id) if ch.isalnum() or ch in "_-")
-        if not safe or safe != str(job_id):
+        # User-supplied IDs must be safe *before* any stat/open. Windows
+        # device aliases remain reserved even with a .json suffix.
+        if type(job_id) is not str or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
             raise ValueError("INVALID_JOB_ID")
-        return self.jobs_root / f"{safe}.json"
+        upper = job_id.upper()
+        if (upper in {"CON", "PRN", "AUX", "NUL"}
+                or (len(upper) == 4 and upper[:3] in {"COM", "LPT"}
+                    and upper[3] in "123456789")):
+            raise ValueError("INVALID_JOB_ID")
+        return self.jobs_root / f"{job_id}.json"
 
     def _write_job(
         self,

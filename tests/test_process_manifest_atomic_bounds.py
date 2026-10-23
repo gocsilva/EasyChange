@@ -188,3 +188,19 @@ def test_runtime_storage_stats_counts_files_incrementally_without_symlinks(tmp_p
     assert report["bytes"]==12
     assert report["over_budget"] is True
     assert report["root"]==str(root)
+
+
+@pytest.mark.parametrize("job_id", [
+    "CON", "PRN", "AUX", "NUL", "COM1", "LPT9",
+    "JØB", "A" * 5000,
+])
+def test_job_id_preflight_rejects_windows_devices_unicode_and_overlong_names(tmp_path, job_id):
+    """EC1 job identifiers must not resolve to devices or pathological paths."""
+    jobs = _store(tmp_path)
+    with pytest.raises(ValueError, match="INVALID_JOB_ID"):
+        jobs._job_path(job_id)
+
+
+def test_job_id_preflight_preserves_valid_ascii_ids(tmp_path):
+    jobs = _store(tmp_path)
+    assert jobs._job_path("J-abc_123") == tmp_path / "J-abc_123.json"
