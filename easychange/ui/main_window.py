@@ -1630,19 +1630,29 @@ class MainWindow(QMainWindow):
             except (ValueError, TypeError):
                 pass
         if optical_mode == "PIXEL":
+            from easychange.remote.pixel_transport import SIDE, LARGE_SIDE
+            label = self.machine_qrs[0]
+            side = SIDE
             try:
                 pixels = encode_pixel_bitmap(payload)
             except ValueError:
-                # Large legacy EC2/EC2H packets remain QR readable. This
-                # preserves 100% of the existing protocol's payload capacity.
-                pass
-            else:
+                # Compact four-cell panels have enough physical pixels for a
+                # higher-capacity ECP1 bitmap. A 32-cell 720p burst MUST keep
+                # the 56-cell format to avoid shrinking modules below 2px.
+                # Preserve legacy QR fallback only above the new capacity.
+                if not self._optical_burst and min(label.width(), label.height()) >= 170:
+                    try:
+                        side = LARGE_SIDE
+                        pixels = encode_pixel_bitmap(payload, side=side)
+                    except ValueError:
+                        pixels = None
+                else:
+                    pixels = None
+            if pixels is not None:
                 self._remember_optical_wire(original_payload, payload, "PIXEL")
-                from easychange.remote.pixel_transport import SIDE
                 image = QImage(
-                    pixels, SIDE, SIDE, SIDE, QImage.Format.Format_Grayscale8
+                    pixels, side, side, side, QImage.Format.Format_Grayscale8
                 ).copy()
-                label = self.machine_qrs[0]
                 return QPixmap.fromImage(image).scaled(
                     label.width(), label.height(),
                     Qt.AspectRatioMode.IgnoreAspectRatio,
