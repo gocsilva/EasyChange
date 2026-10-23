@@ -1058,22 +1058,12 @@ class MainWindow(QMainWindow):
         if self._machine != self.service.machine:
             self._machine = self.service.machine
             self._apply_machine_style()
-        # A sequenced native read has already been durably committed by
-        # CommandService. Publish its optical response before focus inspection
-        # and widget refresh; focus_command processes Qt events and can now
-        # paint the EC2 receipt instead of keeping the previous QR frame.
-        early_read_optics = bool(
-            self._machine and result.sequence and result.command == "read"
-        )
-        sequenced_compact_state_optics = bool(
-            self._machine
-            and result.sequence
-            and result.command == "state"
-            and "--compact" in text.split()
-        )
-        early_result_optics = bool(
-            early_read_optics or sequenced_compact_state_optics
-        )
+        # All sequenced replies are already owned by the durable result store.
+        # Publish the EC2 receipt *before* any focus or widget refresh, not only
+        # for read/state: structured read_many, search, write receipts and
+        # recovery requests otherwise leave the previous QR on HDMI while
+        # unrelated UI work completes. Never mutate the journaled wire result.
+        early_result_optics = bool(self._machine and result.sequence)
         if early_result_optics:
             self._update_machine_qr(result)
         self._refresh_header()
@@ -1085,14 +1075,10 @@ class MainWindow(QMainWindow):
             # EC2 payload and digest relative to the durable result, and
             # needlessly inflates a 1-line answer into several dense QR cells.
             # Keep verbose focus diagnostics for human/unsequenced commands.
-            # Sequenced reads and compact state persist their payload before
-            # this UI callback. Keep their QR bytes identical to the durable
-            # result instead of appending GUI-only focus fields.
-            if (
-                not is_self_update
-                and not (result.sequence and result.command == "read")
-                and not sequenced_compact_state_optics
-            ):
+            # Every sequenced result is immutable after journal commit:
+            # appending focus diagnostics here changes the EC2 checksum,
+            # breaks durable replay equivalence and increases QR payload.
+            if not is_self_update and not result.sequence:
                 result.data["easychange_focus"] = focus
                 result.data["command_focus_confirmed"] = bool(
                     focus.get("command_focus_confirmed")

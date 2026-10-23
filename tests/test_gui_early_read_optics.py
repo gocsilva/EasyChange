@@ -45,9 +45,19 @@ def test_sequenced_native_read_publishes_optics_before_focus():
     assert events.index("optics") < events.index("output")
 
 
-def test_unsequenced_or_other_command_preserves_focus_first():
-    for seq, command in ((None, "read"), ("QFASTSTATE123", "state")):
-        events, _result = _run_stub(seq, command)
+def test_all_sequenced_commands_publish_optics_before_focus():
+    for command in ("state", "read_many", "search", "write_file", "result_header", "read"):
+        events, result = _run_stub("QFASTALL1234", command)
+        assert events.count("optics") == 1
+        assert events.index("optics") < events.index("refresh")
+        assert events.index("optics") < events.index("focus")
+        assert "easychange_focus" not in result.data
+        assert "command_focus_confirmed" not in result.data
+
+
+def test_unsequenced_commands_preserve_focus_first():
+    for command in ("read", "state", "read_many"):
+        events, _result = _run_stub(None, command)
         assert events.count("optics") == 1
         assert events.index("focus") < events.index("optics")
 
