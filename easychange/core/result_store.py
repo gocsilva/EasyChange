@@ -260,6 +260,13 @@ class DurableResultStore:
         safe=sequence.upper()
         if any(not (ch.isalnum() or ch in "_-") for ch in safe):
             raise ValueError("INVALID_RESULT_SEQUENCE")
+        # On Windows, reserved device basenames remain special even when a
+        # suffix is appended (CON.json.zlib, NUL.json.zlib, COM1.json.zlib).
+        # Never let an EC1 sequence resolve to a device instead of a receipt.
+        if (safe in {"CON", "PRN", "AUX", "NUL"}
+                or (len(safe) == 4 and safe[:3] in {"COM", "LPT"}
+                    and safe[3] in "123456789")):
+            raise ValueError("INVALID_RESULT_SEQUENCE")
         return self.root / f"{safe}.json.zlib"
 
     @staticmethod

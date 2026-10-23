@@ -29,3 +29,15 @@ def test_distinct_unicode_identifier_cannot_alias_existing_ascii_receipt(tmp_pat
     # Historical ASCII case normalization remains compatible.
     assert store._path("qss")==store._path("QSS")
     assert store._path("q-7_abc").name=="Q-7_ABC.json.zlib"
+
+
+@pytest.mark.parametrize("sequence", (
+    "CON", "NUL", "PRN", "AUX", "COM1", "COM9", "LPT1", "LPT9",
+    "con", "nul", "com1",
+))
+def test_windows_reserved_device_sequences_never_become_receipt_paths(tmp_path,sequence):
+    """Windows treats CON.json.zlib/NUL.json.zlib as device names despite suffix."""
+    store=DurableResultStore(tmp_path/"receipts")
+    with pytest.raises(ValueError,match="INVALID_RESULT_SEQUENCE"):
+        store._path(sequence)
+    assert list(store.root.glob("*.json.zlib"))==[]
