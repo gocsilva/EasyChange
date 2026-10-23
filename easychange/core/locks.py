@@ -57,7 +57,9 @@ class LockManager:
             db.close()
 
     def acquire(self, path: str, owner: str, session: str, ttl_seconds: int | None = None) -> FileLock:
-        expiry = time.time() + (ttl_seconds or 3600)
+        if ttl_seconds is not None and (type(ttl_seconds) is not int or ttl_seconds <= 0):
+            raise ValueError("INVALID_LOCK_TTL")
+        expiry = time.time() + (3600 if ttl_seconds is None else ttl_seconds)
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("DELETE FROM locks WHERE expires_at IS NOT NULL AND expires_at <= ?", (time.time(),))

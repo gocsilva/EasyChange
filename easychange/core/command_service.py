@@ -4486,7 +4486,7 @@ class CommandService:
         if name == "lock":
             _require(args, 1, "file ID or path")
             path = self._resolve_ref(args[0]); relative = self.workspace.resolve(path).relative_to(self.workspace.root_path).as_posix()
-            lock = self.locks.acquire(relative, self.instance_id, self.session_id, _int_arg(args, 1, 3600) or None)
+            lock = self.locks.acquire(relative, self.instance_id, self.session_id, _int_arg(args, 1, 3600))
             return {"locked": lock.path, "owner": lock.owner, "expires_at": lock.expires_at}
         if name == "unlock":
             _require(args, 1, "file ID or path")
