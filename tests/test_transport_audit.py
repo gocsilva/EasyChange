@@ -289,3 +289,56 @@ def test_snapshot_avoids_parsing_unneeded_events(tmp_path, monkeypatch):
     assert [item["id"] for item in cursor["events"]] == [6, 7]
     assert cursor["more"] is True
     assert len(decoded) == 8  # five skips + two results + one lookahead
+
+
+
+def test_audit_writer_never_persists_secret_bearing_allowed_text_fields(tmp_path, monkeypatch):
+    folder = tmp_path / "audit"
+    monkeypatch.setattr(audit, "ROOT", folder)
+    monkeypatch.setattr(audit, "FILE", folder / "transport_audit.jsonl")
+    monkeypatch.setattr(audit, "_LAST_ID", 0)
+    marker = "VERY_SENSITIVE_AUDIT_MARKER"
+    audit.log(
+        "Bearer " + marker, "QVALID123", "MCP_TO_EASYCHANGE",
+        command_type="authorization=" + marker,
+        code="password=" + marker, mode="PIXEL+QR",
+    )
+    raw = audit.FILE.read_text(encoding="utf-8")
+    assert marker not in raw
+    assert audit.snapshot(limit=1)["events"][0]["mode"] == "PIXEL+QR"
+
+
+def test_audit_snapshot_never_exposes_secrets_inside_allowed_text_fields(tmp_path, monkeypatch):
+    folder = tmp_path / "audit"
+    folder.mkdir()
+    monkeypatch.setattr(audit, "ROOT", folder)
+    monkeypatch.setattr(audit, "FILE", folder / "transport_audit.jsonl")
+    marker = "VERY_SENSITIVE_AUDIT_MARKER"
+    audit.FILE.write_text(json.dumps({
+        "id": 123, "at": "2026-10-23T00:00:00Z",
+        "stage": "ec1_received", "sequence": "QVALID123",
+        "direction": "MCP_TO_EASYCHANGE", "mode": "PIXEL+QR",
+        "command_type": "authorization=" + marker,
+        "code": "password=" + marker,
+    }) + "\n", encoding="utf-8")
+    snapshot = audit.snapshot(limit=1)
+    assert snapshot["count"] == 1
+    assert snapshot["events"][0]["mode"] == "PIXEL+QR"
+    assert marker not in json.dumps(snapshot)
+
+
+
+def test_audit_snapshot_rejects_secret_bearing_timestamp(tmp_path, monkeypatch):
+    folder = tmp_path / "audit"
+    folder.mkdir()
+    monkeypatch.setattr(audit, "ROOT", folder)
+    monkeypatch.setattr(audit, "FILE", folder / "transport_audit.jsonl")
+    marker = "VERY_SENSITIVE_AUDIT_MARKER"
+    audit.FILE.write_text(json.dumps({
+        "id": 124, "at": "Bearer " + marker,
+        "stage": "ec1_received", "sequence": "QVALID123",
+        "direction": "MCP_TO_EASYCHANGE",
+    }) + "\n", encoding="utf-8")
+    result = audit.snapshot(limit=1)
+    assert result["events"] == []
+    assert marker not in json.dumps(result)
