@@ -99,3 +99,18 @@ def test_snapshot_skips_malformed_log_records_without_crashing(tmp_path,monkeypa
     result=audit.snapshot(after=0,limit=16)
     assert result["count"]==1
     assert result["events"][0]["sequence"]=="QGOODREC1"
+
+
+def test_audit_writer_rejects_nonfinite_numeric_samples(tmp_path,monkeypatch):
+    """Metrics JSONL must remain standards-compliant for strict MCP parsers."""
+    directory=tmp_path/"audit"
+    monkeypatch.setattr(audit,"ROOT",directory)
+    monkeypatch.setattr(audit,"FILE",directory/"ec-audit.jsonl")
+    audit.log("ec2_page_painted","QFINITE01","EASYCHANGE_TO_MCP",
+              render_ms=float("nan"),encoding_ms=float("inf"),
+              duration_ms=float("-inf"),packets=32)
+    raw=audit.FILE.read_text(encoding="utf-8")
+    assert "NaN" not in raw
+    assert "Infinity" not in raw
+    assert "-Infinity" not in raw
+    assert json.loads(raw,parse_constant=lambda _: (_ for _ in ()).throw(ValueError("NONFINITE")))["packets"]==32

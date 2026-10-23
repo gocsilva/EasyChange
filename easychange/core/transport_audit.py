@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime,timezone
 from pathlib import Path
-import hashlib,json,os,threading,time
+import hashlib,json,math,os,threading,time
 
 ROOT=Path(os.environ.get("LOCALAPPDATA") or Path.home())/"EasyChange"/"logs"
 FILE=ROOT/"transport_audit.jsonl"
@@ -28,6 +28,8 @@ def log(stage,sequence="",direction="",**kwargs):
          "direction":str(direction or "")[:40]}
     for k,v in kwargs.items():
         if k not in SAFE_FIELDS or k in {"stage","sequence","direction"}:continue
+        if isinstance(v,float) and not math.isfinite(v):
+            continue
         if v is None or isinstance(v,(bool,int,float)):rec[k]=v
         elif isinstance(v,str):
             if k=="sha256" and len(v)==64 and all(ch in "0123456789abcdef" for ch in v.lower()):
@@ -37,7 +39,7 @@ def log(stage,sequence="",direction="",**kwargs):
     try:
         with _LOCK:
             ROOT.mkdir(parents=True,exist_ok=True)
-            line=json.dumps(rec,ensure_ascii=True,separators=(",",":"))
+            line=json.dumps(rec,ensure_ascii=True,separators=(",",":"),allow_nan=False)
             if len(line)>1800:return
             if FILE.exists() and FILE.stat().st_size+len(line)>_MAX_FILE:
                 old2=FILE.with_suffix(".jsonl.2")
