@@ -1576,14 +1576,17 @@ class MainWindow(QMainWindow):
             getattr(self, "_host_optical_preference", "QR")
             if requested == "AUTO" else requested
         )
-        try:
-            item = json.loads(payload)
-            if isinstance(item, dict) and item.get("p") in {"EC2", "EC2H"}:
-                item["tm"] = optical_mode
-                item["rm"] = requested  # explicit remote selector, not host hint
-                payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
-        except (ValueError, TypeError):
-            pass
+        # Keep the original AUTO/QR bytes bit-for-bit unchanged. Only an
+        # explicit remote override or negotiated PIXEL mode needs new metadata.
+        if requested != "AUTO" or optical_mode == "PIXEL":
+            try:
+                item = json.loads(payload)
+                if isinstance(item, dict) and item.get("p") in {"EC2", "EC2H"}:
+                    item["tm"] = optical_mode
+                    item["rm"] = requested  # explicit remote selector, not host hint
+                    payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            except (ValueError, TypeError):
+                pass
         if optical_mode == "PIXEL":
             try:
                 pixels = encode_pixel_bitmap(payload)
