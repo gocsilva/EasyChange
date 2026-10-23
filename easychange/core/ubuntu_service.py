@@ -852,19 +852,73 @@ class UbuntuService:
                     )
         return requested
 
+    _KUBECTL_VALUE_FLAGS = frozenset({
+        "-n", "--namespace", "-o", "--output", "-f", "--filename",
+        "-l", "--selector", "--field-selector", "--request-timeout",
+        "--as", "--as-group", "--cache-dir", "--user", "--cluster",
+        "--sort-by", "--template", "--template-file", "--timeout",
+        "--chunk-size", "--limit",
+    })
+    _KUBECTL_BOOLEAN_GLOBAL_FLAGS = frozenset({
+        "-h", "--help", "--warnings-as-errors", "--disable-compression",
+        "--match-server-version",
+    })
+
+    @classmethod
+    def _kubectl_command_index(cls, args: list[str]) -> int:
+        """Find the real kubectl verb; never scan flag values/plugin argv."""
+        index = 0
+        while index < len(args):
+            item = str(args[index]).casefold()
+            if item in cls._KUBECTL_VALUE_FLAGS:
+                if index + 1 >= len(args):
+                    return -1
+                index += 2
+                continue
+            if (any(item.startswith(flag + "=")
+                    for flag in cls._KUBECTL_VALUE_FLAGS if flag.startswith("--"))
+                    or item.startswith(("-n=", "-o=", "-l=", "-f="))
+                    or (len(item) > 2 and item[:2] in {"-n", "-o", "-l", "-f"}
+                        and not item.startswith("--"))):
+                index += 1
+                continue
+            if item in cls._KUBECTL_BOOLEAN_GLOBAL_FLAGS:
+                index += 1
+                continue
+            # An unknown global option or a plugin verb is never safe merely
+            # because one of its later *arguments* happens to equal "get".
+            if item.startswith("-") or item not in cls._KUBECTL_VERBS:
+                return -1
+            return index
+        return -1
+
+    @classmethod
+    def _kubectl_next_positional(cls, args: list[str], start: int) -> str:
+        index = start
+        while index < len(args):
+            item = str(args[index]).casefold()
+            if item in cls._KUBECTL_VALUE_FLAGS:
+                index += 2
+                continue
+            if (any(item.startswith(flag + "=")
+                    for flag in cls._KUBECTL_VALUE_FLAGS if flag.startswith("--"))
+                    or item.startswith(("-n=", "-o=", "-l=", "-f="))
+                    or (len(item) > 2 and item[:2] in {"-n", "-o", "-l", "-f"}
+                        and not item.startswith("--"))):
+                index += 1
+                continue
+            if item.startswith("-"):
+                index += 1
+                continue
+            return item
+        return ""
+
     @classmethod
     def _kubectl_verb(cls, args: list[str]) -> tuple[str, str]:
-        lowered = [str(item).casefold() for item in args]
-        verb = next((item for item in lowered if item in cls._KUBECTL_VERBS), "")
-        if not verb:
+        index = cls._kubectl_command_index(args)
+        if index < 0:
             return "", ""
-        index = lowered.index(verb)
-        subverb = ""
-        for item in lowered[index + 1:]:
-            if item and not item.startswith("-"):
-                subverb = item
-                break
-        return verb, subverb
+        return str(args[index]).casefold(), cls._kubectl_next_positional(args, index + 1)
 
     @classmethod
     def _kubectl_mutating(cls, args: list[str]) -> bool:
@@ -903,20 +957,10 @@ class UbuntuService:
         if verb != "get":
             return
         lowered = [str(item).casefold() for item in args]
-        verb_index = next(
-            (i for i, value in enumerate(lowered) if value == "get"),
-            -1,
-        )
+        verb_index = cls._kubectl_command_index(args)
         if verb_index < 0:
             return
-        resource = next(
-            (
-                value
-                for value in lowered[verb_index + 1:]
-                if value and not value.startswith("-")
-            ),
-            "",
-        )
+        resource = cls._kubectl_next_positional(args, verb_index + 1)
         resource = resource.split("/", 1)[0]
         if resource not in {"secret", "secrets"}:
             return
