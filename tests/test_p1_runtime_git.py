@@ -284,3 +284,34 @@ def test_runtime_environment_resolution_status_can_query_ref_name(tmp_path, monk
         assert status["selected"]["env_keys"] == ["ConnectionString"]
     finally:
         service.close()
+
+
+def test_git_diff_refs_patch_preserves_utf8_when_page_splits_long_line(tmp_path):
+    _init_repo(tmp_path)
+    target=tmp_path/"unicode-long.txt"
+    target.write_text("old\n",encoding="utf-8")
+    _git(tmp_path,"add",".")
+    _git(tmp_path,"commit","-m","base")
+    base=_git(tmp_path,"rev-parse","HEAD")
+    target.write_text("€"*1000+"\n",encoding="utf-8")
+    _git(tmp_path,"add",".")
+    _git(tmp_path,"commit","-m","utf8")
+    head=_git(tmp_path,"rev-parse","HEAD")
+    expected=subprocess.run(
+        ["git","diff","--no-ext-diff","--unified=0",
+         f"{base}...{head}","--","unicode-long.txt"],
+        cwd=tmp_path,capture_output=True,check=True,
+    ).stdout.decode("utf-8")
+    service=GitService(Workspace.open(tmp_path))
+    cursor=0
+    parts=[]
+    for _ in range(40):
+        page=service.diff_refs(base_ref=base,head_ref=head,
+                path="unicode-long.txt",unified_lines=0,max_bytes=256,cursor=cursor)
+        parts.append(page["text"])
+        if page["complete"]:break
+        assert page["next_cursor"]>cursor
+        cursor=page["next_cursor"]
+    assert page["complete"]
+    assert "\ufffd" not in "".join(parts)
+    assert "".join(parts).strip()==expected.strip()

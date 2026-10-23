@@ -334,11 +334,20 @@ class GitService:
             stdout_file.seek(start)
             raw = stdout_file.read(min(page_bytes + 4096, max(0, total_bytes - start)))
 
+        # A caller can supply an arbitrary byte offset; never start decoding
+        # inside a multibyte UTF-8 character. Normal cursors remain unchanged.
+        while raw and raw[0] & 0xC0 == 0x80:
+            start += 1
+            raw = raw[1:]
         if len(raw) > page_bytes:
             boundary = raw.rfind(b"\n", 0, page_bytes + 1)
             cut = boundary + 1 if boundary >= 0 else page_bytes
         else:
             cut = len(raw)
+        # Long source lines have no newline within a page. The byte budget
+        # may end inside UTF-8; defer the incomplete codepoint to next page.
+        while 0 < cut < len(raw) and raw[cut] & 0xC0 == 0x80:
+            cut -= 1
         chunk = raw[:cut]
         next_cursor = start + len(chunk)
         complete = next_cursor >= total_bytes
