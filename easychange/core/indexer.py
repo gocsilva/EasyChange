@@ -16,8 +16,21 @@ from pathlib import Path
 from .subprocess_utils import hidden_console_kwargs
 
 
-SKIP_DIRS = {".git", ".easychange", ".venv", "venv", "node_modules", "bin", "obj", "dist", "build",
-             "__pycache__", ".gradle", ".idea", ".vs", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+class _CasefoldSkipDirs(set):
+    """Skip workspace internals regardless of directory case on Windows.
+
+    All indexer paths (walk, incremental updates, cold/hot search and listing)
+    share this membership gate, so case variants cannot bypass exclusions.
+    """
+    def __contains__(self, value: object) -> bool:
+        return isinstance(value, str) and super().__contains__(value.casefold())
+
+
+SKIP_DIRS = _CasefoldSkipDirs({
+    ".git", ".easychange", ".venv", "venv", "node_modules", "bin", "obj",
+    "dist", "build", "__pycache__", ".gradle", ".idea", ".vs",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache",
+})
 MAX_INDEX_BYTES = 2 * 1024 * 1024
 # Git may print matches from every tracked/untracked source. Bound what
 # cold discovery materializes even when the process writes many gigabytes.
