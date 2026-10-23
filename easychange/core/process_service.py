@@ -932,7 +932,26 @@ class ProcessService:
                         "heartbeat_at": now,
                     }
                 if now - float(current.get("heartbeat_at") or 0.0) >= self.JOB_HEARTBEAT_INTERVAL_SECONDS:
-                    current = self._write_job(job_id, {**current, "heartbeat_at": now})
+                    with self._job_write_lock:
+                        latest = self._read_job(job_id) or current
+                        latest_state = str(latest.get("state") or "").upper()
+                        if latest_state in {"CANCELLED", "SUCCEEDED", "FAILED"}:
+                            current = latest
+                        else:
+                            current = self._write_job(
+                                job_id, {**latest, "heartbeat_at": now}
+                            )
+                    if str(current.get("state") or "").upper() in {
+                        "CANCELLED", "SUCCEEDED", "FAILED"
+                    }:
+                        snapshot = {
+                            k: v for k, v in current.items()
+                            if k not in {"stdout", "stderr"}
+                        }
+                        snapshot["terminal"] = True
+                        snapshot["attached"] = True
+                        snapshot["pid_alive"] = False
+                        return snapshot
                 snapshot = {k: v for k, v in current.items() if k not in {"stdout", "stderr"}}
                 started = float(snapshot.get("started_at") or now)
                 snapshot["duration_ms"] = int(max(0.0, now - started) * 1000)

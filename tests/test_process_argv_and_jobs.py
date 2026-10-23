@@ -597,6 +597,63 @@ def test_job_cancel_wins_over_concurrent_stale_finalizer(tmp_path, monkeypatch):
     assert manifest["state"] == "CANCELLED"
 
 
+def test_job_heartbeat_cannot_overwrite_concurrent_terminal_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+    job_id = "JHEARTBEATRACE1"
+    manifest = {"job_id": job_id, "state": "RUNNING", "started_at": time.time(), "heartbeat_at": 0}
+    heartbeat_waiting = threading.Event()
+    allow_heartbeat_write = threading.Event()
+    terminal_written = threading.Event()
+
+    class ExitedProcess:
+        pid = 123
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+    process = ExitedProcess()
+
+    def read_job(_job_id):
+        return dict(manifest)
+
+    def write_job(_job_id, data):
+        if threading.current_thread().name.startswith("heartbeat-status") and data.get("state") == "RUNNING":
+            heartbeat_waiting.set()
+            assert allow_heartbeat_write.wait(timeout=5)
+        manifest.update(data)
+        if data.get("state") == "SUCCEEDED":
+            terminal_written.set()
+        return data
+
+    monkeypatch.setattr(service, "_read_job", read_job)
+    monkeypatch.setattr(service, "_write_job", write_job)
+    monkeypatch.setattr(service, "_tail_file", lambda _path, _limit: ("", 0, "0" * 64))
+    item = RunningProcess(
+        process_id=job_id,
+        argv=["fake"],
+        process=process,
+        stdout_path=workspace / "stdout.log",
+        stderr_path=workspace / "stderr.log",
+    )
+    service._processes[job_id] = item
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="heartbeat-status") as pool:
+        status = pool.submit(service.job_status, job_id)
+        assert heartbeat_waiting.wait(timeout=5)
+        process.returncode = 0
+        finalizer = pool.submit(service._finalize_job, job_id, item)
+        assert not terminal_written.wait(timeout=0.2)
+        allow_heartbeat_write.set()
+        finalizer.result(timeout=5)
+        status.result(timeout=5)
+
+    assert manifest["state"] == "SUCCEEDED"
+
+
 def test_job_tail_returns_only_new_bytes_and_preserves_cursor(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
     workspace = tmp_path / "workspace"
