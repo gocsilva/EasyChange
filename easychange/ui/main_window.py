@@ -957,7 +957,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_header(self) -> None:
         transport = "HID/COMPACT" if self.service.output == "compact" else "TEXT"
-        self.header.setText(f"EasyChange | {'MACHINE' if self._machine else 'HUMAN'} | {transport} | {self.service.workspace.root_path} | FOCUS: COMMAND")
+        self.header.setText(f"EasyChange | {'MACHINE' if self._machine else 'HUMAN'} | {transport} | FOCUS: COMMAND | {self.service.workspace.root_path}")
 
     def execute_command(self) -> None:
         text = self.command.text(); self.command.clear()
