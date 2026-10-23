@@ -18,7 +18,7 @@ from itertools import islice
 import threading
 import time
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .atomic_files import replace_with_retry
 from .subprocess_utils import hidden_console_kwargs
@@ -137,6 +137,7 @@ class RunningProcess:
     redact_values: tuple[str, ...] = ()
     pump_threads: tuple[threading.Thread, ...] = ()
     cleanup_paths: tuple[Path, ...] = ()
+    control_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def __post_init__(self) -> None:
         if self.exec_argv is None:
@@ -1156,14 +1157,15 @@ class ProcessService:
             if current is None:
                 raise LookupError(f"Job not found: {job_id}")
             return current
-        if item.process.poll() is None:
-            item.process.terminate()
-            try:
-                item.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                item.process.kill()
-                item.process.wait(timeout=3)
-        return self._finalize_job(job_id, item, cancelled=True)
+        with item.control_lock:
+            if item.process.poll() is None:
+                item.process.terminate()
+                try:
+                    item.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    item.process.kill()
+                    item.process.wait(timeout=3)
+            return self._finalize_job(job_id, item, cancelled=True)
     def _prune_finished(self, keep: int = 32) -> None:
         """Bound process objects; durable jobs are finalized before log cleanup."""
         keep = max(0, int(keep))
@@ -1897,18 +1899,19 @@ class ProcessService:
         item = self._processes.get(process_id)
         if item is None:
             raise LookupError(f"Process not found: {process_id}")
-        if item.process.poll() is None:
-            item.process.terminate()
-            try:
-                item.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                item.process.kill()
-                item.process.wait(timeout=3)
-        _join_pumps(item)
-        self._cleanup_paths(item.cleanup_paths)
-        result = {"process_id": process_id, "state": "STOPPED", "returncode": item.process.returncode}
-        self._prune_finished()
-        return result
+        with item.control_lock:
+            if item.process.poll() is None:
+                item.process.terminate()
+                try:
+                    item.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    item.process.kill()
+                    item.process.wait(timeout=3)
+            _join_pumps(item)
+            self._cleanup_paths(item.cleanup_paths)
+            result = {"process_id": process_id, "state": "STOPPED", "returncode": item.process.returncode}
+            self._prune_finished()
+            return result
 
     def run_output(
         self,

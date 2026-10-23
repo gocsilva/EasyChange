@@ -709,6 +709,74 @@ def test_job_cancel_wins_over_concurrent_stale_finalizer(tmp_path, monkeypatch):
     assert manifest["state"] == "CANCELLED"
 
 
+def test_job_cancel_and_stop_all_do_not_terminate_same_process_twice(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+    job_id = "JCANCELSTOPRACE1"
+    terminate_entered = threading.Event()
+    allow_terminate = threading.Event()
+    duplicate_terminate_entered = threading.Event()
+
+    class Child:
+        pid = 123
+
+        def __init__(self):
+            self.returncode = None
+            self.terminate_calls = 0
+            self.terminate_lock = threading.Lock()
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            with self.terminate_lock:
+                self.terminate_calls += 1
+                if self.terminate_calls > 1:
+                    duplicate_terminate_entered.set()
+            terminate_entered.set()
+            assert allow_terminate.wait(timeout=5)
+            with self.terminate_lock:
+                self.returncode = -15
+
+        def wait(self, timeout=None):
+            assert timeout is not None
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    child = Child()
+    item = RunningProcess(
+        process_id=job_id,
+        argv=["fake"],
+        process=child,
+        stdout_path=workspace / "stdout.log",
+        stderr_path=workspace / "stderr.log",
+    )
+    service._track_process(job_id, item)
+    service._write_job(
+        job_id,
+        {"job_id": job_id, "state": "RUNNING", "started_at": time.time()},
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        shutting_down = pool.submit(service.stop_all)
+        assert terminate_entered.wait(timeout=5)
+        cancelling = pool.submit(service.job_cancel, job_id)
+        try:
+            assert not duplicate_terminate_entered.wait(timeout=0.2)
+        finally:
+            allow_terminate.set()
+        cancel_result = cancelling.result(timeout=5)
+        shutting_down.result(timeout=5)
+
+    assert child.terminate_calls == 1
+    assert cancel_result["terminal"] is True
+    assert service._read_job(job_id)["state"] in {"CANCELLED", "FAILED"}
+
+
 def test_job_heartbeat_cannot_overwrite_concurrent_terminal_state(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
     workspace = tmp_path / "workspace"
