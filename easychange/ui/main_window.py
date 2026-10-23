@@ -1473,7 +1473,7 @@ class MainWindow(QMainWindow):
         readonly_inline = {
             "state", "health", "command_schema", "discover_many",
             "search", "locate", "study", "definition", "references",
-            "read", "read_many", "read_regions", "result_get",
+            "read_many", "read_regions", "result_get",
             "capabilities", "optical_transport_get", "transport_audit", "transport_log",
         }
         inline_limit = (
@@ -1529,7 +1529,9 @@ class MainWindow(QMainWindow):
                     for _ in range(len(self.machine_qrs) + 1):
                         if self._optical_render_pending is None:
                             break
-                        self._render_next_optical_symbol()
+                        # Preserve immediate paint for verified small terminal
+                        # receipts; async raster applies to non-inline pages.
+                        self._render_next_optical_symbol(force_inline=True)
                     # QLabel.setPixmap schedules a paint for the next event
                     # loop turn. The MCP starts observing as soon as the HID
                     # submission is acknowledged, so flush the compact state
@@ -1667,7 +1669,7 @@ class MainWindow(QMainWindow):
         }
         QTimer.singleShot(0, self._render_next_optical_symbol)
 
-    def _render_next_optical_symbol(self) -> None:
+    def _render_next_optical_symbol(self, *, force_inline: bool = False) -> None:
         pending = self._optical_render_pending
         if not isinstance(pending, dict):
             return
@@ -1684,9 +1686,10 @@ class MainWindow(QMainWindow):
         if index < len(payloads):
             payload = payloads[index]
             try:
-                if len(payloads) > self._OPTICAL_NORMAL_SLOTS:
-                    # A 32-QR page can take seconds to rasterize; running
-                    # qrcode.make() in zero-delay Qt callbacks freezes Win32.
+                if (len(payloads) > 1 or len(payload) > 256) and not force_inline:
+                    # Even 2-4 ordinary QR cells can stall Qt for hundreds of
+                    # milliseconds; a single large QR may block as well.
+                    # Keep only genuinely tiny one-cell receipts inline.
                     # Prepare at most two distinct rasters concurrently and
                     # convert QImage -> QPixmap ONLY on this Qt thread.
                     futures = pending.setdefault("raster_futures", {})
