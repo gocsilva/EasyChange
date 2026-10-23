@@ -382,25 +382,51 @@ class FileService:
         self.write(path, before + separator + value)
         return {"path": path, "appended_chars": len(value)}
 
+    @staticmethod
+    def _edit_line_ending(lines: list[str], index: int) -> str:
+        # Prefer the nearest original line's terminator; preserve mixed-EOL
+        # neighbors byte-for-byte instead of rebuilding the whole file.
+        for i in sorted(range(len(lines)), key=lambda i: abs(i - index)):
+            item = lines[i]
+            if item.endswith("\r\n"):
+                return "\r\n"
+            if item.endswith("\n"):
+                return "\n"
+            if item.endswith("\r"):
+                return "\r"
+        return "\n"
+
     def insert_line(self, path: str, line: int, value: str) -> dict:
         _, relative, original = self._read_for_edit(path)
-        lines = original.splitlines()
+        lines = original.splitlines(keepends=True)
         if line < 1 or line > len(lines) + 1:
             raise IndexError(f"Line out of range: {line}")
-        lines.insert(line - 1, value)
-        ending = "\n" if original.endswith(("\n", "\r")) else ""
-        updated = "\n".join(lines) + ending
+        index = line - 1
+        ending = self._edit_line_ending(lines, index)
+        if index == len(lines) and lines and not lines[-1].endswith(("\r", "\n")):
+            # Appending after an unterminated last line adds a separator but
+            # never invents a final trailing newline that did not exist.
+            lines[-1] += ending
+            lines.append(value)
+        else:
+            lines.insert(index, value + ending if lines else value)
+        updated = "".join(lines)
         self.write(path, updated)
         return {"path": relative, "line": line, "_before": original, "_after": updated}
 
     def replace_range(self, path: str, start: int, end: int, value: str) -> dict:
         _, relative, original = self._read_for_edit(path)
-        lines = original.splitlines()
+        lines = original.splitlines(keepends=True)
         if start < 1 or end < start or end > len(lines):
             raise IndexError("Invalid line range")
-        lines[start - 1:end] = value.splitlines()
-        ending = "\n" if original.endswith(("\n", "\r")) else ""
-        updated = "\n".join(lines) + ending
+        ending = self._edit_line_ending(lines, start - 1)
+        removed_last = lines[end - 1]
+        had_trailing_ending = removed_last.endswith(("\r", "\n"))
+        replacement = [item + ending for item in value.splitlines()]
+        if replacement and not had_trailing_ending:
+            replacement[-1] = replacement[-1][:-len(ending)]
+        lines[start - 1:end] = replacement
+        updated = "".join(lines)
         self.write(path, updated)
         return {
             "path": relative, "start": start, "end": end,
