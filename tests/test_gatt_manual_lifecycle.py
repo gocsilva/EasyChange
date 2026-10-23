@@ -93,3 +93,33 @@ def test_worker_stop_cancels_async_task_joins_and_clears_sensitive_state(monkeyp
     assert client.commands.empty() and client.events.empty()
     assert client.status()["running"] is False
     assert client.stop(timeout=0)
+
+
+
+def test_gui_gatt_disable_uses_nonblocking_shutdown_and_waits_for_release(tmp_path, monkeypatch):
+    app = _app()
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=False)
+    requested_timeouts = []
+    worker_released = False
+
+    def fake_stop(timeout=3.0):
+        requested_timeouts.append(timeout)
+        return worker_released
+
+    monkeypatch.setattr(window._gatt_client, "stop", fake_stop)
+    try:
+        window._gatt_enabled = True
+        assert window._disable_gatt_connection() is False
+        assert requested_timeouts == [0.0]
+        assert not window.gatt_toggle_button.isEnabled()
+        assert window._gatt_timer.isActive()
+        assert "aguardando worker" in window._gatt_status.text()
+
+        worker_released = True
+        assert window._disable_gatt_connection() is True
+        assert requested_timeouts == [0.0, 0.0]
+        assert window.gatt_toggle_button.isEnabled()
+        assert not window._gatt_timer.isActive()
+    finally:
+        window.close()
+        app.processEvents()

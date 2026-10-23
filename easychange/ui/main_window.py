@@ -930,7 +930,10 @@ class MainWindow(QMainWindow):
         self._machine_command_queue = deque(
             item for item in self._machine_command_queue if not isinstance(item, tuple)
         )
-        stopped = self._gatt_client.stop(timeout=3.0)
+        # Never join a Bluetooth worker on Qt's paint/event thread. Its
+        # shutdown is polled by _poll_gatt_client; closeEvent also defers
+        # finalization until this returns True.
+        stopped = self._gatt_client.stop(timeout=0.0)
         self.gatt_toggle_button.setText("Ligar GATT")
         self.gatt_toggle_button.setEnabled(stopped)
         self.gatt_retry_button.setEnabled(False)
