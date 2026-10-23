@@ -321,7 +321,7 @@ class MainWindow(QMainWindow):
         self._host_optical_preference = "QR"
         self.remote_transport_selector = QComboBox()
         self.remote_transport_selector.setObjectName("easychangeRemoteTransportMode")
-        self.remote_transport_selector.addItems(["AUTO", "GATT", "QR", "PIXEL"])
+        self.remote_transport_selector.addItems(["AUTO", "GATT", "QR", "PIXEL", "PIXEL+QR"])
         self.remote_transport_selector.setToolTip(
             "AUTO usa GATT se autenticado e QR como retorno visual; QR conserva "
             "o EC2 atual; PIXEL desenha os mesmos pacotes EC2 em celulas ECP1. "
@@ -860,7 +860,7 @@ class MainWindow(QMainWindow):
         choice takes effect even if the local selection has not been refreshed.
         """
         chosen = str(value or "").upper()
-        if chosen not in {"AUTO", "QR", "PIXEL", "GATT"}:
+        if chosen not in {"AUTO", "QR", "PIXEL", "PIXEL+QR", "GATT"}:
             return
         self.remote_transport_mode = chosen
         # An explicit GATT selection is an operator request to enable it;
@@ -987,22 +987,52 @@ class MainWindow(QMainWindow):
         # CommandService receives the exact original ':ec <seq> <command>';
         # no new command executes and the journal/mutation sequence is stable.
         # A manual selector on this GUI takes precedence over this hint.
-        parts = text.strip().split(maxsplit=4)
-        if (len(parts) == 5 and parts[0].casefold() == ":ec"
+        # In-band display-only control, parsed on the Qt thread BEFORE
+        # queuing the unchanged EC1 command. This never replays a mutation.
+        parts = text.strip().split(maxsplit=6)
+        inline_ms = None
+        if (len(parts) == 7 and parts[0].casefold() == ":ec"
                 and parts[2].casefold() == ":view"
-                and parts[3].upper() in {"QR", "PIXEL"}):
+                and parts[3].upper() in {"QR", "PIXEL", "HYBRID"}
+                and parts[4].casefold() == ":dwell"):
+            try:
+                candidate = int(parts[5])
+                if 300 <= candidate <= 5000:
+                    inline_ms = candidate
+                else:
+                    return  # invalid presentation envelope, fail closed
+            except (ValueError, TypeError):
+                return
             preference = parts[3].upper()
-            text = f":ec {parts[1]} {parts[4]}"
-            if preference != self._host_optical_preference:
-                self._host_optical_preference = preference
-                if self.remote_transport_mode == "AUTO":
-                    self._optical_timer.stop()
-                    self._optical_render_generation += 1
-                    self._optical_render_pending = None
-                    self._optical_pixmaps.clear()
-                    self._optical_page = 0
-                    if self._machine and self._optical_payloads:
-                        self._render_optical_page()
+            text = f":ec {parts[1]} {parts[6]}"
+        else:
+            legacy = text.strip().split(maxsplit=4)
+            if (len(legacy) == 5 and legacy[0].casefold() == ":ec"
+                    and legacy[2].casefold() == ":view"
+                    and legacy[3].upper() in {"QR", "PIXEL", "HYBRID"}):
+                preference = legacy[3].upper()
+                text = f":ec {legacy[1]} {legacy[4]}"
+            else:
+                preference = None
+        if inline_ms is not None:
+            current = self.service.optical_transport_config()
+            if current["adaptive_enabled"]:
+                target = max(current["min_ms"], min(current["max_ms"], inline_ms))
+                if target != current["current_ms"]:
+                    self.service.configure_optical_transport(
+                        current_ms=target, adjusted_by="mcp_inline_auto"
+                    )
+                    self._sync_optical_transport_controls()
+        if preference is not None and preference != self._host_optical_preference:
+            self._host_optical_preference = preference
+            if self.remote_transport_mode == "AUTO":
+                self._optical_timer.stop()
+                self._optical_render_generation += 1
+                self._optical_render_pending = None
+                self._optical_pixmaps.clear()
+                self._optical_page = 0
+                if self._machine and self._optical_payloads:
+                    self._render_optical_page()
         self._machine_command_queue.append(text)
         self._start_next_machine_command()
 
@@ -1282,7 +1312,7 @@ class MainWindow(QMainWindow):
         chosen = getattr(self, "remote_transport_mode", "AUTO")
         visual = (getattr(self, "_host_optical_preference", "QR")
                   if chosen == "AUTO" else chosen)
-        return 130 if visual == "PIXEL" else None
+        return 130 if visual in {"PIXEL", "PIXEL+QR", "HYBRID"} else None
 
     def _update_machine_qr(self, result) -> None:
         self._optical_timer.stop()
@@ -1529,6 +1559,11 @@ class MainWindow(QMainWindow):
         ):
             return
         self._optical_timer.stop()
+        # The command worker can update the persisted EC2 dwell while this
+        # Qt timer is active. Read it on each page, without process restart.
+        self._optical_timer.setInterval(
+            int(self.service.optical_transport_config()["current_ms"])
+        )
         slots, page_count, start, data_slots, include_header = self._optical_page_plan()
         page = self._optical_page % page_count
         payloads = self._optical_payloads[start:start + data_slots]
@@ -1618,18 +1653,31 @@ class MainWindow(QMainWindow):
             getattr(self, "_host_optical_preference", "QR")
             if requested == "AUTO" else requested
         )
-        # Keep the original AUTO/QR bytes bit-for-bit unchanged. Only an
-        # explicit remote override or negotiated PIXEL mode needs new metadata.
-        if requested != "AUTO" or optical_mode == "PIXEL":
+        # Advertise the v2 runtime presentation contract on observed EC2
+        # pixels, enabling future per-command dwell hints on the MCP.
+        if True:
             try:
                 item = json.loads(payload)
                 if isinstance(item, dict) and item.get("p") in {"EC2", "EC2H"}:
                     item["tm"] = optical_mode
                     item["rm"] = requested  # explicit remote selector, not host hint
+                    item["vh"] = 2  # supports inline :view MODE :dwell N
                     payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
             except (ValueError, TypeError):
                 pass
-        if optical_mode == "PIXEL":
+        # HYBRID uses ECP1 for the receipt and most data fragments, with
+        # periodic QR cells (including data index 0). Mixed pages remain
+        # independently CRC/digest verified by the same EC2 receiver.
+        render_pixel = optical_mode in {"PIXEL", "PIXEL+QR", "HYBRID"}
+        if render_pixel and optical_mode in {"PIXEL+QR", "HYBRID"}:
+            try:
+                wire = json.loads(payload)
+                render_pixel = (wire.get("p") == "EC2H" or
+                                (wire.get("p") == "EC2" and
+                                 int(wire.get("i", 0)) % 4 != 0))
+            except (TypeError, ValueError, OverflowError):
+                render_pixel = False
+        if render_pixel:
             from easychange.remote.pixel_transport import SIDE, LARGE_SIDE
             label = self.machine_qrs[0]
             side = SIDE
