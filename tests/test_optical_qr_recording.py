@@ -120,9 +120,16 @@ def test_explicit_qr_selector_hashes_actual_painted_wire(tmp_path):
                 break
         assert window._optical_render_pending is None
         result = window._optical_test_counter.status(SID)
-        expected = json.dumps({"p":"EC2","s":"QACTUALQR1","i":0,
-                               "tm":"QR","rm":"QR"},separators=(",",":"))
-        assert result["manifest"][0]["sha256"] == hashlib.sha256(expected.encode()).hexdigest()
+        # Hash the actual on-screen wire representation. This includes
+        # versioned transport hints such as vh=2, not just the old tm/rm
+        # metadata. The recorder must match exactly what Qt painted.
+        painted_wire, kind = window._optical_rendered_wire[raw]
+        painted = json.loads(painted_wire)
+        assert kind == "QR"
+        assert painted["tm"] == "QR" and painted["rm"] == "QR"
+        assert result["manifest"][0]["sha256"] == hashlib.sha256(
+            painted_wire.encode("utf-8")
+        ).hexdigest()
         assert result["non_qr_displays"] == 0
     finally:
         window.close()
