@@ -224,29 +224,76 @@ class GitService:
             raise ValueError("INVALID_GIT_REF")
         return ref
 
-    def _diff_paths_z(self, *args: str) -> list[bytes]:
-        """Read Git file paths losslessly; C-quoted lines are not real paths."""
-        completed = subprocess.run(
-            ["git", *args],
-            cwd=self.workspace.root_path,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=45,
-            check=False,
-            **hidden_console_kwargs(),
-        )
-        if completed.returncode:
-            raise RuntimeError(
-                completed.stderr.decode("utf-8", errors="replace").strip()
-                or "Git diff file list failed"
+    def _diff_paths_page_z(
+        self, *args: str, cursor: int, limit: int, name_status: bool,
+    ) -> tuple[list[dict], int]:
+        """Count all NUL-framed Git paths but retain only the requested page.
+
+        Git can enumerate millions of changed files. Neither subprocess.PIPE
+        nor splitting the entire output into a Python list is memory-bounded.
+        """
+        with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(mode="w+b") as stderr_file:
+            completed = subprocess.run(
+                ["git", *args],
+                cwd=self.workspace.root_path,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                timeout=45,
+                check=False,
+                **hidden_console_kwargs(),
             )
-        raw = completed.stdout
-        if not raw:
-            return []
-        if raw[-1] != 0:
-            raise RuntimeError("GIT_DIFF_NUL_OUTPUT_INCOMPLETE")
-        return raw[:-1].split(bytes([0]))
+            if completed.returncode:
+                stderr_file.seek(0)
+                detail = stderr_file.read(4096).decode("utf-8", errors="replace").strip()
+                raise RuntimeError(detail or "Git diff file list failed")
+            stdout_file.seek(0)
+
+            def tokens():
+                pending = b""
+                while True:
+                    block = stdout_file.read(64 * 1024)
+                    if not block:
+                        break
+                    fields = (pending + block).split(b"\0")
+                    pending = fields.pop()
+                    if len(pending) > 64 * 1024:
+                        raise RuntimeError("GIT_DIFF_NUL_TOKEN_TOO_LARGE")
+                    for token in fields:
+                        if len(token) > 64 * 1024:
+                            raise RuntimeError("GIT_DIFF_NUL_TOKEN_TOO_LARGE")
+                        yield token
+                if pending:
+                    raise RuntimeError("GIT_DIFF_NUL_OUTPUT_INCOMPLETE")
+
+            selected: list[dict] = []
+            total = 0
+            stream = iter(tokens())
+            for token in stream:
+                if not token:
+                    raise RuntimeError("GIT_DIFF_NUL_OUTPUT_INCOMPLETE")
+                if name_status:
+                    status = token.decode("ascii", errors="replace")
+                    first = next(stream, None)
+                    if not first:
+                        raise RuntimeError("GIT_DIFF_NUL_OUTPUT_INCOMPLETE")
+                    first_path = first.decode("utf-8", errors="replace")
+                    if status.startswith(("R", "C")):
+                        second = next(stream, None)
+                        if not second:
+                            raise RuntimeError("GIT_DIFF_NUL_OUTPUT_INCOMPLETE")
+                        item = {
+                            "status": status, "old_path": first_path,
+                            "path": second.decode("utf-8", errors="replace"),
+                        }
+                    else:
+                        item = {"status": status, "path": first_path}
+                else:
+                    item = {"path": token.decode("utf-8", errors="replace")}
+                if cursor <= total < cursor + limit:
+                    selected.append(item)
+                total += 1
+            return selected, total
 
     def _diff_range(self, base_ref: str, head_ref: str) -> str:
         base = self._safe_ref(base_ref)
@@ -278,32 +325,14 @@ class GitService:
         diff_range = self._diff_range(base_ref, head_ref)
         common = ["diff", "--no-ext-diff"]
         if name_status:
-            tokens = self._diff_paths_z(
+            limit = max(1, min(5000, int(max_items or 500)))
+            selected, total = self._diff_paths_page_z(
                 *common, "--name-status", "-z", diff_range, "--",
                 *([path] if path else []),
+                cursor=cursor, limit=limit, name_status=True,
             )
-            items = []
-            index = 0
-            while index < len(tokens):
-                status = tokens[index].decode("ascii", errors="replace")
-                index += 1
-                paths_needed = 2 if status.startswith(("R", "C")) else 1
-                if not status or index + paths_needed > len(tokens):
-                    raise RuntimeError("GIT_DIFF_NUL_OUTPUT_INCOMPLETE")
-                paths = [
-                    part.decode("utf-8", errors="replace")
-                    for part in tokens[index:index + paths_needed]
-                ]
-                index += paths_needed
-                if paths_needed == 2:
-                    items.append({"status": status, "old_path": paths[0],
-                                  "path": paths[1]})
-                else:
-                    items.append({"status": status, "path": paths[0]})
-            limit = max(1, min(5000, int(max_items or 500)))
-            selected = items[cursor:cursor + limit]
             next_cursor = cursor + len(selected)
-            complete = next_cursor >= len(items)
+            complete = next_cursor >= total
             return {
                 "mode": "name_status",
                 "base_ref": base_ref,
@@ -311,24 +340,22 @@ class GitService:
                 "range": diff_range,
                 "path": path,
                 "items": selected,
-                "total_count": len(items),
+                "total_count": total,
                 "returned": len(selected),
                 "cursor": cursor,
                 "next_cursor": None if complete else next_cursor,
-                "remaining_count": max(0, len(items) - next_cursor),
+                "remaining_count": max(0, total - next_cursor),
                 "complete": complete,
             }
         if name_only:
-            tokens = self._diff_paths_z(
+            limit = max(1, min(5000, int(max_items or 500)))
+            selected, total = self._diff_paths_page_z(
                 *common, "--name-only", "-z", diff_range, "--",
                 *([path] if path else []),
+                cursor=cursor, limit=limit, name_status=False,
             )
-            items = [{"path": part.decode("utf-8", errors="replace")}
-                     for part in tokens if part]
-            limit = max(1, min(5000, int(max_items or 500)))
-            selected = items[cursor:cursor + limit]
             next_cursor = cursor + len(selected)
-            complete = next_cursor >= len(items)
+            complete = next_cursor >= total
             return {
                 "mode": "name_only",
                 "base_ref": base_ref,
@@ -336,11 +363,11 @@ class GitService:
                 "range": diff_range,
                 "path": path,
                 "items": selected,
-                "total_count": len(items),
+                "total_count": total,
                 "returned": len(selected),
                 "cursor": cursor,
                 "next_cursor": None if complete else next_cursor,
-                "remaining_count": max(0, len(items) - next_cursor),
+                "remaining_count": max(0, total - next_cursor),
                 "complete": complete,
             }
 

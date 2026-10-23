@@ -351,3 +351,34 @@ def test_git_diff_refs_name_status_preserves_unicode_rename_pair(tmp_path):
     result=GitService(Workspace.open(tmp_path)).diff_refs(
         base_ref=base,head_ref=head,name_status=True)
     assert result["items"]==[{"status":"R100","old_path":old,"path":new}]
+
+
+def test_git_diff_name_lists_spool_and_page_without_unbounded_stdout_pipe(tmp_path, monkeypatch):
+    """Huge Git name lists must not be captured wholly into Python memory."""
+    from types import SimpleNamespace
+    import subprocess
+    import easychange.core.git_service as git_module
+
+    service = GitService(SimpleNamespace(root_path=tmp_path))
+    outputs = [
+        b"\0".join(f"file-{n:04d}.cs".encode() for n in range(1200)) + b"\0",
+        b"R100\0old.cs\0new.cs\0M\0other.cs\0",
+    ]
+
+    def fake_run(argv, **kwargs):
+        assert kwargs["stdout"] != subprocess.PIPE
+        assert kwargs["stderr"] != subprocess.PIPE
+        kwargs["stdout"].write(outputs.pop(0))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(git_module.subprocess, "run", fake_run)
+    names = service.diff_refs(base_ref="HEAD", name_only=True, cursor=500, max_items=2)
+    assert names["total_count"] == 1200
+    assert names["items"] == [{"path": "file-0500.cs"}, {"path": "file-0501.cs"}]
+    assert names["next_cursor"] == 502
+    statuses = service.diff_refs(base_ref="HEAD", name_status=True, cursor=0, max_items=2)
+    assert statuses["items"] == [
+        {"status": "R100", "old_path": "old.cs", "path": "new.cs"},
+        {"status": "M", "path": "other.cs"},
+    ]
+    assert statuses["complete"] is True
