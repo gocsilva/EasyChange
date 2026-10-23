@@ -834,7 +834,10 @@ class Indexer:
 
     def _candidate_rows(self, query: str, *, regex: bool, extension: str | None,
                         path_prefix: str | None) -> list[tuple[str, str, int, int]]:
-        if self._fts_enabled and not regex and len(query) >= 3:
+        # SQLite lower() only folds ASCII, while Python's final matcher
+        # uses Unicode casefold. Non-ASCII queries must not be discarded
+        # by a narrower SQL/FTS candidate prefilter.
+        if self._fts_enabled and not regex and len(query) >= 3 and query.isascii():
             clauses = ["files_fts MATCH ?"]
             params: list[object] = ['"' + query.replace('"', '""') + '"']
             if extension:
@@ -868,7 +871,7 @@ class Indexer:
             clause, values=self._literal_prefix_filter(path_prefix,"path")
             clauses.append(clause)
             params.extend(values)
-        if not regex:
+        if not regex and query.isascii():
             clauses.append("instr(lower(content), ?) > 0")
             params.append(query.casefold())
         with self._connect() as db:
