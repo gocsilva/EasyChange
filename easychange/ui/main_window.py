@@ -1272,6 +1272,18 @@ class MainWindow(QMainWindow):
         # Count it even if later replaced by the complete EC2 bundle.
         self._record_painted_qrs([payload])
         return True
+    def _pixel_chunk_chars(self) -> int | None:
+        """Fit normal EC2 fragment envelopes into the ECP1 56x56 cell.
+
+        The legacy QR adaptive fragment sizing stays byte-for-byte unchanged.
+        Only the visual representation of a fresh PIXEL result is re-chunked.
+        The durable result digest, sequence and mutation journal are unchanged.
+        """
+        chosen = getattr(self, "remote_transport_mode", "AUTO")
+        visual = (getattr(self, "_host_optical_preference", "QR")
+                  if chosen == "AUTO" else chosen)
+        return 130 if visual == "PIXEL" else None
+
     def _update_machine_qr(self, result) -> None:
         self._optical_timer.stop()
         self._optical_render_generation += 1
@@ -1383,6 +1395,7 @@ class MainWindow(QMainWindow):
             try:
                 payloads, header = encode_result_bundle(
                     result,
+                    chunk_chars=self._pixel_chunk_chars(),
                     max_packets=self._OPTICAL_BROADCAST_MAX_CHUNKS,
                     overflow_packets=self._OPTICAL_OVERFLOW_BROADCAST_CHUNKS,
                 )
@@ -1416,6 +1429,7 @@ class MainWindow(QMainWindow):
             future = self._optical_encode_executor.submit(
                 encode_result_bundle,
                 result,
+                chunk_chars=self._pixel_chunk_chars(),
                 max_packets=self._OPTICAL_BROADCAST_MAX_CHUNKS,
                 overflow_packets=self._OPTICAL_OVERFLOW_BROADCAST_CHUNKS,
             )
