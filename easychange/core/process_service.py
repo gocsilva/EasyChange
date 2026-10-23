@@ -223,6 +223,7 @@ class ProcessService:
         self._migrate_legacy_jobs()
         self._processes: dict[str, RunningProcess] = {}
         self.last_execution: dict | None = None
+        self._job_start_lock = threading.RLock()
         self._job_write_lock = threading.RLock()
         self._reconcile_stop = threading.Event()
         self._reconcile_thread: threading.Thread | None = None
@@ -640,6 +641,29 @@ class ProcessService:
         return result
 
     def job_start(
+        self,
+        argv: list[str],
+        job_id: str,
+        *,
+        env: dict[str, str] | None = None,
+        redact_values: list[str] | tuple[str, ...] | None = None,
+        metadata: dict | None = None,
+        no_window: bool = True,
+    ) -> dict:
+        # Keep the manifest check, QUEUED write, process launch, and RUNNING
+        # write atomic with respect to other starts on this service. Locking
+        # only _write_job still lets concurrent calls launch the same ID.
+        with self._job_start_lock:
+            return self._job_start_locked(
+                argv,
+                job_id,
+                env=env,
+                redact_values=redact_values,
+                metadata=metadata,
+                no_window=no_window,
+            )
+
+    def _job_start_locked(
         self,
         argv: list[str],
         job_id: str,

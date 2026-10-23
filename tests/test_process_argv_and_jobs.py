@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -129,6 +131,73 @@ def test_job_heartbeat_updates_while_process_is_alive(tmp_path, monkeypatch):
     assert status["attached"] is True
 
     service.job_cancel("JHEART01")
+
+
+def test_concurrent_job_start_does_not_expose_queued_manifest_as_orphaned(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+    start_entered = threading.Event()
+    allow_start = threading.Event()
+    second_call_entered = threading.Event()
+    second_saw_queued = threading.Event()
+    call_context = threading.local()
+    start_calls = []
+    original_read_job = service._read_job
+
+    def observe_job_read(job_id):
+        result = original_read_job(job_id)
+        if (
+            getattr(call_context, "second", False)
+            and result
+            and result.get("state") == "QUEUED"
+        ):
+            second_saw_queued.set()
+        return result
+
+    def blocked_start(argv, process_id, **kwargs):
+        start_calls.append(process_id)
+        start_entered.set()
+        assert allow_start.wait(timeout=5)
+        return {
+            "pid": 12345,
+            "state": "RUNNING",
+            "argv": list(argv),
+            "exec_argv": list(argv),
+        }
+
+    monkeypatch.setattr(service, "start", blocked_start)
+    monkeypatch.setattr(service, "_read_job", observe_job_read)
+    monkeypatch.setattr(service, "_pid_alive", lambda _pid: True)
+    argv = [sys.executable, "-c", "print('once')"]
+
+    def second_start():
+        call_context.second = True
+        second_call_entered.set()
+        return service.job_start(argv, "JCONCUR01")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(service.job_start, argv, "JCONCUR01")
+        assert start_entered.wait(timeout=5)
+        second = pool.submit(second_start)
+        assert second_call_entered.wait(timeout=5)
+
+        # The first caller has published QUEUED but has not yet attached the
+        # child process. The second caller must not observe it as an orphan.
+        assert not second_saw_queued.wait(timeout=0.05)
+
+        allow_start.set()
+        first_result = first.result(timeout=5)
+        second_result = second.result(timeout=5)
+
+    assert not second_saw_queued.is_set()
+    assert start_calls == ["JCONCUR01"]
+    assert first_result["state"] == "RUNNING"
+    assert second_result["state"] == "RUNNING"
+    assert first_result["pid"] == second_result["pid"] == 12345
 
 
 def test_job_cancel_is_terminal_and_idempotent_for_attached_job(tmp_path, monkeypatch):
