@@ -32,6 +32,14 @@ def test_hybrid_renders_both_codecs_without_new_command(tmp_path):
         assert window._optical_rendered_wire[header][1] == "PIXEL"
         assert window._optical_rendered_wire[chunk0][1] == "QR"
         assert window._optical_rendered_wire[chunk1][1] == "PIXEL"
+        # The only extra mode metadata belongs in the persistent EC2H.
+        # Dense 32-tile QR/PIXEL data cells must retain their original
+        # capacity, digest and CRC without extra tm/rm/vh bytes.
+        annotated_header = json.loads(window._optical_rendered_wire[header][0])
+        assert annotated_header["rm"] == "PIXEL+QR"
+        assert annotated_header["vh"] == 2
+        assert window._optical_rendered_wire[chunk0][0] == chunk0
+        assert window._optical_rendered_wire[chunk1][0] == chunk1
         assert len(window._machine_command_queue) == 0
     finally:
         window.close()
