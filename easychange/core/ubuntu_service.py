@@ -89,11 +89,17 @@ class UbuntuService:
         data = bytes(raw or b"")
         if not data:
             return ""
-        if b"\x00" in data[:64]:
-            try:
-                return data.decode("utf-16-le", errors="replace").replace("\ufeff", "")
-            except Exception:
-                pass
+        if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+            return data.decode("utf-16", errors="replace")
+        # NUL bytes can be legitimate UTF-8 command output. Recognize
+        # unmarked UTF-16LE only when NULs consistently occupy high bytes.
+        if len(data) % 2 == 0:
+            sample = data[:64]
+            odd = sample[1::2]
+            even = sample[::2]
+            if (odd and odd.count(0) * 4 >= len(odd) * 3
+                    and even.count(0) * 4 < len(even)):
+                return data.decode("utf-16-le", errors="replace")
         return data.decode("utf-8", errors="replace")
 
     @staticmethod
