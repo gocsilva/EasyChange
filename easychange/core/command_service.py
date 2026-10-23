@@ -485,7 +485,7 @@ class CommandService:
                 duration_ms=round((time.perf_counter()-stamp)*1000,2),
                 duplicate=bool((received.data or {}).get("duplicate")))
             return received
-        if raw.lower().startswith(":batch"):
+        if re.match(r"^:batch(?:\s|$)", raw, re.IGNORECASE):
             body = raw[len(":batch"):].strip()
             body = _strip_batch_end_marker(body)
             return self._execute_chain(body, batch=True)
@@ -3145,7 +3145,8 @@ class CommandService:
     def _execute_chain(self, text: str, batch: bool = False) -> Result:
         started = time.monotonic()
         body = text
-        if batch and body.lower().startswith(":batch"): body = body[len(":batch"):].strip()
+        if batch and re.match(r"^:batch(?:\s|$)", body, re.IGNORECASE):
+            body = body[len(":batch"):].strip()
         if batch:
             body = _strip_batch_end_marker(body)
         if batch and self.transaction is not None:

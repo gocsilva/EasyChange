@@ -46,3 +46,22 @@ def test_batch_preserves_end_suffix_when_it_is_not_a_standalone_marker(
         assert calls[-1][0] == "commit"
     finally:
         service.close()
+
+
+def test_batch_prefix_requires_a_command_boundary(tmp_path, monkeypatch):
+    service = CommandService(Workspace.open(tmp_path))
+    calls = []
+
+    def record_tokens(name, args, *, raw=None):
+        calls.append((name, args, raw))
+        return Result(True, name)
+
+    monkeypatch.setattr(service, "execute_tokens", record_tokens)
+    monkeypatch.setattr(service, "_persist_state", lambda _result: None)
+    try:
+        reply = service.execute(":batchwrite sample.txt changed")
+        assert reply.ok is True
+        assert calls == [("batchwrite", ["sample.txt", "changed"],
+                          ":batchwrite sample.txt changed")]
+    finally:
+        service.close()
