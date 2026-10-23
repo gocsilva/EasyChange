@@ -1934,6 +1934,32 @@ class CommandService:
         if len(operations) == 1 and isinstance(operations[0], dict):
             query_item = operations[0]
             query_kind = str(query_item.get("type") or "").casefold()
+            if query_kind == "optical_qr_record":
+                counter = getattr(self, "optical_test_counter", None)
+                if counter is None:
+                    return Result(False, query_kind, error="QR_TEST_GUI_UNAVAILABLE",
+                                  code="QR_TEST_GUI_UNAVAILABLE")
+                action = str(query_item.get("action") or "status").casefold()
+                session_id = str(query_item.get("session_id") or "")
+                try:
+                    if action == "start":
+                        data = counter.start(session_id)
+                    elif action == "pause":
+                        data = counter.pause(session_id)
+                    elif action == "status":
+                        data = counter.status(
+                            session_id,
+                            cursor=query_item.get("cursor", 0),
+                            limit=query_item.get("limit", 64),
+                        )
+                    else:
+                        raise ValueError("INVALID_QR_TEST_ACTION")
+                except ValueError as exc:
+                    return Result(False, query_kind, error=str(exc),
+                                  code=str(exc))
+                return Result(True, query_kind, data=data,
+                              command_id=self.ids.next("C"),
+                              duration_ms=int((time.monotonic() - started) * 1000))
             if query_kind == "gatt_diagnostics_tail":
                 try:
                     after = query_item.get("after", 0)

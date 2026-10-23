@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, 
                                QVBoxLayout, QWidget)
 
 from easychange.core.command_service import CommandService
+from easychange.core.optical_test_counter import OpticalTestCounter
 from easychange.core.maintenance_service import MaintenanceService
 from easychange.core.operation_registry import (
     STRUCTURED_MUTATION_TYPES,
@@ -109,6 +110,8 @@ class MainWindow(QMainWindow):
             workspace,
             defer_initial_maintenance=True,
         )
+        self._optical_test_counter = OpticalTestCounter()
+        self.service.optical_test_counter = self._optical_test_counter
         # Capture native handle on Qt thread (the worker must not call QWidget.winId).
         native_window_handle = int(self.winId())
         self.service.browser.set_focus_window_handle_provider(
@@ -1264,6 +1267,9 @@ class MainWindow(QMainWindow):
         label = self.machine_qrs[0]
         label.setPixmap(pixmap)
         label.setVisible(True)
+        # Provisional durable EC2H also reaches the physical HDMI canvas.
+        # Count it even if later replaced by the complete EC2 bundle.
+        self._optical_test_counter.record([payload])
         return True
     def _update_machine_qr(self, result) -> None:
         self._optical_timer.stop()
@@ -1641,11 +1647,14 @@ class MainWindow(QMainWindow):
         for label in self.machine_qrs:
             label.clear()
             label.setVisible(False)
+        shown = []
         for label, payload in zip(self.machine_qrs[:slots], payloads):
             pixmap = self._optical_pixmaps.get(payload)
             if pixmap is not None:
                 label.setPixmap(pixmap)
                 label.setVisible(True)
+                shown.append(payload)
+        self._optical_test_counter.record(shown)
         self._optical_page = (page + 1) % page_count
         self._optical_render_pending = None
         if page_count > 1 and self._machine and self._optical_payloads:
