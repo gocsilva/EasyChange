@@ -59,21 +59,37 @@ def _direct_recovery_optical_payloads(result) -> list[str] | None:
         return None
 
     payloads: list[str] = []
+    expected_sequence = data.get("target_sequence")
+    if expected_sequence is not None and (
+        not isinstance(expected_sequence, str) or not expected_sequence
+    ):
+        return None
+    expected_total = None
     for packet in candidates:
         if not isinstance(packet, dict) or packet.get("p") != "EC2":
             return None
-        if not str(packet.get("s") or ""):
-            return None
-        try:
-            index = int(packet.get("i"))
-            total = int(packet.get("n"))
-        except (TypeError, ValueError):
+        sequence = packet.get("s")
+        index, total = packet.get("i"), packet.get("n")
+        # int() silently truncates fractional chunk indices and accepts bools.
+        # Display only packets with their original, valid EC2 identity.
+        if (not isinstance(sequence, str) or not sequence
+                or type(index) is not int or type(total) is not int):
             return None
         if index < 0 or total <= 0 or index >= total:
             return None
-        payloads.append(
-            json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
-        )
+        if expected_sequence is not None and sequence != expected_sequence:
+            return None
+        if expected_total is None:
+            expected_total = total
+            expected_sequence = sequence
+        elif total != expected_total or sequence != expected_sequence:
+            return None
+        try:
+            payloads.append(json.dumps(
+                packet, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+            ))
+        except (TypeError, ValueError, OverflowError):
+            return None
     return payloads or None
 
 
