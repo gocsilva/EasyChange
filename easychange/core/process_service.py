@@ -1,6 +1,7 @@
 from __future__ import annotations
 import hashlib
 import codecs
+import errno
 import json
 import math
 import os
@@ -10,6 +11,7 @@ import subprocess
 import shutil
 import stat
 import tempfile
+from contextlib import contextmanager
 from heapq import nlargest
 from itertools import islice
 import threading
@@ -19,6 +21,101 @@ from dataclasses import dataclass
 
 from .atomic_files import replace_with_retry
 from .subprocess_utils import hidden_console_kwargs
+
+
+_JOB_START_LOCKS: dict[str, tuple[threading.RLock, int]] = {}
+_JOB_START_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def _durable_job_start_lock(job_path: Path):
+    """Serialize starts for one durable job across service and OS processes."""
+    lock_key = os.path.normcase(str(job_path.resolve(strict=False)))
+    with _JOB_START_LOCKS_GUARD:
+        entry = _JOB_START_LOCKS.get(lock_key)
+        local_lock = entry[0] if entry else threading.RLock()
+        _JOB_START_LOCKS[lock_key] = (
+            local_lock,
+            (entry[1] if entry else 0) + 1,
+        )
+
+    try:
+        with local_lock:
+            lock_name = hashlib.sha256(
+                os.path.normcase(job_path.name).encode("utf-8")
+            ).hexdigest()
+            lock_dir = job_path.parent / ".start-locks"
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            if lock_dir.is_symlink() or not lock_dir.is_dir():
+                raise RuntimeError("JOB_START_LOCK_UNSAFE")
+            lock_path = lock_dir / f"{lock_name}.lock"
+            if lock_path.is_symlink():
+                raise RuntimeError("JOB_START_LOCK_UNSAFE")
+            flags = (
+                os.O_CREAT
+                | os.O_RDWR
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            try:
+                fd = os.open(lock_path, flags, 0o600)
+            except OSError as exc:
+                raise RuntimeError("JOB_START_LOCK_UNAVAILABLE") from exc
+            try:
+                metadata = os.fstat(fd)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                    raise RuntimeError("JOB_START_LOCK_UNSAFE")
+                if os.name == "posix" and (
+                    metadata.st_uid != os.getuid() or metadata.st_mode & 0o022
+                ):
+                    raise RuntimeError("JOB_START_LOCK_UNSAFE")
+                if os.name == "nt":
+                    import msvcrt
+
+                    if metadata.st_size == 0:
+                        os.write(fd, b"0")
+                    os.lseek(fd, 0, os.SEEK_SET)
+                else:
+                    import fcntl
+
+                deadline = time.monotonic() + 5.0
+                while True:
+                    try:
+                        if os.name == "nt":
+                            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                        else:
+                            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except OSError as exc:
+                        if (
+                            exc.errno
+                            not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK)
+                            and getattr(exc, "winerror", None) not in (33, 36)
+                        ):
+                            raise RuntimeError("JOB_START_LOCK_UNAVAILABLE") from exc
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("JOB_START_LOCK_BUSY") from exc
+                        time.sleep(0.05)
+                try:
+                    if os.name == "nt":
+                        os.lseek(fd, 0, os.SEEK_SET)
+                    yield
+                finally:
+                    if os.name == "nt":
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+    finally:
+        with _JOB_START_LOCKS_GUARD:
+            current = _JOB_START_LOCKS.get(lock_key)
+            if current and current[0] is local_lock:
+                if current[1] <= 1:
+                    _JOB_START_LOCKS.pop(lock_key, None)
+                else:
+                    _JOB_START_LOCKS[lock_key] = (local_lock, current[1] - 1)
 
 
 _DIAGNOSTIC_RE = re.compile(
@@ -678,10 +775,9 @@ class ProcessService:
         metadata: dict | None = None,
         no_window: bool = True,
     ) -> dict:
-        # Keep the manifest check, QUEUED write, process launch, and RUNNING
-        # write atomic with respect to other starts on this service. Locking
-        # only _write_job still lets concurrent calls launch the same ID.
-        with self._job_start_lock:
+        # Hold a durable per-job lock across manifest checks, process launch,
+        # and state writes; the service lock also preserves its prior ordering.
+        with _durable_job_start_lock(self._job_path(job_id)), self._job_start_lock:
             return self._job_start_locked(
                 argv,
                 job_id,
@@ -709,7 +805,7 @@ class ProcessService:
             previous_requested = previous.get("argv") or previous.get("requested_argv")
             if previous_requested != requested_argv:
                 raise RuntimeError("JOB_ID_CONFLICT")
-            return self.job_status(job_id)
+            return self.job_status(job_id, _start_lock_held=True)
 
         now = time.time()
         queued = {
@@ -759,7 +855,7 @@ class ProcessService:
         }
         return self._write_job(job_id, record)
 
-    def job_status(self, job_id: str) -> dict:
+    def job_status(self, job_id: str, *, _start_lock_held: bool = False) -> dict:
         current = self._read_job(job_id)
         item = self._processes.get(job_id)
         if item is not None:
@@ -795,11 +891,33 @@ class ProcessService:
         state = str(current.get("state") or "").upper()
         if state == "QUEUED":
             # QUEUED can only survive a restart/crash between manifest and process start.
-            current = self._mark_job_orphaned(
-                current,
-                reason="QUEUED_WITHOUT_ATTACHED_PROCESS",
-            )
-            state = "ORPHANED"
+            if _start_lock_held:
+                current = self._mark_job_orphaned(
+                    current,
+                    reason="QUEUED_WITHOUT_ATTACHED_PROCESS",
+                )
+            else:
+                # A different service or process may still be between its
+                # QUEUED write and process attachment. Recheck only after its
+                # durable start transaction releases the per-job lock.
+                with _durable_job_start_lock(self._job_path(job_id)):
+                    current = self._read_job(job_id)
+                    if current is None:
+                        raise LookupError(f"Job not found: {job_id}")
+                    state = str(current.get("state") or "").upper()
+                    if state == "QUEUED":
+                        current = self._mark_job_orphaned(
+                            current,
+                            reason="QUEUED_WITHOUT_ATTACHED_PROCESS",
+                        )
+                        state = "ORPHANED"
+                    elif state == "RUNNING" and item is None:
+                        if not self._pid_alive(current.get("pid")):
+                            current = self._mark_job_orphaned(
+                                current,
+                                reason="RUNNING_PID_NOT_ALIVE",
+                            )
+                            state = "ORPHANED"
         elif state == "RUNNING" and item is None:
             if not self._pid_alive(current.get("pid")):
                 current = self._mark_job_orphaned(

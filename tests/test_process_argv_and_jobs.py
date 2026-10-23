@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
-from easychange.core.process_service import ProcessService
+from easychange.core.process_service import ProcessService, _durable_job_start_lock
 
 
 def test_structured_argv_preserves_argument_with_spaces(tmp_path, monkeypatch):
@@ -198,6 +200,139 @@ def test_concurrent_job_start_does_not_expose_queued_manifest_as_orphaned(
     assert first_result["state"] == "RUNNING"
     assert second_result["state"] == "RUNNING"
     assert first_result["pid"] == second_result["pid"] == 12345
+
+
+def test_concurrent_job_start_is_serialized_across_service_instances(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    first_service = ProcessService(workspace)
+    second_service = ProcessService(workspace)
+    start_entered = threading.Event()
+    allow_start = threading.Event()
+    second_saw_queued = threading.Event()
+    start_calls = []
+    original_read_job = second_service._read_job
+
+    def observe_second_job_read(job_id):
+        result = original_read_job(job_id)
+        if result and result.get("state") == "QUEUED":
+            second_saw_queued.set()
+        return result
+
+    def blocked_first_start(argv, process_id, **kwargs):
+        start_calls.append(process_id)
+        start_entered.set()
+        assert allow_start.wait(timeout=5)
+        return {
+            "pid": 12345,
+            "state": "RUNNING",
+            "argv": list(argv),
+            "exec_argv": list(argv),
+        }
+
+    monkeypatch.setattr(first_service, "start", blocked_first_start)
+    monkeypatch.setattr(second_service, "_read_job", observe_second_job_read)
+    monkeypatch.setattr(first_service, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(second_service, "_pid_alive", lambda _pid: True)
+    argv = [sys.executable, "-c", "print('once')"]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(first_service.job_start, argv, "JCONCUR02")
+        assert start_entered.wait(timeout=5)
+        second = pool.submit(second_service.job_start, argv, "JCONCUR02")
+
+        # A separate service instance must wait for the first durable start
+        # transaction instead of reconciling its live QUEUED manifest.
+        assert not second_saw_queued.wait(timeout=0.05)
+
+        allow_start.set()
+        first_result = first.result(timeout=5)
+        second_result = second.result(timeout=5)
+
+    assert not second_saw_queued.is_set()
+    assert start_calls == ["JCONCUR02"]
+    assert first_result["state"] == "RUNNING"
+    assert second_result["state"] == "RUNNING"
+    assert first_result["pid"] == second_result["pid"] == 12345
+
+
+def test_durable_job_start_lock_serializes_across_os_processes(tmp_path):
+    job_path = tmp_path / "jobs" / "JLOCK01.json"
+    child_job_path = (
+        job_path.with_name(job_path.name.swapcase()) if os.name == "nt" else job_path
+    )
+    acquired_path = tmp_path / "child-acquired.txt"
+    child_script = "\n".join(
+        (
+            "import sys",
+            "from pathlib import Path",
+            "from easychange.core.process_service import _durable_job_start_lock",
+            "job_path, acquired_path = map(Path, sys.argv[1:])",
+            "with _durable_job_start_lock(job_path):",
+            "    acquired_path.write_text('yes')",
+        )
+    )
+
+    with _durable_job_start_lock(job_path):
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                child_script,
+                str(child_job_path),
+                str(acquired_path),
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+        )
+        time.sleep(0.1)
+        blocked_while_owned = not acquired_path.exists()
+
+    assert child.wait(timeout=5) == 0
+    assert blocked_while_owned
+    assert acquired_path.read_text() == "yes"
+
+
+def test_job_status_does_not_orphan_an_inflight_start_from_another_instance(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    first_service = ProcessService(workspace)
+    second_service = ProcessService(workspace)
+    start_entered = threading.Event()
+    allow_start = threading.Event()
+
+    def blocked_start(argv, process_id, **kwargs):
+        start_entered.set()
+        assert allow_start.wait(timeout=5)
+        return {
+            "pid": 12345,
+            "state": "RUNNING",
+            "argv": list(argv),
+            "exec_argv": list(argv),
+        }
+
+    monkeypatch.setattr(first_service, "start", blocked_start)
+    monkeypatch.setattr(first_service, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(second_service, "_pid_alive", lambda _pid: True)
+    argv = [sys.executable, "-c", "print('once')"]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(first_service.job_start, argv, "JCONCUR03")
+        assert start_entered.wait(timeout=5)
+        status = pool.submit(second_service.job_status, "JCONCUR03")
+        assert not status.done()
+
+        allow_start.set()
+        first_result = first.result(timeout=5)
+        status_result = status.result(timeout=5)
+
+    assert first_result["state"] == "RUNNING"
+    assert status_result["state"] == "RUNNING"
 
 
 def test_job_cancel_is_terminal_and_idempotent_for_attached_job(tmp_path, monkeypatch):
