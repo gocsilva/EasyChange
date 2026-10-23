@@ -5084,7 +5084,16 @@ class CommandService:
             if name not in self.macros: raise LookupError(f"Macro not found: {name}")
             results = []
             for command in self.macros[name]:
-                for index, value in enumerate(values, 1): command = command.replace(f"${index}", value)
+                def substitute(match: re.Match[str]) -> str:
+                    try:
+                        index = int(match.group(1))
+                    except ValueError:
+                        return match.group(0)
+                    if 1 <= index <= len(values):
+                        return values[index - 1]
+                    return match.group(0)
+
+                command = re.sub(r"\$(\d+)", substitute, command)
                 result = self.execute(command)
                 results.append(result.to_dict())
                 if not result.ok: break
