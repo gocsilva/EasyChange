@@ -98,3 +98,33 @@ def test_direct_recovery_accepts_real_crc_valid_ec2_packet():
     ]
     actual["x"] = "00000000"
     assert _direct_recovery_optical_payloads(recovery([actual])) is None
+
+
+
+def test_direct_recovery_rejects_conflicting_duplicate_index():
+    import binascii
+
+    first = packet(0, 2)
+    conflicting = {**first, "d": "other"}
+    conflicting["x"] = f"{binascii.crc32(b'other') & 0xffffffff:08x}"
+    assert _direct_recovery_optical_payloads(
+        recovery([first, conflicting])
+    ) is None
+
+
+def test_direct_recovery_deduplicates_identical_retransmissions():
+    first = packet(0, 2)
+    assert [
+        json.loads(value) for value in _direct_recovery_optical_payloads(
+            recovery([first, dict(first)])
+        )
+    ] == [first]
+
+
+def test_direct_recovery_rejects_mixed_extended_identity():
+    first = packet(0, 2)
+    second = packet(1, 2)
+    second["e"] = "incompatible"
+    assert _direct_recovery_optical_payloads(
+        recovery([first, second])
+    ) is None

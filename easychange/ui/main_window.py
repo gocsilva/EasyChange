@@ -69,6 +69,7 @@ def _direct_recovery_optical_payloads(result) -> list[str] | None:
     ):
         return None
     expected_identity = None
+    seen_indices: dict[int, str] = {}
     for packet in candidates:
         if not isinstance(packet, dict) or packet.get("p") != "EC2":
             return None
@@ -86,7 +87,7 @@ def _direct_recovery_optical_payloads(result) -> list[str] | None:
             return None
         if "t" in packet and (type(packet["t"]) is not int or packet["t"] != 0):
             return None
-        identity = (sequence, total, packet["h"], packet["c"], packet.get("t"))
+        identity = (sequence, total, packet["h"], packet["c"], packet.get("e"), packet.get("t"))
         if expected_identity is None:
             expected_identity = identity
         elif identity != expected_identity:
@@ -112,6 +113,15 @@ def _direct_recovery_optical_payloads(result) -> list[str] | None:
         # A valid EC2 chunk still needs to fit the actual QR M-level capacity.
         if len(rendered.encode("utf-8")) > MAX_EC2_QR_RENDER_BYTES:
             return None
+        previous = seen_indices.get(index)
+        if previous is not None:
+            # Repeated requested indices must not hide different fragments.
+            # An identical retransmission needs only one logical QR; page
+            # painting already adds visual redundancy when slots are free.
+            if previous != piece:
+                return None
+            continue
+        seen_indices[index] = piece
         payloads.append(rendered)
     return payloads or None
 
