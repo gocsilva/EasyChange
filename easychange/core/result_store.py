@@ -751,7 +751,7 @@ class DurableResultStore:
                 "sequence": sequence,
                 "execution_id": execution_id,
                 "command_hash": command_hash,
-                "command": command[:512],
+                "command": "<redacted>",
                 "command_id": None,
                 "mutation": bool(mutation),
                 "state": "RUNNING",
@@ -939,7 +939,7 @@ class DurableResultStore:
                     ).hexdigest()[:16].upper()
                 ),
                 "command_hash": command_hash,
-                "command": command[:512],
+                "command": "<redacted>",
                 "command_id": frozen_result.get("command_id"),
                 "mutation": bool(current.get("mutation") or mutation_receipt),
                 "state": "DONE",

@@ -773,7 +773,7 @@ class CommandService:
             journal[sequence] = {
                 "sha256": digest,
                 "state": "RUNNING",
-                "command": command[:256],
+                "command": "<redacted>",
                 "mutation": is_mutation,
                 "started_at": time.time(),
             }
@@ -904,7 +904,7 @@ class CommandService:
             journal[sequence] = {
                 "sha256": digest,
                 "state": "DONE",
-                "command": command[:256],
+                "command": "<redacted>",
                 "mutation": is_mutation,
                 "ok": result.ok,
                 "command_name": result.command,
@@ -3266,7 +3266,7 @@ class CommandService:
                 item = {
                     "sha256": item.get("sha256"),
                     "state": "DONE",
-                    "command": item.get("command"),
+                    "command": "<redacted>",
                     "ok": bool(legacy.get("ok")),
                     "command_name": legacy.get("command"),
                     "code": legacy.get("code"),
@@ -3274,6 +3274,9 @@ class CommandService:
                     "duration_ms": legacy.get("duration_ms", 0),
                     "result_hash": hashlib.sha256(encoded).hexdigest(),
                 }
+            # Preserve replay hashes but never persist raw EC1 payloads,
+            # including entries migrated from legacy sessions.
+            item = {**item, "command": "<redacted>"}
             compact_journal[sequence] = item
         self.state_store.data["ec_results"] = dict(list(compact_journal.items())[-128:])
         self.state_store.save()
