@@ -1580,6 +1580,7 @@ class MainWindow(QMainWindow):
             item = json.loads(payload)
             if isinstance(item, dict) and item.get("p") in {"EC2", "EC2H"}:
                 item["tm"] = optical_mode
+                item["rm"] = requested  # explicit remote selector, not host hint
                 payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
         except (ValueError, TypeError):
             pass
