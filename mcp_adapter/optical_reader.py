@@ -267,9 +267,10 @@ def decode_hdmi_qr(frame) -> list[str]:
                         if isinstance(value,str) and value and value not in seen:
                             seen.add(value)
                             decoded.append(value)
-            except (TypeError, cv2.error):
+            except (TypeError, ValueError, cv2.error):
                 # OpenCV builds can expose multi-QR yet fail at runtime due
                 # to unsupported signatures or an internal decoder error.
+                # Unexpected tuple sizes raise ValueError while unpacking.
                 # Fall back to the single-QR API on this same observed frame.
                 decoded=[]
         else:

@@ -56,3 +56,23 @@ def test_duplicate_multi_results_do_not_hide_fourth_qr(monkeypatch):
         "qr-first", "qr-second", "qr-third", "qr-fourth",
     ]
     assert detector.crop_calls  # Duplicate cannot suppress missing-cell recovery.
+
+
+
+
+def test_malformed_multi_signature_falls_back_to_single_qr(monkeypatch):
+    class SmallFrame:
+        shape = (480, 640, 3)
+
+    class SignatureMismatch:
+        def detectAndDecodeMulti(self, frame):
+            return True, ["valid-data"], None  # Older or incompatible tuple shape.
+
+        def detectAndDecode(self, frame):
+            return "valid-single-qr", None, None
+
+    monkeypatch.setattr(
+        optical_reader._qr_detectors, "detector", SignatureMismatch(), raising=False,
+    )
+    monkeypatch.setitem(sys.modules, "cv2", SimpleNamespace(error=RuntimeError))
+    assert optical_reader.decode_hdmi_qr(SmallFrame()) == ["valid-single-qr"]
