@@ -2,9 +2,10 @@
 import base64
 import binascii
 import re
+from types import SimpleNamespace
 
 from easychange.core.result import Result
-from easychange.ui.main_window import _ubuntu_text_frame
+from easychange.ui.main_window import MainWindow, _ubuntu_text_frame
 
 
 def decode(frame):
@@ -45,3 +46,39 @@ def test_ubuntu_failures_preserve_error_and_checksum():
     frame=_ubuntu_text_frame(result)
     assert " QERR123 ERR " in frame.splitlines()[0]
     assert "missing source" in decode(frame)
+
+
+def test_ubuntu_display_separates_receipt_and_human_output_with_real_newlines():
+    result=Result(ok=True,command="state",sequence="QABC123",
+                  command_id="C123",data={"state":"READY"})
+    captured=[]
+    window=SimpleNamespace(
+        _optical_audit_encode_started=0,
+        _last_machine_result=None,
+        _optical_timer=SimpleNamespace(stop=lambda: None),
+        _optical_render_generation=0,
+        _discard_optical_render_jobs=lambda: None,
+        _optical_render_pending=None,
+        _optical_payloads=[],
+        _optical_header_payload=None,
+        _optical_pixmaps=SimpleNamespace(clear=lambda: None),
+        _optical_page=0,
+        machine_qrs=[],
+        _machine=True,
+        remote_transport_mode="UBUNTU",
+        _host_optical_preference="UBUNTU",
+        _set_optical_burst=lambda _enabled: None,
+        output=SimpleNamespace(
+            setPlainText=captured.append,
+            verticalScrollBar=lambda: SimpleNamespace(setValue=lambda _value: None),
+        ),
+    )
+
+    MainWindow._update_machine_qr(window,result)
+
+    assert len(captured)==1
+    displayed=captured[0]
+    frame=_ubuntu_text_frame(result)
+    assert displayed.startswith(frame+"\n\n")
+    assert "\\n" not in displayed
+    assert displayed[len(frame)+2:]==result.render("text")

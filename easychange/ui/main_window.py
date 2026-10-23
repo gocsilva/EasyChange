@@ -1536,9 +1536,9 @@ class MainWindow(QMainWindow):
             # 720p without scrolling the checksum/footer out of view.
             human_output = result.render("text")
             if len(human_output)>16000:
-                human_output=human_output[:16000]+"\\n[HUMAN PREVIEW LIMITED]"
+                human_output=human_output[:16000]+"\n[HUMAN PREVIEW LIMITED]"
             self.output.setPlainText(
-                _ubuntu_text_frame(result)+"\\n\\n"+human_output
+                _ubuntu_text_frame(result)+"\n\n"+human_output
             )
             self.output.verticalScrollBar().setValue(0)
             return
