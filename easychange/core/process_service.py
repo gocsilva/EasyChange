@@ -1948,8 +1948,24 @@ class ProcessService:
         }
 
     def logs(self, process_id: str, limit: int = 12000) -> dict:
-        item = self._processes.get(process_id)
         size_limit = max(512, int(limit))
+
+        def tail(path: Path) -> tuple[str, int]:
+            try:
+                with path.open("rb") as handle:
+                    size = handle.seek(0, 2)
+                    handle.seek(max(0, size - size_limit))
+                    return handle.read().decode("utf-8", errors="replace"), size
+            except OSError:
+                return "", 0
+        # Keep the tracked entry alive while reading its ephemeral logs. Pruning
+        # removes the entry under this lock before deleting those files.
+        with self._processes_lock:
+            item = self._processes.get(process_id)
+            if item is not None:
+                stdout, stdout_size = tail(item.stdout_path)
+                stderr, stderr_size = tail(item.stderr_path)
+                returncode = item.process.poll()
         if item is None:
             current = self._read_job(process_id)
             if current is None:
@@ -1965,22 +1981,12 @@ class ProcessService:
                 "output_truncated": bool(current.get("output_truncated")) or len(stdout) > size_limit or len(stderr) > size_limit,
                 "durable": True, "terminal": current.get("state") != "RUNNING",
             }
-        def tail(path: Path) -> tuple[str, int]:
-            try:
-                with path.open("rb") as handle:
-                    size = handle.seek(0, 2)
-                    handle.seek(max(0, size - size_limit))
-                    return handle.read().decode("utf-8", errors="replace"), size
-            except OSError:
-                return "", 0
-        stdout, stdout_size = tail(item.stdout_path)
-        stderr, stderr_size = tail(item.stderr_path)
         stdout = _redact(stdout, item.redact_values)
         stderr = _redact(stderr, item.redact_values)
-        running = item.process.poll() is None
+        running = returncode is None
         return {
             "process_id": process_id, "state": "RUNNING" if running else "EXITED",
-            "returncode": item.process.poll(), "stdout": stdout, "stderr": stderr,
+            "returncode": returncode, "stdout": stdout, "stderr": stderr,
             "stdout_bytes": stdout_size, "stderr_bytes": stderr_size,
             "output_truncated": stdout_size > len(stdout.encode("utf-8", errors="replace"))
                                 or stderr_size > len(stderr.encode("utf-8", errors="replace")),

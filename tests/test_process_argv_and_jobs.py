@@ -752,6 +752,72 @@ def test_reconcile_cannot_orphan_job_finalized_during_pid_check(tmp_path, monkey
     assert summary["orphaned"] == 0
 
 
+def test_pruning_waits_for_in_progress_ephemeral_log_read(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+    process_id = "JLOGPRUNERACE1"
+    stdout_path = service.root / f"{process_id}.out"
+    stderr_path = service.root / f"{process_id}.err"
+    stdout_path.write_text("preserve this output", encoding="utf-8")
+    stderr_path.write_text("stderr output", encoding="utf-8")
+
+    class ExitedProcess:
+        pid = 123
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+    item = RunningProcess(
+        process_id=process_id,
+        argv=["fake"],
+        process=ExitedProcess(),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+    )
+    service._track_process(process_id, item)
+    log_open_started = threading.Event()
+    allow_log_open = threading.Event()
+    prune_snapshot_started = threading.Event()
+    prune_finished = threading.Event()
+    original_open = Path.open
+    original_snapshot = service._process_items_snapshot
+
+    def delayed_open(path, *args, **kwargs):
+        if path == stdout_path and threading.current_thread().name.startswith("log-reader"):
+            log_open_started.set()
+            assert allow_log_open.wait(timeout=5)
+        return original_open(path, *args, **kwargs)
+
+    def signal_prune_snapshot():
+        prune_snapshot_started.set()
+        return original_snapshot()
+
+    def prune():
+        try:
+            service._prune_finished(keep=0)
+        finally:
+            prune_finished.set()
+
+    monkeypatch.setattr(Path, "open", delayed_open)
+    monkeypatch.setattr(service, "_process_items_snapshot", signal_prune_snapshot)
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="log-reader") as pool:
+        logs = pool.submit(service.logs, process_id)
+        assert log_open_started.wait(timeout=5)
+        pruning = pool.submit(prune)
+        assert prune_snapshot_started.wait(timeout=5)
+        assert not prune_finished.wait(timeout=0.2)
+        allow_log_open.set()
+        result = logs.result(timeout=5)
+        pruning.result(timeout=5)
+
+    assert result["stdout"] == "preserve this output"
+    assert not stdout_path.exists()
+
+
 def test_job_tail_returns_only_new_bytes_and_preserves_cursor(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
     workspace = tmp_path / "workspace"
