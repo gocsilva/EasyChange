@@ -1,5 +1,6 @@
 from __future__ import annotations
 import hashlib
+import codecs
 import json
 import os
 
@@ -56,6 +57,24 @@ def _redact_bytes(value: bytes, secrets: tuple[bytes, ...]) -> bytes:
         if secret:
             output = output.replace(secret, b"[REDACTED]")
     return output
+
+
+def _read_utf8_page(handle, start: int, page_bytes: int, total: int) -> bytes:
+    """Read a bounded log page without cutting a valid UTF-8 codepoint.
+
+    Cursors count original bytes, not decoded characters. If a codepoint
+    straddles the page boundary, leave its prefix for the next page.
+    Invalid bytes remain handled by the caller's errors='replace' policy.
+    """
+    handle.seek(start)
+    raw = handle.read(page_bytes)
+    if raw and start + len(raw) < total:
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        decoder.decode(raw, final=False)
+        pending, _ = decoder.getstate()
+        if pending and len(pending) < len(raw):
+            raw = raw[:-len(pending)]
+    return raw
 
 
 def _stream_redacted(source, target_path: Path, values) -> None:
@@ -761,8 +780,7 @@ class ProcessService:
                 with path.open("rb") as handle:
                     total = handle.seek(0, 2)
                     start = min(cursor, total)
-                    handle.seek(start)
-                    raw = handle.read(page_bytes)
+                    raw = _read_utf8_page(handle, start, page_bytes, total)
             except OSError:
                 raw = b""
                 total = 0
@@ -1567,8 +1585,7 @@ class ProcessService:
             with path.open("rb") as handle:
                 total = handle.seek(0, 2)
                 start = min(cursor, total)
-                handle.seek(start)
-                raw = handle.read(page_bytes)
+                raw = _read_utf8_page(handle, start, page_bytes, total)
         except OSError as exc:
             raise LookupError(f"Run output not found: {output_id}") from exc
         next_cursor = start + len(raw)

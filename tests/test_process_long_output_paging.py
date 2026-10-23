@@ -92,3 +92,31 @@ def test_retained_long_output_is_redacted_on_disk_across_stream_chunks(tmp_path,
     disk = (service.root / f"{result['output_id']}.out").read_bytes()
     assert secret.encode("utf-8") not in disk
     assert b"[REDACTED]" in disk
+
+
+def test_durable_output_pages_do_not_split_utf8_codepoints(tmp_path, monkeypatch):
+    """EC2 consumers must reconstruct Unicode output without replacement glyphs."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+    output_id = "UTF8PAGE01"
+    payload = ("a" * 255 + "€" + "b" * 255 + "🧪" + "c" * 300).encode("utf-8")
+    (service.root / f"{output_id}.out").write_bytes(payload)
+    monkeypatch.setattr(service, "_read_job", lambda _job_id: {"state": "SUCCEEDED"})
+
+    for read_page in (service.run_output, service.job_logs):
+        cursor = 0
+        reconstructed = []
+        for _ in range(10):
+            page = read_page(output_id, cursor=cursor, max_bytes=256)
+            assert "�" not in page["text"]
+            assert page["returned_bytes"] == len(page["text"].encode("utf-8"))
+            reconstructed.append(page["text"])
+            if page["complete"]:
+                break
+            assert page["next_cursor"] > cursor
+            cursor = page["next_cursor"]
+        else:
+            raise AssertionError("UTF-8 paging did not terminate")
+        assert "".join(reconstructed).encode("utf-8") == payload
