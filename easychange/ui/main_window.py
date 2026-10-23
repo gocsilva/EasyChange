@@ -40,6 +40,59 @@ from easychange.ui.recent_project import remember_project
 from easychange.ui.editor import BasicHighlighter, CodeEditor
 
 
+def _ubuntu_text_frame(result, *, chunk_chars: int = 68,
+                       max_chunks: int = 24) -> str:
+    """Bounded screen-text receipt with an exact CRC32 and OCR-safe alphabet.
+
+    Uppercase RFC4648 Base32 avoids mixed-case OCR ambiguity at 720p. The
+    original durable Result is never edited. Oversized data is represented by
+    an explicit verified preview receipt; it is NOT a complete result and
+    must be recovered through the durable-result chunk tools.
+    """
+    import zlib
+    sequence=str(getattr(result,"sequence",None) or "-")
+    compact=result.render("compact")
+    original_size=len(compact.encode("utf-8"))
+
+    def encode(value):
+        return base64.b32encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+
+    encoded=encode(compact)
+    if len(encoded)>chunk_chars*max_chunks:
+        preview=Result(
+            ok=bool(result.ok),command=str(result.command),
+            command_id=getattr(result,"command_id",None),
+            sequence=getattr(result,"sequence",None),
+            duration_ms=int(getattr(result,"duration_ms",0) or 0),
+            data={"payload_truncated":True,"original_result_bytes":original_size,
+                  "recovery":"result_header/result_chunk"},
+            error=(str(result.error)[:120] if getattr(result,"error",None) else None),
+            code=getattr(result,"code",None),
+        )
+        compact=preview.render("compact")
+        encoded=encode(compact)
+    if len(encoded)>chunk_chars*max_chunks:
+        # A pathological command ID/metadata must not produce an unreadable
+        # partial ECO1 frame. Retain exact sequence with a tiny error receipt.
+        fallback=Result(
+            ok=False,command="ubuntu_visual_receipt",
+            command_id="-",sequence=getattr(result,"sequence",None),
+            code="UBUNTU_PREVIEW_TOO_LARGE",
+            error="Result available only through durable chunk recovery",
+        )
+        compact=fallback.render("compact")
+        encoded=encode(compact)
+
+    fragments=[encoded[offset:offset+chunk_chars]
+               for offset in range(0,len(encoded),chunk_chars)]
+    checksum=f"{zlib.crc32(compact.encode('utf-8')) & 0xffffffff:08X}"
+    status="OK" if compact.startswith(f"EC1 {sequence} OK") else "ERR"
+    lines=[f"ECO1 UBUNTU {sequence} {status} {len(fragments)} B32"]
+    lines.extend(f"ECO1 {index:02d} {part}" for index,part in enumerate(fragments))
+    lines.append(f"ECO1 END {sequence} {checksum}")
+    return "\n".join(lines)
+
+
 def _direct_recovery_optical_payloads(result) -> list[str] | None:
     """Return original EC2 packets for durable optical recovery queries.
 
@@ -1479,27 +1532,13 @@ class MainWindow(QMainWindow):
             # EC1 execution/result-store is untouched. This mode never calls
             # an optical encoder or emits QR/Pixels, even for recovery commands.
             self._set_optical_burst(False)
-            sequence = str(getattr(result, "sequence", "") or "-")
-            compact = result.render("compact")
-            import zlib
-            # Fixed-width OCR-readable textual frames instead of one long,
-            # clipped EC1 line. The checksum covers all fragments and rejects
-            # silently corrupted source text (especially code punctuation).
-            encoded = base64.urlsafe_b64encode(compact.encode('utf-8')).decode('ascii').rstrip('=')
-            fragments = [encoded[offset:offset + 68]
-                         for offset in range(0, len(encoded), 68)]
-            checksum = f"{zlib.crc32(compact.encode('utf-8')) & 0xffffffff:08X}"
-            status = "OK" if result.ok else "ERR"
+            # Small, OCR-safe uppercase chunks. The frame is bounded to fit
+            # 720p without scrolling the checksum/footer out of view.
             human_output = result.render("text")
-            if len(human_output) > 16000:
-                human_output = human_output[:16000] + "\n[PREVIEW LIMIT: use EasyChange read ranges for more]"
-            text_packets = "\n".join(
-                f"ECO1 {index:02d} {part}" for index, part in enumerate(fragments)
-            )
+            if len(human_output)>16000:
+                human_output=human_output[:16000]+"\\n[HUMAN PREVIEW LIMITED]"
             self.output.setPlainText(
-                f"ECO1 UBUNTU {sequence} {status} {len(fragments)}\n"
-                f"{text_packets}\nECO1 END {sequence} {checksum}\n\n"
-                + human_output
+                _ubuntu_text_frame(result)+"\\n\\n"+human_output
             )
             self.output.verticalScrollBar().setValue(0)
             return
