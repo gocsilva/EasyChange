@@ -106,3 +106,52 @@ and does not overwrite the currently running local MCP GUI.
 To add a fourth repository, create a read-only caller workflow analogous
 to the MCP/ESP examples and define an appropriate kind/validator in the
 reusable workflow before enabling it.
+
+
+## Multi-mode read, write, search, and paired logs (October 23 audit)
+
+The expanded local lab covers eight cases: state, small read, large read,
+expected missing-file error, write to a disposable file, read-back, small
+search, and paginated search. Only the temporary project is mutated.
+
+Choose a mode with \`--transport-mode UBUNTU|QR|PIXEL|PIXEL+QR\`.
+For QR/PIXEL/hybrid, supply \`--mcp-source\` to import the **real private**
+MCP ZXing/PIXEL readers and EC2 fragment assembler. The collector observes
+multiple GUI optical pages for up to eight seconds and requires sequence,
+SHA-256 and CRC32 before reporting delivery. It never claims a missing
+fragment as a successful result. This is a decoder integration test, **not**
+a full \`easychange_exec\` MCP tool invocation with every production
+permission/session preflight.
+
+Example, on Windows in the EasyChange repository (for the current main
+source checkouts):
+
+    tests\run_virtual_optical_lab.bat --mcp-source C:\GPT_CONTROLLER_WORK\MCP_PC_CONTROLLER --transport-mode QR --start-case 7 --max-cases 1 --evidence-dir C:\temp\virtual-qr
+    tests\run_virtual_optical_lab.bat --mcp-source C:\GPT_CONTROLLER_WORK\MCP_PC_CONTROLLER --transport-mode PIXEL --start-case 5 --max-cases 2 --evidence-dir C:\temp\virtual-pixel
+
+The lab writes two **paired forensic journals** to the optional evidence
+directory: \`easychange_transport_audit.jsonl\` (redacted sender-side
+execution/encoding events) and \`mcp_virtual_receive.jsonl\`
+(sequences that actually passed the receiver). It also captures one
+virtual HDMI screenshot and the output pane text per case. These contain
+only synthetic disposable project content. The EasyChange audit sink is
+redirected to its disposable workspace instead of touching the real
+\`LOCALAPPDATA\EasyChange\logs\`.
+
+Observed:
+- QR \`:state\` and \`:search\` returned complete, verified EC2 packets;
+- PIXEL \`:state\` and a write receipt spanning two rotated pages were
+  reconstructed with validated CRC;
+- PIXEL+QR reassembled its mixed-fragment response;
+- Ubuntu failed OCR CRC on synthetic HDMI captures, despite valid Qt text;
+- 900-line reads could require 48-66 EC2 chunks, exceeding a short passive
+  observation window, so full delivery requires the MCP durable-result
+  header and logical-chunk recovery (not yet exercised end-to-end here).
+
+An additional **real MCP session bug** was found: visual re-adoption
+required a literal \`FOCUS: COMMAND\`, whereas HID preflight accepted the
+safe 720p variation \`FOCUS: OMAND\` on a full matching EasyChange/MACHINE/HID
+header. The private MCP change unifies both proofs with a regression test.
+
+Default GitHub Actions now runs all eight synthetic cases. It records
+the unresolved OCR issues instead of misreporting them as delivery.

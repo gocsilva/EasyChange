@@ -93,7 +93,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p reports
-          args=(--tesseract /usr/bin/tesseract --max-cases 4
+          args=(--tesseract /usr/bin/tesseract --max-cases 8
                 --easychange-source "$GITHUB_WORKSPACE/$LAB_SOURCE_DIR"
                 --evidence-dir "$GITHUB_WORKSPACE/reports")
           if [[ "$LAB_KIND" == "mcp" ]]; then
