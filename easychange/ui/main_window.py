@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections import OrderedDict, deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -1336,6 +1337,13 @@ class MainWindow(QMainWindow):
         return 130 if visual in {"PIXEL", "PIXEL+QR", "HYBRID"} else None
 
     def _update_machine_qr(self, result) -> None:
+        from easychange.core.transport_audit import log
+        self._optical_audit_encode_started=time.perf_counter()
+        seq=str(getattr(result,"sequence","") or "")
+        log("ec2_encode_start",seq,"EASYCHANGE_TO_MCP",
+            command_type=str(getattr(result,"command","") or "")[:60],
+            mode=str(getattr(self,"remote_transport_mode","AUTO")),
+            ok=bool(getattr(result,"ok",False)))
         self._optical_timer.stop()
         self._optical_render_generation += 1
         self._optical_render_pending = None
@@ -1434,7 +1442,7 @@ class MainWindow(QMainWindow):
             "state", "health", "command_schema", "discover_many",
             "search", "locate", "study", "definition", "references",
             "read", "read_many", "read_regions", "result_get",
-            "capabilities", "optical_transport_get",
+            "capabilities", "optical_transport_get", "transport_audit", "transport_log",
         }
         inline_limit = (
             8192
@@ -1799,6 +1807,30 @@ class MainWindow(QMainWindow):
                 label.setVisible(True)
                 shown.append(payload)
         self._record_painted_qrs(shown)
+        # One record per painted PAGE, not per 60Hz screen refresh.
+        # The payload hashes are useful for diagnosing QR/PIXEL decoding
+        # while keeping source code and result data out of durable logs.
+        from easychange.core.transport_audit import log
+        seq=""
+        for payload in shown[:1]:
+            try:
+                packet=json.loads(payload)
+                seq=str(packet.get("s") or "")
+            except (ValueError,TypeError,AttributeError):
+                pass
+        qr_count=sum(1 for value in shown
+                    if self._optical_rendered_wire.get(value,(value,"QR"))[1]=="QR")
+        from easychange.core.transport_audit import signature
+        manifest=signature(json.dumps(shown,ensure_ascii=True,separators=(",",":")))
+        started_at=getattr(self,"_optical_audit_encode_started",None)
+        log("ec2_page_painted",seq,"EASYCHANGE_TO_MCP",
+            mode=str(getattr(self,"remote_transport_mode","AUTO")),
+            page=page,pages=page_count,packets=len(shown),
+            chunks=qr_count,frames=len(shown)-qr_count,
+            sha256=manifest["sha256"],bytes=manifest["bytes"],
+            render_ms=round((time.perf_counter()-started_at)*1000,2)
+                      if isinstance(started_at,(int,float)) else None,
+            generation=self._optical_render_generation)
         self._optical_page = (page + 1) % page_count
         self._optical_render_pending = None
         if page_count > 1 and self._machine and self._optical_payloads:

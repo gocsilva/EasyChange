@@ -435,11 +435,50 @@ class CommandService:
         if not raw: return Result(False, "", error="Empty command", code="INVALID_COMMAND")
         if raw.casefold().startswith(":u1 "):
             return self._execute_inbound_upload_control(raw)
+        if raw.casefold().startswith(":transport_log"):
+            from easychange.core.transport_audit import snapshot, log
+            tokens=raw.split()
+            try:
+                if len(tokens)>5:
+                    raise ValueError("TRANSPORT_LOG_TOO_MANY_ARGUMENTS")
+                cursor=int(tokens[1]) if len(tokens)>1 else 0
+                limit=int(tokens[2]) if len(tokens)>2 else 8
+                seq=tokens[3] if len(tokens)>3 else ""
+                direction=tokens[4] if len(tokens)>4 else ""
+                data=snapshot(after=cursor,limit=limit,sequence=seq,direction=direction)
+            except (ValueError,TypeError) as exc:
+                return Result(False,"transport_log",error=str(exc),
+                              code="INVALID_TRANSPORT_LOG_REQUEST")
+            log("audit_read",direction="EASYCHANGE_TO_MCP",command_type="transport_log")
+            return Result(True,"transport_log",data=data,
+                          command_id=self.ids.next("C"))
         # EC1 is the physical HID request/response envelope. Journal RUNNING
         # before dispatch so a lost ACK can never cause a blind mutation replay.
         match = re.match(r"^:ec\s+(Q[A-Z0-9_-]{4,40})\s+([\s\S]+)$", raw, re.IGNORECASE)
         if match:
-            return self._execute_sequenced(match.group(1).upper(), match.group(2).strip())
+            from easychange.core.transport_audit import log, signature
+            seq=match.group(1).upper()
+            wire=match.group(2).strip()
+            stamp=time.perf_counter()
+            identity=signature(wire)
+            # May contain :z1 compressed JSON with credentials. Never persist
+            # plaintext commands: hash/byte length plus EC1 identity only.
+            log("ec1_received",seq,"MCP_TO_EASYCHANGE",bytes=identity["bytes"],
+                sha256=identity["sha256"],command_type="ec1")
+            try:
+                received=self._execute_sequenced(seq,wire)
+            except Exception:
+                log("ec1_failed",seq,"EASYCHANGE_TO_MCP",code="UNHANDLED_EXCEPTION",
+                    elapsed_ms=round((time.perf_counter()-stamp)*1000,2))
+                raise
+            result_hash=signature(json.dumps(received.to_dict(),ensure_ascii=True,default=str))
+            log("ec1_result_ready",seq,"EASYCHANGE_TO_MCP",
+                ok=bool(received.ok),code=str(received.code or ""),
+                command_type=str(received.command or "")[:55],
+                bytes=result_hash["bytes"],sha256=result_hash["sha256"],
+                duration_ms=round((time.perf_counter()-stamp)*1000,2),
+                duplicate=bool((received.data or {}).get("duplicate")))
+            return received
         if raw.lower().startswith(":batch"):
             body = raw[len(":batch"):].strip()
             if body.endswith(":end"): body = body[:-4].strip()
@@ -1960,6 +1999,21 @@ class CommandService:
                 return Result(True, query_kind, data=data,
                               command_id=self.ids.next("C"),
                               duration_ms=int((time.monotonic() - started) * 1000))
+            if query_kind == "transport_audit":
+                from easychange.core.transport_audit import snapshot
+                try:
+                    data=snapshot(
+                        after=query_item.get("after",0),
+                        limit=query_item.get("limit",8),
+                        sequence=query_item.get("sequence",""),
+                        direction=query_item.get("direction",""),
+                    )
+                except (ValueError,TypeError) as exc:
+                    return Result(False,query_kind,error=str(exc),
+                                  code="INVALID_TRANSPORT_AUDIT_REQUEST")
+                return Result(True,query_kind,data=data,
+                              command_id=self.ids.next("C"),
+                              duration_ms=int((time.monotonic()-started)*1000))
             if query_kind == "gatt_diagnostics_tail":
                 try:
                     after = query_item.get("after", 0)

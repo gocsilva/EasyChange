@@ -619,7 +619,9 @@ def test_optical_bundle_encoding_does_not_block_ui_thread(tmp_path, monkeypatch)
     )
 
     window._update_machine_qr(
-        Result(True, "study", {"x": "y" * 1000}, sequence="QASYNC1")
+        # Large study payloads must remain asynchronous; bounded small reads
+        # intentionally use the low-latency inline EC2 encoder.
+        Result(True, "study", {"x": "y" * 10000}, sequence="QASYNC1")
     )
     assert started.wait(1.0)
     assert window._optical_encode_future is not None
@@ -694,7 +696,10 @@ def test_terminal_ec2h_is_visible_before_background_bundle_finishes(tmp_path, mo
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
     sequence = "QFASTHDR2"
-    result = Result(True, "state", {"value": "ready"}, command_id="CFAST2", sequence=sequence)
+    # A tiny state now paints inline on purpose. Test the asynchronous
+    # fallback with a state larger than the 4 KiB fast-path budget.
+    result = Result(True, "state", {"value": "ready", "details": "x" * 12000},
+                    command_id="CFAST2", sequence=sequence)
 
     window.service.result_store.mark_running(
         sequence, "b" * 64, ":state", mutation=False
