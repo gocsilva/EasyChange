@@ -42,3 +42,25 @@ def test_read_never_caches_old_bytes_under_new_file_stat(tmp_path, monkeypatch):
     assert "NEW_REMOTE_CODE_WITH_PATCH" in str(first["lines"])
     assert "NEW_REMOTE_CODE_WITH_PATCH" in str(second["lines"])
     assert second["hash"]==first["hash"]
+
+
+import pytest
+from easychange.core.file_service import ExternalChangeError
+
+
+def test_append_must_not_overwrite_concurrent_external_change(tmp_path,monkeypatch):
+    target=tmp_path/"payment.cs"
+    target.write_bytes(b"original\n")
+    service=FileService(Workspace(tmp_path,tmp_path.name))
+    original=service._read_limited_text
+    modified=[False]
+    def concurrent_edit(path):
+        snapshot=original(path)
+        if not modified[0]:
+            modified[0]=True
+            path.write_bytes(b"external-change\n")
+        return snapshot
+    monkeypatch.setattr(service,"_read_limited_text",concurrent_edit)
+    with pytest.raises(ExternalChangeError):
+        service.append("payment.cs","addition")
+    assert target.read_bytes()==b"external-change\n"
