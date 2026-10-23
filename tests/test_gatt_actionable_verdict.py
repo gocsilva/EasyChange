@@ -37,3 +37,15 @@ def test_client_read_without_cccd_error():
                   "NOT_NEEDED", "")
     assert value["codigo"]=="CUSTOM_GATT_READ_CONFIRMED"
     assert value["leitura"]=="DIAG_READ_OK"
+
+
+def test_successful_subscription_is_not_reported_as_a_gatt_failure():
+    for read in ("DIAG_READ_OK", "DIAG_CHARACTERISTIC_ABSENT",
+                 "DIAG_READ_FAILED:BleakError:Access Denied"):
+        value = _gatt_verdict(stage="NOTIFY_OK", winrt_status="WINRT_ACCESS_STATUS=ALLOWED",
+                              read_probe=read, cccd_probe="NOT_NEEDED",
+                              notification_error="", metadata="service=1,notify_char=1,cccd=1",
+                              connected=True)
+        assert value["codigo"] == "GATT_SUBSCRIPTION_CONFIRMED"
+        assert "SAS/AEAD" in value["proximo_teste"]
+        assert value["leitura"] == read

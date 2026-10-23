@@ -1,8 +1,8 @@
 """EasyChange native Windows BLE GATT client; no remote MCP or network listener.
 
 Runs entirely in a dedicated background asyncio thread. Communication happens
-via the existing bonded Bluetooth keyboard/mouse ESP32 plus its new custom
-encrypted characteristic. Qt command dispatch remains in the GUI thread.
+via the ESP32's bonded GATT-only Bluetooth interface. Its native USB remains
+the keyboard/mouse interface. Qt command dispatch remains in the GUI thread.
 """
 from __future__ import annotations
 import asyncio
@@ -194,7 +194,8 @@ def _gatt_attribute_details(services) -> str:
     lines = []
     for label, uuid in (("SERVICE", SERVICE_UUID),
                         ("RX_NOTIFY", HOST_TO_REMOTE_UUID),
-                        ("TX_WRITE", REMOTE_TO_HOST_UUID)):
+                        ("TX_WRITE", REMOTE_TO_HOST_UUID),
+                        ("DIAG_READ", DIAGNOSTIC_READ_UUID)):
         try:
             obj = (services.get_service(uuid) if label == "SERVICE"
                    else services.get_characteristic(uuid))
@@ -331,7 +332,11 @@ def _gatt_verdict(*, stage: str, winrt_status: str, read_probe: str,
     deny = "DENIED" in access.upper() and "UNAVAILABLE" not in access.upper()
     att03 = ("0X03" in error.upper() or
              ("WRITE NOT PERMITTED" in error.upper()))
-    if deny:
+    if stage == "NOTIFY_OK" and not error:
+        code = "GATT_SUBSCRIPTION_CONFIRMED"
+        confidence = "SUBSCRICAO_CONFIRMADA_PELO_WINDOWS"
+        action = "Canal de notificacoes pronto; concluir autenticacao SAS/AEAD no MCP local"
+    elif deny:
         code = "WINRT_SERVICE_ACCESS_DENIED"
         confidence = "CONFIRMADO_PELO_WINDOWS"
         action = "Analisar permissao de acesso ao servico BLE no WinRT; nao alterar firmware sem BLE_DIAG"

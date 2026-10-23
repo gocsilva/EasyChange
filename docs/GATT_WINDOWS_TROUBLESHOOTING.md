@@ -253,3 +253,27 @@ Fazer uma tentativa GATT no EasyChange e, sem reiniciar o ESP, consultar
 `WINRT_GATT_ACCESSO`, `GATT_LEITURA_TESTE`, `CCCD_ATT03`,
 `BLE_LAST_AUTH_FAILURE`, `GATT_CCCD_WRITE_EVENTS` e
 `GATT_DIAG_READ_EVENTS`. O HID USB remoto nao e alterado.
+
+### Firmware 3.0.1: tabela GATT e diagnostico de inscricao
+
+O firmware registra o mesmo servico e seus oito atributos em uma tabela
+Bluedroid explicita. O marcador publico usa resposta automatica da pilha.
+O CCCD tem READ/WRITE, tamanho de dois bytes e resposta ATT da aplicacao,
+com estado de notificacoes limpo a cada conexao. Escritas de dados continuam
+exigindo criptografia BLE e o protocolo aplicativo SAS/AEAD.
+
+`esp_gatt_diagnostics` deve mostrar `GATT_TABLE_SCHEMA=2`,
+`GATT_TABLE_STATUS=0` e `GATT_SERVICE_START_STATUS=0`. `esp_ble_diagnostics`
+acrescenta `GATT_NOTIFY_SUBSCRIBED`, `GATT_LAST_ATT_STATUS`,
+`GATT_LAST_RESPONSE_RC` e `GATT_LAST_NOTIFY_RC`. A ausencia de escrita
+CCCD nao prova recusa de permissao; comparar com a tentativa do Windows.
+
+O inventario EasyChange inclui a caracteristica DIAG_READ. Uma inscricao
+aceita pelo Windows gera `GATT_SUBSCRIPTION_CONFIRMED`, mesmo se a leitura
+opcional do marcador falhar. Isso confirma somente notificacoes: a sessao
+continua exigindo confirmacao SAS/AEAD e um resultado real da aplicacao.
+
+Para o teste fisico apos atualizar: abrir o EasyChange atualizado, clicar
+**Tentar GATT**, verificar `DIAG_READ_OK` e a inscricao confirmada; concluir
+o pareamento SAS no MCP local. Nenhum administrador, novo perfil HID ou
+escrita direta do CCCD pelo cliente e necessario. QR/HDMI continuam disponiveis.
