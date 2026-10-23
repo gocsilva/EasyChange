@@ -43,8 +43,11 @@ def test_compact_renderer_uses_72_cell_bitmap_instead_of_qr():
                          interpolation=cv2.INTER_AREA)
     visual = decode_pixel_bitmap(compact.ravel(), side=LARGE_SIDE)
     assert json.loads(visual)["d"] == "Q" * 220
-    assert json.loads(visual)["tm"] == "PIXEL"
-    assert json.loads(visual)["rm"] == "PIXEL"
+    # Only EC2H carries the tm/rm/vh capability hint; the PIXEL fragment
+    # itself must remain byte-identical to avoid reducing 32-cell capacity.
+    assert visual == packet
+    assert "tm" not in json.loads(visual)
+    assert "rm" not in json.loads(visual)
 
 
 def test_dense_burst_preserves_56_cell_limit_and_qr_escape_hatch():

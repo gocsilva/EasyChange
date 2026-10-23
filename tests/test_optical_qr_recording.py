@@ -126,7 +126,10 @@ def test_explicit_qr_selector_hashes_actual_painted_wire(tmp_path):
         painted_wire, kind = window._optical_rendered_wire[raw]
         painted = json.loads(painted_wire)
         assert kind == "QR"
-        assert painted["tm"] == "QR" and painted["rm"] == "QR"
+        # Mode metadata belongs only to EC2H; data packets must be byte-for-
+        # byte unchanged to keep dense 32-code pages readable on HDMI 720p.
+        assert painted_wire == raw
+        assert "tm" not in painted and "rm" not in painted
         assert result["manifest"][0]["sha256"] == hashlib.sha256(
             painted_wire.encode("utf-8")
         ).hexdigest()

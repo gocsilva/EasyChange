@@ -9,6 +9,7 @@ from pathlib import Path
 
 from easychange.remote.optical_protocol import encode_durable_result_header, encode_result_bundle
 from easychange.remote.pixel_transport import encode_pixel_bitmap
+from easychange.remote.optical_raster import rasterize_optical_payload
 from easychange.remote.gatt_client import EasyChangeGattClient
 from easychange.ui.gatt_diagnostic_window import GattDiagnosticWindow
 
@@ -276,6 +277,11 @@ class MainWindow(QMainWindow):
             thread_name_prefix="easychange-ec2",
         )
         self._optical_encode_future = None
+        # A dedicated pair of raster workers decodes no HDMI and touches no Qt
+        # objects. QR bit-matrix generation cannot block the Win32 event loop.
+        self._optical_render_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="easychange-qr-raster"
+        )
         # A dedicated serial command worker keeps slow HID requests off Qt's
         # paint/event thread without reordering EC1 sequence execution.
         self._command_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="easychange-commands")
@@ -871,6 +877,7 @@ class MainWindow(QMainWindow):
             self._enable_gatt_connection()
         self._optical_timer.stop()
         self._optical_render_generation += 1
+        self._discard_optical_render_jobs()
         self._optical_render_pending = None
         self._optical_pixmaps.clear()
         self._optical_page = 0
@@ -1346,6 +1353,7 @@ class MainWindow(QMainWindow):
             ok=bool(getattr(result,"ok",False)))
         self._optical_timer.stop()
         self._optical_render_generation += 1
+        self._discard_optical_render_jobs()
         self._optical_render_pending = None
         self._optical_payloads = []
         self._optical_header_payload = None
@@ -1640,6 +1648,7 @@ class MainWindow(QMainWindow):
         if not isinstance(pending, dict):
             return
         if pending.get("generation") != self._optical_render_generation:
+            self._discard_optical_render_jobs()
             self._optical_render_pending = None
             return
         payloads = pending.get("payloads") or []
@@ -1651,16 +1660,46 @@ class MainWindow(QMainWindow):
         if index < len(payloads):
             payload = payloads[index]
             try:
-                self._cache_optical_pixmap(payload, self._build_optical_pixmap(payload))
+                if len(payloads) > self._OPTICAL_NORMAL_SLOTS:
+                    # A 32-QR page can take seconds to rasterize; running
+                    # qrcode.make() in zero-delay Qt callbacks freezes Win32.
+                    # Prepare at most two distinct rasters concurrently and
+                    # convert QImage -> QPixmap ONLY on this Qt thread.
+                    futures = pending.setdefault("raster_futures", {})
+                    requested = str(self.remote_transport_mode)
+                    preference = str(self._host_optical_preference)
+                    for candidate in payloads[index:]:
+                        if len(futures) >= 2:
+                            break
+                        if candidate in self._optical_pixmaps or candidate in futures:
+                            continue
+                        futures[candidate] = self._optical_render_executor.submit(
+                            rasterize_optical_payload,
+                            candidate, requested, preference,
+                            burst=bool(self._optical_burst),
+                            label_side=min(self.machine_qrs[0].width(),
+                                           self.machine_qrs[0].height()),
+                        )
+                    future = futures.get(payload)
+                    if future is None or not future.done():
+                        QTimer.singleShot(16, self._render_next_optical_symbol)
+                        return
+                    pixels, side, kind, wire = future.result()
+                    self._remember_optical_wire(payload, wire, kind)
+                    self._cache_optical_pixmap(
+                        payload, self._pixmap_from_optical_raster(pixels, side),
+                    )
+                    futures.pop(payload, None)
+                else:
+                    # Compact status receipts use the proven low-latency path.
+                    self._cache_optical_pixmap(
+                        payload, self._build_optical_pixmap(payload),
+                    )
             except Exception as exc:
-                # Invalid/oversized optical data cannot wedge the incremental
-                # renderer or leave an endless pending page after a Qt callback.
+                self._discard_optical_render_jobs()
                 self._optical_render_pending = None
                 self._optical_payloads = []
                 self._optical_timer.stop()
-                # A pending bundle from the previous render generation is no
-                # longer deliverable. Release it so the next optical page
-                # does not wait forever on an orphaned encoding Future.
                 previous = self._optical_encode_future
                 if previous is not None and not previous.done():
                     previous.cancel()
@@ -1672,6 +1711,13 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._render_next_optical_symbol)
             return
         self._commit_optical_page(pending)
+
+    def _discard_optical_render_jobs(self) -> None:
+        pending = self._optical_render_pending
+        if isinstance(pending, dict):
+            for future in pending.get("raster_futures", {}).values():
+                if not future.done():
+                    future.cancel()
 
     def _remember_optical_wire(self, original: str, encoded: str, kind: str) -> None:
         mapping = self._optical_rendered_wire
@@ -1693,98 +1739,32 @@ class MainWindow(QMainWindow):
         if pixel_count:
             self._optical_test_counter.mark_non_qr(pixel_count)
 
-    def _build_optical_pixmap(self, payload: str) -> QPixmap:
-        original_payload = payload
-        # The remote GUI's explicit routing choice travels inside the optical
-        # EC2 data already visible to MCP. This is metadata ONLY; it cannot
-        # authorize execution or change a result's durable SHA/CRC contract.
-        # It lets the MCP honor a remote mode after correlating the receipt.
-        requested = getattr(self, "remote_transport_mode", "AUTO")
-        optical_mode = (
-            getattr(self, "_host_optical_preference", "QR")
-            if requested == "AUTO" else requested
-        )
-        # Advertise the v2 runtime presentation contract on observed EC2
-        # pixels, enabling future per-command dwell hints on the MCP.
-        try:
-            item = json.loads(payload)
-            if isinstance(item, dict) and item.get("p") == "EC2H":
-                # Negotiate once per broadcast page via the persistent EC2H.
-                # Re-serializing every EC2 data cell with tm/rm/vh adds tens
-                # of bytes and pushes dense 32-tile 720p QR codes to higher
-                # versions, reducing physical module size and correlation
-                # reliability. ECP1 capacity suffers too. Keep all EC2 data
-                # fragments bit-for-bit unchanged (including CRC/digest).
-                item["tm"] = optical_mode
-                item["rm"] = requested
-                item["vh"] = 2
-                payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
-        except (ValueError, TypeError):
-            pass
-        # HYBRID uses ECP1 for the receipt and most data fragments, with
-        # periodic QR cells (including data index 0). Mixed pages remain
-        # independently CRC/digest verified by the same EC2 receiver.
-        render_pixel = optical_mode in {"PIXEL", "PIXEL+QR", "HYBRID"}
-        if render_pixel and optical_mode in {"PIXEL+QR", "HYBRID"}:
-            try:
-                wire = json.loads(payload)
-                render_pixel = (wire.get("p") == "EC2H" or
-                                (wire.get("p") == "EC2" and
-                                 int(wire.get("i", 0)) % 4 != 0))
-            except (TypeError, ValueError, OverflowError):
-                render_pixel = False
-        if render_pixel:
-            from easychange.remote.pixel_transport import SIDE, LARGE_SIDE
-            label = self.machine_qrs[0]
-            side = SIDE
-            try:
-                pixels = encode_pixel_bitmap(payload)
-            except ValueError:
-                # Compact four-cell panels have enough physical pixels for a
-                # higher-capacity ECP1 bitmap. A 32-cell 720p burst MUST keep
-                # the 56-cell format to avoid shrinking modules below 2px.
-                # Preserve legacy QR fallback only above the new capacity.
-                if not self._optical_burst and min(label.width(), label.height()) >= 170:
-                    try:
-                        side = LARGE_SIDE
-                        pixels = encode_pixel_bitmap(payload, side=side)
-                    except ValueError:
-                        pixels = None
-                else:
-                    pixels = None
-            if pixels is not None:
-                self._remember_optical_wire(original_payload, payload, "PIXEL")
-                image = QImage(
-                    pixels, side, side, side, QImage.Format.Format_Grayscale8
-                ).copy()
-                return QPixmap.fromImage(image).scaled(
-                    label.width(), label.height(),
-                    Qt.AspectRatioMode.IgnoreAspectRatio,
-                    Qt.TransformationMode.FastTransformation,
-                )
-        self._remember_optical_wire(original_payload, payload, "QR")
-        import qrcode
-        code = qrcode.QRCode(
-            error_correction=qrcode.constants.ERROR_CORRECT_M,
-            box_size=1, border=4, mask_pattern=3,
-        )
-        code.add_data(payload)
-        code.make(fit=True)
-        matrix = code.get_matrix()
-        height = len(matrix); width = len(matrix[0])
-        pixels = bytes(0 if dark else 255 for row in matrix for dark in row)
+    def _pixmap_from_optical_raster(self, pixels: bytes, side: int) -> QPixmap:
+        # QWidget/QPixmap must never be created or used in the worker.
         image = QImage(
-            pixels, width, height, width, QImage.Format.Format_Grayscale8
+            pixels, side, side, side, QImage.Format.Format_Grayscale8
         ).copy()
         label = self.machine_qrs[0]
-        # Version-dependent QR matrices previously produced variable actual
-        # pixmap sizes inside equal labels. Uniform maximum-size squares with
-        # nearest-neighbor scaling stabilize contour/slot geometry.
         return QPixmap.fromImage(image).scaled(
             label.width(), label.height(),
             Qt.AspectRatioMode.IgnoreAspectRatio,
             Qt.TransformationMode.FastTransformation,
         )
+
+    def _build_optical_pixmap(self, payload: str) -> QPixmap:
+        # Compact/first receipt: synchronous, preserving the legacy API.
+        # Large 8x4 pages use this SAME lossless rasterizer in workers.
+        pixels, side, kind, wire = rasterize_optical_payload(
+            payload,
+            str(getattr(self, "remote_transport_mode", "AUTO")),
+            str(getattr(self, "_host_optical_preference", "QR")),
+            burst=bool(self._optical_burst),
+            label_side=min(self.machine_qrs[0].width(), self.machine_qrs[0].height()),
+        )
+        self._remember_optical_wire(payload, wire, kind)
+        # Support the existing minimal Qt test adapters which invoke this
+        # method with a duck-typed widget carrier rather than MainWindow.
+        return MainWindow._pixmap_from_optical_raster(self, pixels, side)
 
     def _commit_optical_page(self, pending: dict) -> None:
         if (
@@ -1899,6 +1879,8 @@ class MainWindow(QMainWindow):
             self._gatt_diagnostic_window = None
         self.service.gatt_diagnostics_source = None
         self._command_executor.shutdown(wait=False, cancel_futures=True)
+        self._discard_optical_render_jobs()
+        self._optical_render_executor.shutdown(wait=False, cancel_futures=True)
         self._optical_encode_executor.shutdown(wait=False, cancel_futures=True)
         self.service.close()
         super().closeEvent(event)
