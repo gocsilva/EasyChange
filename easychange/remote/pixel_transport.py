@@ -47,7 +47,7 @@ def decode_pixel_bitmap(bitmap) -> str | None:
         if len(bitmap) != SIDE * SIDE:
             return None
         dark = lambda x, y: int(bitmap[y * SIDE + x]) < 128
-        for n in (1, 8, 20, 35, SIDE - 2):
+        for n in (3, 8, 20, 35, SIDE - 4):
             if not (dark(n, 1) and dark(n, SIDE - 2)
                     and dark(1, n) and dark(SIDE - 2, n)):
                 return None
@@ -55,7 +55,7 @@ def decode_pixel_bitmap(bitmap) -> str | None:
                 return None
             if dark(n, 2) or dark(n, SIDE - 3) or dark(2, n) or dark(SIDE - 3, n):
                 return None
-        data = bytearray((DATA_SIDE * DATA_SIDE) // 8)
+        data = bytearray((DATA_SIDE * DATA_SIDE + 7) // 8)
         for index in range(DATA_SIDE * DATA_SIDE):
             x = DATA_START + index % DATA_SIDE
             y = DATA_START + index // DATA_SIDE
