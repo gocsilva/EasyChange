@@ -84,6 +84,70 @@ def test_concurrent_start_rejects_duplicate_live_process_id(tmp_path, monkeypatc
     assert popen_calls == 1
 
 
+def test_stop_all_waits_for_inflight_start_and_stops_new_child(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = ProcessService(workspace)
+    popen_entered = threading.Event()
+    allow_popen = threading.Event()
+    shutdown_entered = threading.Event()
+    shutdown_finished = threading.Event()
+
+    class Child:
+        pid = 501
+
+        def __init__(self):
+            self.returncode = None
+            self.terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            assert timeout is not None
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    child = Child()
+
+    def fake_popen(*_args, **_kwargs):
+        popen_entered.set()
+        assert allow_popen.wait(timeout=5)
+        return child
+
+    def shutdown():
+        shutdown_entered.set()
+        try:
+            service.stop_all()
+        finally:
+            shutdown_finished.set()
+
+    monkeypatch.setattr("easychange.core.process_service.subprocess.Popen", fake_popen)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        starting = pool.submit(service.start, [sys.executable, "-c", "pass"], "JSHUTDOWN1")
+        assert popen_entered.wait(timeout=5)
+        stopping = pool.submit(shutdown)
+        assert shutdown_entered.wait(timeout=5)
+        try:
+            assert not shutdown_finished.wait(timeout=0.2)
+        finally:
+            allow_popen.set()
+        assert starting.result(timeout=5)["pid"] == child.pid
+        stopping.result(timeout=5)
+
+    assert child.terminated is True
+    assert service._processes == {}
+    with pytest.raises(RuntimeError, match="PROCESS_SERVICE_STOPPING"):
+        service.start([sys.executable, "-c", "pass"], "JAFTERSHUTDOWN")
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows .cmd semantics")
 @pytest.mark.parametrize("suffix", [".cmd", ".bat"])
 def test_cmd_and_bat_are_wrapped_by_cmd_and_execute_with_quoted_args(

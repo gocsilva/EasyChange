@@ -345,6 +345,7 @@ class ProcessService:
         self._processes_lock = threading.RLock()
         self.last_execution: dict | None = None
         self._job_start_lock = threading.RLock()
+        self._stopping = False
         self._job_write_lock = threading.RLock()
         self._reconcile_stop = threading.Event()
         self._reconcile_thread: threading.Thread | None = None
@@ -814,6 +815,8 @@ class ProcessService:
         # Hold a durable per-job lock across manifest checks, process launch,
         # and state writes; the service lock also preserves its prior ordering.
         with _durable_job_start_lock(self._job_path(job_id)), self._job_start_lock:
+            if self._stopping:
+                raise RuntimeError("PROCESS_SERVICE_STOPPING")
             return self._job_start_locked(
                 argv,
                 job_id,
@@ -1725,6 +1728,8 @@ class ProcessService:
         no_window: bool = True,
     ) -> dict:
         with self._job_start_lock:
+            if self._stopping:
+                raise RuntimeError("PROCESS_SERVICE_STOPPING")
             return self._start_locked(
                 argv,
                 process_id,
@@ -1994,16 +1999,18 @@ class ProcessService:
         }
 
     def stop_all(self) -> None:
-        self._reconcile_stop.set()
-        thread = self._reconcile_thread
-        if (
-            thread is not None
-            and thread.is_alive()
-            and thread is not threading.current_thread()
-        ):
-            thread.join(timeout=1.0)
-        for process_id, item in self._process_items_snapshot():
-            if item.process.poll() is None:
-                self.stop(process_id)
-        # CommandService is closing; background process logs are ephemeral.
-        self._prune_finished(keep=0)
+        with self._job_start_lock:
+            self._stopping = True
+            self._reconcile_stop.set()
+            thread = self._reconcile_thread
+            if (
+                thread is not None
+                and thread.is_alive()
+                and thread is not threading.current_thread()
+            ):
+                thread.join(timeout=1.0)
+            for process_id, item in self._process_items_snapshot():
+                if item.process.poll() is None:
+                    self.stop(process_id)
+            # CommandService is closing; background process logs are ephemeral.
+            self._prune_finished(keep=0)
