@@ -1546,6 +1546,17 @@ class MainWindow(QMainWindow):
         self._commit_optical_page(pending)
 
     def _build_optical_pixmap(self, payload: str) -> QPixmap:
+        # The remote GUI's explicit routing choice travels inside the optical
+        # EC2 data already visible to MCP. This is metadata ONLY; it cannot
+        # authorize execution or change a result's durable SHA/CRC contract.
+        # It lets the MCP honor a remote mode after correlating the receipt.
+        try:
+            item = json.loads(payload)
+            if isinstance(item, dict) and item.get("p") in {"EC2", "EC2H"}:
+                item["tm"] = getattr(self, "remote_transport_mode", "AUTO")
+                payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        except (ValueError, TypeError):
+            pass
         if getattr(self, "remote_transport_mode", "AUTO") == "PIXEL":
             try:
                 pixels = encode_pixel_bitmap(payload)
