@@ -664,6 +664,39 @@ def test_update_timeout_does_not_kill_process_that_exited_before_cleanup():
     assert kill_calls == []
 
 
+def test_update_timeout_requires_process_exit_after_taskkill_success():
+    wait_calls = []
+    kill_calls = []
+
+    class UnconfirmedProcess:
+        pid = 4458
+
+        def wait(self, *, timeout):
+            wait_calls.append(timeout)
+            raise subprocess.TimeoutExpired("updater", timeout)
+
+        def poll(self):
+            return None
+
+    def run_taskkill(argv, **kwargs):
+        kill_calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    with pytest.raises(self_update.UpdateProcessTreeCleanupUnconfirmed):
+        self_update._run_updater_with_tree_timeout(
+            ["cmd.exe", "/d", "/c", "Atualizar_EasyChange.bat"],
+            cwd="C:/EasyChange",
+            env={},
+            stdout=None,
+            timeout=900,
+            popen_factory=lambda *_args, **_kwargs: UnconfirmedProcess(),
+            run_factory=run_taskkill,
+        )
+
+    assert wait_calls == [900, 10]
+    assert kill_calls[0][0][-4:] == ["/PID", "4458", "/T", "/F"]
+
+
 def test_update_process_status_error_requires_tree_cleanup():
     class TimedOutProcess:
         pid = 4456
