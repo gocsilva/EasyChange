@@ -249,20 +249,24 @@ def _schedule_process_lock(path: str | Path | None = None, *, timeout: float = 2
 
 
 def _active_update_handoff(root: Path, workspace: Path) -> dict | None:
+    receipt_path = update_receipt_path()
     try:
-        existing = _read_update_receipt_bounded(update_receipt_path())
-        if not isinstance(existing, dict):
-            return None
-        if (existing.get("schema") != UPDATE_RECEIPT_SCHEMA
-                or existing.get("repo_root") != str(root)
-                or existing.get("state") not in {"SCHEDULED", "RUNNING"}):
-            return None
-        active, _stale = _update_receipt_activity(existing)
-        if not active:
-            return None
-        return existing
-    except (OSError, ValueError, TypeError, UnicodeError):
+        existing = _read_update_receipt_bounded(receipt_path)
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError, TypeError, UnicodeError) as exc:
+        # A damaged or inaccessible receipt cannot prove that another updater
+        # is absent. Do not fail open and launch a competing updater.
+        raise RuntimeError("UPDATE_RECEIPT_UNREADABLE") from exc
+    if not isinstance(existing, dict) or existing.get("schema") != UPDATE_RECEIPT_SCHEMA:
+        raise RuntimeError("UPDATE_RECEIPT_INVALID")
+    if (existing.get("repo_root") != str(root)
+            or existing.get("state") not in {"SCHEDULED", "RUNNING"}):
+        return None
+    active, _stale = _update_receipt_activity(existing)
+    if not active:
+        return None
+    return existing
 
 
 def _schedule_self_update_once(

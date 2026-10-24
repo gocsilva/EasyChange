@@ -617,9 +617,24 @@ def test_oversized_update_receipt_is_rejected_without_git_or_worker_handoff(tmp_
         "padding": "X" * 100_000,
     }), encoding="utf-8")
     monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "update_log_path", lambda: tmp_path / "update.log")
     monkeypatch.setattr(self_update, "_read_git_revisions",
                         lambda *_args: (_ for _ in ()).throw(AssertionError("NO_GIT_ON_INVALID_RECEIPT")))
     status = self_update.read_update_status(repo_root=root)
     assert status["receipt_available"] is False
     assert status["state"] == "UPDATE_RECEIPT_UNREADABLE"
-    assert self_update._active_update_handoff(root, workspace) is None
+    with pytest.raises(RuntimeError, match="UPDATE_RECEIPT_UNREADABLE"):
+        self_update._active_update_handoff(root, workspace)
+
+    # Corruption cannot prove that a previous updater is gone. Scheduling
+    # must fail closed rather than replace the receipt and start another one.
+    (root / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    spawned = []
+    result = self_update.schedule_self_update(
+        workspace,
+        repo_root=root,
+        platform_name="nt",
+        popen_factory=lambda *args, **kwargs: spawned.append((args, kwargs)),
+    )
+    assert result == {"ok": False, "error": "UPDATE_RECEIPT_UNREADABLE"}
+    assert spawned == []
