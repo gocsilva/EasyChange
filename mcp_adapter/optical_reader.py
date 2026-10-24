@@ -128,8 +128,8 @@ class OpticalAssembler:
                         count<1 or count>MAX_EC2_PACKETS or
                         type(index) is not int or index<0 or index>=count):
                     continue
-                if self.sequence and seq==self.sequence and count!=self.total:
-                    continue
+                # Do not claim a slot from changed metadata until the
+                # incoming fragment's own CRC has been verified below.
                 # Literal-metadata marker must agree across the same EC2
                 # carousel. Reject malformed markers before claiming a slot,
                 # otherwise a later valid retransmission could be blocked.
@@ -163,6 +163,18 @@ class OpticalAssembler:
                         len(expected_crc)!=8 or
                         f"{binascii.crc32(piece_bytes) & 0xffffffff:08x}"!=expected_crc):
                     continue
+                if self.sequence and seq==self.sequence and identity!=self.packet_identity:
+                    # Raw single-line ESP commands legitimately reuse the
+                    # unsequenced EC2 identifier "-". After a COMPLETE,
+                    # verified carousel, a new CRC-valid index 0 with a
+                    # different digest starts a new result; never merge it
+                    # with an old read/search/write receipt. Sequenced MCP
+                    # operations remain immutable even after completion.
+                    if (seq=="-" and index==0
+                            and self.verified_payload is not None):
+                        self._reset_unverified()
+                    else:
+                        continue
                 if self.sequence and seq!=self.sequence:
                     # A completed receipt may hand off to the next valid
                     # carousel immediately. Incomplete work stays protected
@@ -242,6 +254,28 @@ def decode_hdmi_qr(frame) -> list[str]:
         # allocate multiple temporary images, so reject before calling cv2.
         return []
     import cv2
+    # Real 1280x720 MJPG HDMI from EasyChange: OpenCV's multi-reader
+    # repeatedly reported ZERO symbols for perfectly valid 4-cell EC2 QR,
+    # while ZXing-C++ recovered all four from the identical physical frame.
+    # Prefer ZXing; retain OpenCV as an independent fallback for rare cells.
+    zxing_values=[]
+    try:
+        import zxingcpp
+        detected=zxingcpp.read_barcodes(
+            frame, formats=zxingcpp.BarcodeFormat.QRCode,
+            try_rotate=True, try_downscale=True,
+        )
+        seen_zx=set()
+        for barcode in itertools.islice(detected,32):
+            raw=getattr(barcode,"text",None)
+            if isinstance(raw,str) and raw and raw not in seen_zx:
+                seen_zx.add(raw)
+                zxing_values.append(raw)
+        if len(zxing_values)>=4:
+            return zxing_values
+    except (ImportError, AttributeError, TypeError, RuntimeError, ValueError):
+        pass
+
     try:
         detector=getattr(_qr_detectors,"detector",None)
         if detector is None:
@@ -275,9 +309,11 @@ def decode_hdmi_qr(frame) -> list[str]:
                 decoded=[]
         else:
             decoded=[]
-        if not decoded:
+        if not decoded and not zxing_values:
             single,_points,_rectified=detector.detectAndDecode(frame)
             if isinstance(single,str) and single:decoded=[single]
+        # Valid ZXing results must survive OpenCV returning zero or throwing.
+        decoded=list(dict.fromkeys([*zxing_values,*decoded]))
 
         # OpenCV multi-detection may see only 3/4 QR cells on a compact
         # EasyChange footer at 1080p. Decode four overlapping footer crops
@@ -308,6 +344,6 @@ def decode_hdmi_qr(frame) -> list[str]:
                         break
         return decoded
     except (cv2.error, TypeError, ValueError):
-        # A transient invalid image or interrupted capture cannot imply
-        # success and must not prevent the following frame from being read.
-        return []
+        # The ZXing result is independently decodable on this SAME image.
+        # Never erase valid QR strings merely because OpenCV threw.
+        return zxing_values
