@@ -1253,7 +1253,16 @@ def test_malformed_or_wrong_schema_receipt_blocks_retry(
     receipt_path.write_text(receipt_text, encoding="utf-8")
     monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
     monkeypatch.setattr(self_update, "update_log_path", lambda: tmp_path / "update.log")
+    monkeypatch.setattr(
+        self_update,
+        "_read_git_revisions",
+        lambda _root: (_ for _ in ()).throw(AssertionError("INVALID_RECEIPT_MUST_NOT_READ_GIT")),
+    )
     spawned = []
+
+    status = self_update.read_update_status(repo_root=root)
+    assert status["receipt_available"] is False
+    assert status["state"] == expected_error
 
     result = self_update.schedule_self_update(
         workspace,
