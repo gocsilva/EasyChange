@@ -93,6 +93,30 @@ def _read_git_revisions(repo_root: str | Path) -> dict:
         return {"revision_error": f"{type(exc).__name__}:{str(exc)[:120]}"}
 
 
+def _update_receipt_activity(receipt: dict, *, now: datetime | None = None) -> tuple[bool, bool]:
+    """Bound stale SCHEDULED/RUNNING receipts using the handoff timeout."""
+    state = receipt.get("state")
+    if state not in {"SCHEDULED", "RUNNING"}:
+        return False, False
+    try:
+        started = datetime.fromisoformat(str(receipt.get("started_at_utc") or ""))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        age = (current - started).total_seconds()
+        maximum = (
+            RESTART_GRACE_SECONDS + 90 + 30
+            if state == "SCHEDULED"
+            else UPDATE_TIMEOUT_SECONDS + 120
+        )
+        fresh = -5 <= age <= maximum
+        return fresh, not fresh
+    except (ValueError, TypeError, OverflowError):
+        return False, True
+
+
 def read_update_status(*, repo_root: str | Path | None = None) -> dict:
     """Return the latest self-update receipt and compare it with the checkout."""
     path = update_receipt_path()
@@ -113,6 +137,7 @@ def read_update_status(*, repo_root: str | Path | None = None) -> dict:
     current_sha = revisions.get("head_sha")
     origin_main_sha = revisions.get("origin_main_sha")
     installed_sha = receipt.get("installed_git_sha")
+    update_in_progress, update_stale = _update_receipt_activity(receipt)
     return {
         "receipt_available": True,
         "state": receipt.get("state"),
@@ -129,7 +154,8 @@ def read_update_status(*, repo_root: str | Path | None = None) -> dict:
         "schedule_error": receipt.get("schedule_error"),
         "finished_at_utc": receipt.get("finished_at_utc"),
         "started_at_utc": receipt.get("started_at_utc"),
-        "update_in_progress": receipt.get("state") in {"SCHEDULED", "RUNNING"},
+        "update_in_progress": update_in_progress,
+        "update_stale": update_stale,
         "relaunch_verified_by_mcp": False,
     }
 
@@ -161,16 +187,8 @@ def _active_update_handoff(root: Path, workspace: Path) -> dict | None:
                 or existing.get("repo_root") != str(root)
                 or existing.get("state") not in {"SCHEDULED", "RUNNING"}):
             return None
-        started = datetime.fromisoformat(str(existing.get("started_at_utc") or ""))
-        if started.tzinfo is None:
-            started = started.replace(tzinfo=timezone.utc)
-        age = (datetime.now(timezone.utc) - started).total_seconds()
-        # SCHEDULED with no live child is retriable after a short grace.
-        # RUNNING may legitimately last the full 15-minute update timeout.
-        maximum = (RESTART_GRACE_SECONDS + 90 + 30
-                   if existing["state"] == "SCHEDULED"
-                   else UPDATE_TIMEOUT_SECONDS + 120)
-        if not -5 <= age <= maximum:
+        active, _stale = _update_receipt_activity(existing)
+        if not active:
             return None
         return existing
     except (OSError, ValueError, TypeError, UnicodeError):

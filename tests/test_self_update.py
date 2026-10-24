@@ -290,6 +290,27 @@ def test_self_update_status_text_command_reads_receipt_without_mutating(tmp_path
         service.close()
 
 
+def test_self_update_status_marks_expired_active_receipt_stale(tmp_path, monkeypatch):
+    receipt_path = tmp_path / "update-receipt.json"
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(
+        self_update,
+        "_read_git_revisions",
+        lambda _root: {"head_sha": None, "origin_main_sha": None},
+    )
+    receipt_path.write_text(json.dumps({
+        "schema": self_update.UPDATE_RECEIPT_SCHEMA,
+        "state": "RUNNING",
+        "started_at_utc": "2000-01-01T00:00:00+00:00",
+    }), encoding="utf-8")
+
+    status = self_update.read_update_status(repo_root=tmp_path)
+
+    assert status["state"] == "RUNNING"
+    assert status["update_in_progress"] is False
+    assert status["update_stale"] is True
+
+
 def test_self_update_rejects_non_windows(tmp_path):
     result = self_update.schedule_self_update(tmp_path, platform_name="posix")
     assert result == {"ok": False, "error": "SELF_UPDATE_REQUIRES_WINDOWS"}
