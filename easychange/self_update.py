@@ -16,6 +16,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Sequence
+import uuid
 
 
 # Fresh HID/HDMI samples have exceeded 30 seconds at p95; keep the current QR
@@ -295,6 +296,7 @@ def _schedule_self_update_once(
         }
     log_path = update_log_path()
     scheduled_at = _utc_now()
+    handoff_id = uuid.uuid4().hex
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = log_path.open("a", encoding="utf-8")
@@ -309,6 +311,7 @@ def _schedule_self_update_once(
     scheduled_receipt = {
         "schema": UPDATE_RECEIPT_SCHEMA,
         "state": "SCHEDULED",
+        "handoff_id": handoff_id,
         "updater_return_code": None,
         "installed_git_sha": revisions.get("head_sha"),
         "origin_main_sha": revisions.get("origin_main_sha"),
@@ -332,6 +335,8 @@ def _schedule_self_update_once(
         "--worker",
         "--repo",
         str(root),
+        "--handoff-id",
+        handoff_id,
         "--workspace",
         str(target_workspace),
         "--parent-pid",
@@ -423,6 +428,7 @@ def run_update_worker(
     workspace: str | Path,
     parent_pid: int,
     executable: str,
+    handoff_id: str | None = None,
     run: Callable = subprocess.run,
     wait_parent: Callable = _wait_for_parent_exit,
     sleep: Callable = time.sleep,
@@ -436,6 +442,7 @@ def run_update_worker(
     receipt = {
         "schema": UPDATE_RECEIPT_SCHEMA,
         "state": "RUNNING",
+        "handoff_id": str(handoff_id or uuid.uuid4().hex),
         "updater_return_code": None,
         "installed_git_sha": None,
         "origin_main_sha": None,
@@ -450,9 +457,19 @@ def run_update_worker(
     def persist_receipt(log=None):
         try:
             with _schedule_process_lock(timeout=5.0):
+                receipt_path = update_receipt_path()
+                try:
+                    latest = _read_update_receipt_bounded(receipt_path)
+                except FileNotFoundError:
+                    latest = None
+                if latest is not None and (
+                    not isinstance(latest, dict)
+                    or latest.get("handoff_id") != receipt["handoff_id"]
+                ):
+                    raise RuntimeError("UPDATE_HANDOFF_SUPERSEDED")
                 _write_update_receipt(receipt)
             return True
-        except (OSError, RuntimeError) as exc:
+        except (OSError, RuntimeError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
             if log is not None:
                 log.write(f"[SELF_UPDATE] receipt_write_failed={type(exc).__name__}\n")
             return False
@@ -548,12 +565,9 @@ def run_update_worker(
     except (OSError, ValueError) as exc:
         receipt["relaunch_state"] = "FAILED"
         receipt["relaunch_error"] = f"{type(exc).__name__}:{str(exc)[:120]}"
-        try:
-            _write_update_receipt(receipt)
-        except OSError:
-            pass
         with log_path.open("a", encoding="utf-8") as log:
             log.write(f"[SELF_UPDATE] GUI relaunch failed: {exc}\n")
+            persist_receipt(log)
         return 8
     receipt["relaunch_state"] = "PROCESS_STARTED"
     persist_receipt()
@@ -566,6 +580,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--repo", type=Path, default=installation_root())
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--handoff-id", default=None)
     parser.add_argument("--executable", default=sys.executable)
     args = parser.parse_args(argv)
     if not args.worker:
@@ -575,6 +590,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         workspace=args.workspace,
         parent_pid=args.parent_pid,
         executable=args.executable,
+        handoff_id=args.handoff_id,
     )
 
 

@@ -280,6 +280,45 @@ def test_update_worker_persists_verifiable_git_receipt(tmp_path, monkeypatch):
     assert len(lock_entries) == 3
 
 
+def test_superseded_update_worker_does_not_overwrite_new_handoff(tmp_path, monkeypatch):
+    repo = tmp_path / "EasyChange"
+    repo.mkdir()
+    (repo / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "update.log"
+    receipt_path = tmp_path / "logs" / "update-receipt.json"
+    monkeypatch.setattr(self_update, "update_log_path", lambda: log_path)
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    latest = {
+        "schema": self_update.UPDATE_RECEIPT_SCHEMA,
+        "state": "SCHEDULED",
+        "handoff_id": "new-handoff",
+        "repo_root": str(repo.resolve()),
+        "workspace": str(workspace.resolve()),
+        "worker_pid": None,
+        "started_at_utc": self_update._utc_now(),
+    }
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_text(json.dumps(latest), encoding="utf-8")
+    update_calls = []
+
+    result = self_update.run_update_worker(
+        repo_root=repo,
+        workspace=workspace,
+        parent_pid=123,
+        executable="pythonw.exe",
+        handoff_id="old-handoff",
+        run=lambda *_args, **_kwargs: update_calls.append(True),
+        wait_parent=lambda _pid: True,
+        sleep=lambda _seconds: None,
+    )
+
+    assert result == 9
+    assert update_calls == []
+    assert json.loads(receipt_path.read_text(encoding="utf-8")) == latest
+
+
 def test_self_update_status_text_command_reads_receipt_without_mutating(tmp_path, monkeypatch):
     receipt_path = tmp_path / "update-receipt.json"
     monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
