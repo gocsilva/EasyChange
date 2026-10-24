@@ -128,6 +128,9 @@ def read_update_status(*, repo_root: str | Path | None = None) -> dict:
         "worker_pid": receipt.get("worker_pid"),
         "schedule_error": receipt.get("schedule_error"),
         "finished_at_utc": receipt.get("finished_at_utc"),
+        "started_at_utc": receipt.get("started_at_utc"),
+        "update_in_progress": receipt.get("state") in {"SCHEDULED", "RUNNING"},
+        "relaunch_verified_by_mcp": False,
     }
 
 

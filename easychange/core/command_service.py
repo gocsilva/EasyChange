@@ -3780,17 +3780,17 @@ class CommandService:
                 dry_run=dry_run,
                 scan_workspace_temps=scan_workspace_temps,
             )
-        if name == "self-update":
+        if name in {"self-update", "autonomous-update"}:
             if args:
-                raise ValueError("self-update accepts no arguments")
+                raise ValueError("autonomous-update accepts no arguments")
             return {
                 "update_request": "github_main",
                 "workspace": str(self.workspace.root_path),
                 "restart_mode": "machine_hid",
             }
-        if name == "self-update-status":
+        if name in {"self-update-status", "autonomous-update-status"}:
             if args:
-                raise ValueError("self-update-status accepts no arguments")
+                raise ValueError("autonomous-update-status accepts no arguments")
             from ..self_update import read_update_status
 
             return read_update_status()

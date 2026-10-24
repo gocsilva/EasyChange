@@ -23,7 +23,8 @@ COMMAND_NAMES = [
     "build", "test", "run", "processes", "stop", "errors", "next-error",
     "previous-error", "remote", "remote-guide", "remote-profile",
     "prepare-hid", "set", "machine", "human", "switch-project", "self-update",
-    "self-update-status", "help", "capabilities",
+    "self-update-status", "autonomous-update", "autonomous-update-status",
+    "help", "capabilities",
     "command-schema", "quit",
 ]
 
@@ -116,6 +117,18 @@ _RICH: dict[str, dict[str, Any]] = {
         "arguments": [],
         "examples": ["self-update-status"],
     },
+    "autonomous-update": {
+        "description": "Schedule a detached GitHub main update and automatic Machine/HID restart of this EasyChange workspace.",
+        "syntax": "autonomous-update",
+        "arguments": [],
+        "examples": ["autonomous-update"],
+    },
+    "autonomous-update-status": {
+        "description": "Read durable update, git revision and GUI relaunch status without triggering a new update.",
+        "syntax": "autonomous-update-status",
+        "arguments": [],
+        "examples": ["autonomous-update-status"],
+    },
     "switch-project": {
         "description": "Switch the open EasyChange window to another existing project workspace.",
         "syntax": "switch-project <workspace_path>",
@@ -136,7 +149,7 @@ _READ_ONLY = {
     "journal", "locks", "history", "status", "health", "diff", "branch", "log",
     "processes", "errors", "next-error", "previous-error", "remote-guide",
     "help", "capabilities", "command-schema", "db-connections", "db-schema",
-    "self-update-status",
+    "self-update-status", "autonomous-update-status",
 }
 
 
