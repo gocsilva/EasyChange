@@ -57,12 +57,20 @@ def _write_update_receipt(receipt: dict) -> None:
     descriptor, temporary = tempfile.mkstemp(
         prefix=".update-receipt-", suffix=".tmp", dir=str(path.parent)
     )
+    descriptor_owned = True
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+        stream = os.fdopen(descriptor, "w", encoding="utf-8", newline="\n")
+        descriptor_owned = False
+        with stream:
             json.dump(receipt, stream, ensure_ascii=False, separators=(",", ":"))
             stream.write("\n")
         os.replace(temporary, path)
     except BaseException:
+        if descriptor_owned:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         try:
             os.unlink(temporary)
         except OSError:

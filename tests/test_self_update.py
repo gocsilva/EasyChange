@@ -33,6 +33,41 @@ def test_self_update_status_is_documented_as_read_only():
     assert schema["syntax"] == "self-update-status"
 
 
+def test_update_receipt_writer_closes_descriptor_when_fdopen_fails(tmp_path, monkeypatch):
+    import os
+    import tempfile
+
+    receipt_path = tmp_path / "update-receipt.json"
+    descriptor, temporary = tempfile.mkstemp(dir=tmp_path)
+    real_close = os.close
+    close_calls = []
+
+    def tracked_close(fd):
+        close_calls.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(tempfile, "mkstemp", lambda **_kwargs: (descriptor, temporary))
+    monkeypatch.setattr(
+        os,
+        "fdopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("synthetic fdopen failure")),
+    )
+    monkeypatch.setattr(os, "close", tracked_close)
+
+    try:
+        with pytest.raises(OSError, match="synthetic fdopen failure"):
+            self_update._write_update_receipt({"state": "SCHEDULED"})
+
+        assert close_calls == [descriptor]
+        assert not Path(temporary).exists()
+    finally:
+        try:
+            real_close(descriptor)
+        except OSError:
+            pass
+
+
 def test_switch_project_schema_is_generic_and_includes_recovery_example():
     schema = command_schema("switch-project")
     assert schema["mutating"] is True
