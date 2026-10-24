@@ -1280,6 +1280,52 @@ def test_failed_retry_replaces_expired_receipt_without_old_metadata(tmp_path, mo
     assert "cleanup_error" not in replacement
 
 
+def test_log_open_failure_preserves_expired_receipt_and_skips_worker(
+    tmp_path, monkeypatch
+):
+    from contextlib import nullcontext
+
+    repo = tmp_path / "EasyChange"
+    repo.mkdir()
+    (repo / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    receipt_path = tmp_path / "logs" / "receipt.json"
+    receipt_path.parent.mkdir()
+    original_receipt = json.dumps({
+        "schema": self_update.UPDATE_RECEIPT_SCHEMA,
+        "repo_root": str(repo.resolve()),
+        "workspace": str(workspace.resolve()),
+        "state": "RUNNING",
+        "started_at_utc": "2000-01-01T00:00:00+00:00",
+        "worker_pid": 9999,
+        "schedule_error": "PRESERVE_THIS_RECEIPT",
+    }).encode("utf-8")
+    receipt_path.write_bytes(original_receipt)
+    log_parent_is_file = tmp_path / "blocked-log-parent"
+    log_parent_is_file.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(
+        self_update,
+        "update_log_path",
+        lambda: log_parent_is_file / "update.log",
+    )
+    monkeypatch.setattr(self_update, "_schedule_process_lock", lambda **_kwargs: nullcontext())
+    spawned = []
+
+    result = self_update.schedule_self_update(
+        workspace,
+        repo_root=repo,
+        platform_name="nt",
+        popen_factory=lambda *args, **kwargs: spawned.append((args, kwargs)),
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "UPDATE_LOG_UNAVAILABLE"
+    assert receipt_path.read_bytes() == original_receipt
+    assert spawned == []
+
+
 def test_old_cleanup_unconfirmed_receipt_still_blocks_synthetic_retry(tmp_path, monkeypatch):
     from contextlib import nullcontext
 
