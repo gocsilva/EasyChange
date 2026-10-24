@@ -985,6 +985,27 @@ def test_malformed_active_receipt_timestamp_is_not_marked_stale():
     ) == (True, False)
 
 
+@pytest.mark.parametrize(
+    ("state", "age_seconds", "expected"),
+    [
+        ("SCHEDULED", self_update.RESTART_GRACE_SECONDS + 120, (True, False)),
+        ("SCHEDULED", self_update.RESTART_GRACE_SECONDS + 121, (False, True)),
+        ("RUNNING", self_update.UPDATE_TIMEOUT_SECONDS + 120, (True, False)),
+        ("RUNNING", self_update.UPDATE_TIMEOUT_SECONDS + 121, (False, True)),
+    ],
+)
+def test_active_receipt_expiry_boundary(state, age_seconds, expected):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    receipt = {
+        "state": state,
+        "started_at_utc": (now - timedelta(seconds=age_seconds)).isoformat(),
+    }
+
+    assert self_update._update_receipt_activity(receipt, now=now) == expected
+
+
 def test_self_update_rejects_non_windows(tmp_path):
     result = self_update.schedule_self_update(tmp_path, platform_name="posix")
     assert result == {"ok": False, "error": "SELF_UPDATE_REQUIRES_WINDOWS"}
