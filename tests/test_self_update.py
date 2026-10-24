@@ -1189,6 +1189,77 @@ def test_duplicate_self_update_schedule_does_not_spawn_two_workers(tmp_path,monk
     assert second.get("already_scheduled") is True
 
 
+def test_expired_running_receipt_allows_synthetic_worker_retry(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+
+    repo = tmp_path / "EasyChange"
+    repo.mkdir()
+    (repo / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    receipt_path = tmp_path / "logs" / "receipt.json"
+    receipt_path.parent.mkdir()
+    receipt_path.write_text(json.dumps({
+        "schema": self_update.UPDATE_RECEIPT_SCHEMA,
+        "repo_root": str(repo.resolve()),
+        "workspace": str(workspace.resolve()),
+        "state": "RUNNING",
+        "started_at_utc": "2000-01-01T00:00:00+00:00",
+    }), encoding="utf-8")
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "update_log_path", lambda: tmp_path / "logs" / "update.log")
+    monkeypatch.setattr(self_update, "_read_git_revisions", lambda _root: {})
+    monkeypatch.setattr(self_update, "_schedule_process_lock", lambda **_kwargs: nullcontext())
+    spawned = []
+
+    result = self_update.schedule_self_update(
+        workspace,
+        repo_root=repo,
+        platform_name="nt",
+        popen_factory=lambda *args, **kwargs: spawned.append((args, kwargs))
+        or SimpleNamespace(pid=4321),
+    )
+
+    assert result["ok"] is True
+    assert result.get("already_scheduled") is not True
+    assert len(spawned) == 1
+    assert json.loads(receipt_path.read_text(encoding="utf-8"))["state"] == "SCHEDULED"
+
+
+def test_old_cleanup_unconfirmed_receipt_still_blocks_synthetic_retry(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+
+    repo = tmp_path / "EasyChange"
+    repo.mkdir()
+    (repo / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    receipt_path = tmp_path / "logs" / "receipt.json"
+    receipt_path.parent.mkdir()
+    receipt_path.write_text(json.dumps({
+        "schema": self_update.UPDATE_RECEIPT_SCHEMA,
+        "repo_root": str(repo.resolve()),
+        "workspace": str(workspace.resolve()),
+        "state": "UPDATE_CLEANUP_UNCONFIRMED",
+        "started_at_utc": "2000-01-01T00:00:00+00:00",
+        "worker_pid": 4455,
+    }), encoding="utf-8")
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "_schedule_process_lock", lambda **_kwargs: nullcontext())
+    spawned = []
+
+    result = self_update.schedule_self_update(
+        workspace,
+        repo_root=repo,
+        platform_name="nt",
+        popen_factory=lambda *args, **kwargs: spawned.append((args, kwargs)),
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "UPDATE_CLEANUP_UNCONFIRMED"
+    assert spawned == []
+
+
 @pytest.mark.parametrize("started_at_utc", ["not-a-timestamp", "2099-01-01T00:00:00+00:00"])
 def test_uncertain_active_receipt_blocks_a_new_worker(
     tmp_path, monkeypatch, started_at_utc
