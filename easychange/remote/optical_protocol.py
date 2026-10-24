@@ -540,10 +540,14 @@ def encode_result_chunks(
 
 
 def encode_result_header(result: Any, *, chunk_count: int | None = None) -> str:
+    if chunk_count is not None and (
+            type(chunk_count) is not int
+            or not 1 <= chunk_count <= MAX_EC2_PACKETS):
+        raise ValueError("invalid optical chunk count")
     value, raw, _token, _size, total, digest, _crc, _sequence, _literal, _encoding = _transport_components(result)
     return _header_json(
         value, raw,
-        total=total if chunk_count is None else int(chunk_count),
+        total=total if chunk_count is None else chunk_count,
         digest=digest,
     )
 

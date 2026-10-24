@@ -145,6 +145,20 @@ def test_durable_ec2_rejects_invalid_sha_before_serialization():
         assert rendered["h"]==""
 
 
+def test_final_header_rejects_invalid_chunk_count_before_encoding():
+    import pytest
+    from unittest.mock import patch
+    import easychange.remote.optical_protocol as optical
+
+    invalid_counts=(True,False,0,-1,optical.MAX_EC2_PACKETS+1,"1",[],{})
+    for count in invalid_counts:
+        with patch.object(optical,"_transport_components",
+                          side_effect=AssertionError("INVALID_COUNT_ENCODED")) as encode:
+            with pytest.raises(ValueError,match="invalid optical chunk count"):
+                optical.encode_result_header({},chunk_count=count)
+            encode.assert_not_called()
+
+
 def test_ec2_never_interprets_truthy_nonboolean_as_success():
     import pytest
     from easychange.remote import optical_protocol as optical
