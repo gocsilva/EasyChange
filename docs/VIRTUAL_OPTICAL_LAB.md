@@ -275,3 +275,42 @@ Validated in the local Qt/virtual ESP/HDMI laboratory:
 The new fast unit test protects the independent bounded recovery budget.
 The slow permanent-loss stress scenario is opt-in via --drop-page 1
 --persistent-loss in the full MCP lab, not the normal CI default.
+
+## Mandatory remote-main freshness gate (local Windows laboratory)
+
+Always launch virtual tests through the tracked .bat entrypoints:
+
+    tests\run_virtual_full_mcp_lab.bat --mode QR --command ":state --compact"
+    tests\run_virtual_full_mcp_lab.bat --mode UBUNTU --command ":search greeting"
+    tests\run_virtual_optical_lab.bat --transport-mode UBUNTU --max-cases 4
+
+Both launchers use tests/fresh_main_virtual_lab.py rather than the source
+present in the caller's potentially outdated worktree.
+At EVERY invocation, the launcher:
+
+1. Fetches the remote main of EasyChange, MCP_PC_CONTROLLER,
+   ESP32-PC-CONTROLLER and BMO_LLM_CONTROLLER (a current MCP dependency).
+   All four origin URLs are verified.
+2. Confirms the fetched origin/main is identical to GitHub's current
+   ls-remote origin refs/heads/main; checks once more right before
+   executing. If any fetch/verification fails, ABORT rather than
+   silently testing an outdated checkout.
+3. Materializes disposable detached worktrees on the four verified SHAs.
+   The fresh BMO module is a sibling of the fresh MCP module, and the
+   ESP package is preloaded from its verified main checkout.
+4. Executes the genuine Qt/HID/HDMI lab with those pinned sources and
+   prints a JSON revision manifest. Optionally pass
+   --manifest-file C:\path\to\report.json to persist the exact SHAs.
+5. Removes ONLY the worktrees created for that run. It never pulls,
+   resets, cleans, or overwrites canonical working directories and
+   never connects to physical ESP, HDMI or the remote PC.
+
+The caller cannot override --mcp-source or --easychange-source.
+If a main moves during preparation the run fails explicitly and should
+be retried with the new commit. The .bat launcher always uses the
+freshest committed version of the actual lab from the latest EasyChange
+main, rather than the local .py file.
+
+GitHub Actions and local Windows have independent permission and billing
+conditions. The local preflight guarantee does not imply that GitHub
+Actions runner capacity/billing has been enabled.

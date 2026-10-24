@@ -1,15 +1,15 @@
 @echo off
 setlocal
-REM Full MCP tool engine + local Qt EasyChange + virtual HID/HDMI only.
-set "MCP_SOURCE=%~dp0..\..\MCP_PC_CONTROLLER"
-if not "%EASYCHANGE_VIRTUAL_MCP_SOURCE%"=="" set "MCP_SOURCE=%EASYCHANGE_VIRTUAL_MCP_SOURCE%"
-set "PYTHON=%MCP_SOURCE%\.venv\Scripts\python.exe"
+REM ALWAYS fetch latest EasyChange/MCP/ESP remote main before virtual tests.
+REM Worktrees are disposable; the live GUI, ESP COM, HDMI, tunnel are untouched.
+set "MCP_HOME=%~dp0..\..\MCP_PC_CONTROLLER"
+set "PYTHON=%MCP_HOME%\.venv\Scripts\python.exe"
 if not exist "%PYTHON%" (
-  echo [FAIL] MCP virtual environment not found: %PYTHON%
+  echo [FAIL] MCP Python venv missing: %PYTHON%
   exit /b 2
 )
 pushd "%~dp0.."
-"%PYTHON%" "%~dp0virtual_full_mcp_lab.py" --mcp-source "%MCP_SOURCE%" %*
-set "RESULT=%ERRORLEVEL%"
+"%PYTHON%" "%~dp0fresh_main_virtual_lab.py" --lab-kind full %*
+set "LAB_RESULT=%ERRORLEVEL%"
 popd
-exit /b %RESULT%
+exit /b %LAB_RESULT%

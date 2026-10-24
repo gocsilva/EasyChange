@@ -1,20 +1,14 @@
 @echo off
 setlocal
-REM Virtual Qt / HID / HDMI / MCP. No serial, camera, tunnel or MCP listener.
-set "MCP_SOURCE=%~dp0..\..\MCP_PC_CONTROLLER"
-if not "%EASYCHANGE_VIRTUAL_MCP_SOURCE%"=="" set "MCP_SOURCE=%EASYCHANGE_VIRTUAL_MCP_SOURCE%"
-set "PYTHON=%MCP_SOURCE%\.venv\Scripts\python.exe"
-set "TESSERACT=C:\Program Files\Tesseract-OCR\tesseract.exe"
+REM ALWAYS fetch latest remote main of three projects before virtual testing.
+set "MCP_HOME=%~dp0..\..\MCP_PC_CONTROLLER"
+set "PYTHON=%MCP_HOME%\.venv\Scripts\python.exe"
 if not exist "%PYTHON%" (
-  echo [FAIL] MCP Python environment missing: %PYTHON%
+  echo [FAIL] MCP Python venv missing: %PYTHON%
   exit /b 2
 )
-if not exist "%TESSERACT%" (
-  echo [FAIL] Tesseract missing: %TESSERACT%
-  exit /b 3
-)
 pushd "%~dp0.."
-"%PYTHON%" "%~dp0virtual_optical_lab.py" --mcp-source "%MCP_SOURCE%" --tesseract "%TESSERACT%" %*
-set "LAB_EXIT=%ERRORLEVEL%"
+"%PYTHON%" "%~dp0fresh_main_virtual_lab.py" --lab-kind optical %*
+set "LAB_RESULT=%ERRORLEVEL%"
 popd
-exit /b %LAB_EXIT%
+exit /b %LAB_RESULT%
