@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import math
+import lzma
 import zlib
 from collections.abc import Collection
 from dataclasses import dataclass
@@ -15,6 +16,9 @@ PROTOCOL = "EC2"
 HEADER_PROTOCOL = "EC2H"
 DEFAULT_CHUNK_CHARS = 180
 OPTICAL_COMPRESSION_LEVEL = 3
+OPTICAL_XZ_MIN_RAW_BYTES = 8192
+OPTICAL_XZ_MAX_RAW_BYTES = 262144
+OPTICAL_XZ_RATIO_PERCENT = 75
 # Decoder limits apply to untrusted QR strings, not to durable on-disk results.
 MAX_EC2_PACKETS = 200_000
 MAX_EC2_PACKET_TEXT_CHARS = 65_536
@@ -39,6 +43,7 @@ class PreparedOpticalResult:
     crc: str
     sequence: str
     literal_marker: bool
+    encoding: str = 'zlib'
 
     @property
     def cache_bytes(self) -> int:
@@ -49,7 +54,7 @@ def prepare_optical_result(
     result: Any, *, chunk_chars: int | None = None
 ) -> PreparedOpticalResult:
     """Serialize/compress a result once for one or more selective page reads."""
-    _value, _raw, token, size, total, digest, crc, sequence, literal_marker = (
+    _value, _raw, token, size, total, digest, crc, sequence, literal_marker, encoding = (
         _transport_components(result, chunk_chars=chunk_chars)
     )
     return PreparedOpticalResult(
@@ -60,6 +65,7 @@ def prepare_optical_result(
         crc=crc,
         sequence=sequence,
         literal_marker=literal_marker,
+        encoding=encoding,
     )
 
 
@@ -70,7 +76,8 @@ def valid_ec2_identity(packet: dict) -> bool:
     seq, digest, crc = packet.get("s"), packet.get("h"), packet.get("c")
     alphabet = "0123456789abcdef"
     return (
-        type(packet.get("v")) is int and packet["v"] == 2
+        packet.get("e") in (None, "xz")
+        and type(packet.get("v")) is int and packet["v"] == 2
         and isinstance(seq, str) and bool(seq) and len(seq) <= 256
         and not any(0xD800 <= ord(ch) <= 0xDFFF for ch in seq)
         and isinstance(digest, str) and len(digest) == 16
@@ -246,9 +253,7 @@ def _encode_raw(value: dict[str, Any]) -> tuple[bytes, bytes, str]:
                 raise ValueError("OPTICAL_RESULT_TOO_LARGE")
             output.extend(fragment)
     raw=bytes(output)
-    # Only the first optical page is broadcast for large results; the rest
-    # is recovered from the durable ResultStore. Level 3 cuts bundle preparation
-    # CPU substantially versus level 6 while keeping QR density nearly identical.
+    # Preserve the old three-value compression API for existing callers.
     compressed=zlib.compress(raw,level=OPTICAL_COMPRESSION_LEVEL)
     if len(compressed)>MAX_EC2_COMPRESSED_BYTES:
         raise ValueError("OPTICAL_COMPRESSED_RESULT_TOO_LARGE")
@@ -299,7 +304,16 @@ def _transport_components(
         # UTF-8 metadata by downstream QR/result consumers.
         raise ValueError("OPTICAL_SEQUENCE_INVALID_UNICODE")
     wire_value = _compact_transport_value(value)
-    raw, _compressed, token = _encode_raw(wire_value)
+    raw, compressed, token = _encode_raw(wire_value)
+    encoding="zlib"
+    # Opt in at the EC2 envelope layer rather than changing _encode_raw API.
+    # Use XZ only when it meaningfully shortens the optical packet carousel.
+    if OPTICAL_XZ_MIN_RAW_BYTES <= len(raw) <= OPTICAL_XZ_MAX_RAW_BYTES:
+        candidate=lzma.compress(raw,format=lzma.FORMAT_XZ,preset=0)
+        if len(candidate)*100 <= len(compressed)*OPTICAL_XZ_RATIO_PERCENT:
+            compressed=candidate
+            encoding="xz"
+            token=base64.urlsafe_b64encode(compressed).decode("ascii").rstrip("=")
     size = adaptive_chunk_chars(len(token)) if chunk_chars is None else int(chunk_chars)
     if size < 120:
         raise ValueError("chunk_chars must be >= 120")
@@ -313,12 +327,13 @@ def _transport_components(
         isinstance(data,dict)
         and "transport_compacted" in data
     )
-    return value, raw, token, size, total, digest, crc, sequence, literal_marker
+    return value, raw, token, size, total, digest, crc, sequence, literal_marker, encoding
 
 
 def _packet_json(
     *, sequence: str, index: int, total: int, digest: str, crc: str, piece: str,
     literal_marker: bool = False,
+    encoding: str = 'zlib',
 ) -> str:
     packet = {
         "p": PROTOCOL, "v": 2, "s": sequence, "i": index, "n": total,
@@ -328,6 +343,10 @@ def _packet_json(
     }
     if literal_marker:
         packet["t"] = 0
+    if encoding == "xz":
+        packet["e"] = "xz"
+    elif encoding != "zlib":
+        raise ValueError("OPTICAL_UNSUPPORTED_COMPRESSION")
     rendered = json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
     # A caller may request an enormous chunk_chars value. Even if raw/result
     # byte budgets pass, the receiver rejects a >64 KiB QR envelope.
@@ -463,6 +482,7 @@ def encode_result_chunks(
     elif chunk_chars is not None and int(chunk_chars) != prepared.chunk_chars:
         raise ValueError("prepared optical chunk size does not match request")
     token = prepared.token
+    encoding = prepared.encoding
     size = prepared.chunk_chars
     total = prepared.total
     digest = prepared.digest
@@ -493,12 +513,13 @@ def encode_result_chunks(
             sequence=sequence, index=index, total=total,
             digest=digest, crc=crc, piece=piece,
             literal_marker=literal_marker,
+            encoding=encoding,
         ))
     return packets
 
 
 def encode_result_header(result: Any, *, chunk_count: int | None = None) -> str:
-    value, raw, _token, _size, total, digest, _crc, _sequence, _literal = _transport_components(result)
+    value, raw, _token, _size, total, digest, _crc, _sequence, _literal, _encoding = _transport_components(result)
     return _header_json(
         value, raw,
         total=total if chunk_count is None else int(chunk_count),
@@ -514,7 +535,7 @@ def encode_result_bundle(
     overflow_packets: int | None = None,
 ) -> tuple[list[str], str]:
     """Encode broadcast packets and EC2H in one serialization/compression pass."""
-    value, raw, token, size, total, digest, crc, sequence, literal_marker = _transport_components(
+    value, raw, token, size, total, digest, crc, sequence, literal_marker, encoding = _transport_components(
         result, chunk_chars=chunk_chars
     )
     if max_packets is None:
@@ -532,6 +553,7 @@ def encode_result_bundle(
             sequence=sequence, index=index, total=total,
             digest=digest, crc=crc, piece=piece,
             literal_marker=literal_marker,
+            encoding=encoding,
         ))
     return packets, _header_json(
         value, raw, total=total, digest=digest, broadcast_count=materialized
@@ -624,16 +646,26 @@ def decode_result_chunks(payloads: Collection[str]) -> dict[str, Any]:
     if len(compressed) > MAX_EC2_COMPRESSED_BYTES:
         raise ValueError("optical compressed result too large")
     try:
-        decoder = zlib.decompressobj()
-        raw = decoder.decompress(compressed, MAX_EC2_RESULT_BYTES + 1)
-        if len(raw) > MAX_EC2_RESULT_BYTES or decoder.unconsumed_tail:
-            raise ValueError("optical decompressed result too large")
-        raw += decoder.flush(MAX_EC2_RESULT_BYTES + 1 - len(raw))
-        if len(raw) > MAX_EC2_RESULT_BYTES:
-            raise ValueError("optical decompressed result too large")
-        if not decoder.eof or decoder.unused_data:
-            raise ValueError("invalid optical compressed stream")
-    except zlib.error as exc:
+        encoding=first.get("e")
+        if encoding == "xz":
+            decoder=lzma.LZMADecompressor(
+                format=lzma.FORMAT_XZ,memlimit=64*1024*1024)
+            raw=decoder.decompress(
+                compressed,max_length=MAX_EC2_RESULT_BYTES+1)
+            if (len(raw)>MAX_EC2_RESULT_BYTES or not decoder.eof
+                    or decoder.unused_data):
+                raise ValueError("invalid or oversized optical xz stream")
+        elif encoding is None:
+            decoder=zlib.decompressobj()
+            raw=decoder.decompress(compressed,MAX_EC2_RESULT_BYTES+1)
+            if len(raw)>MAX_EC2_RESULT_BYTES or decoder.unconsumed_tail:
+                raise ValueError("optical decompressed result too large")
+            raw+=decoder.flush(MAX_EC2_RESULT_BYTES+1-len(raw))
+            if len(raw)>MAX_EC2_RESULT_BYTES or not decoder.eof or decoder.unused_data:
+                raise ValueError("invalid optical compressed stream")
+        else:
+            raise ValueError("unsupported optical compression")
+    except (zlib.error, lzma.LZMAError) as exc:
         raise ValueError("invalid optical compressed stream") from exc
     if hashlib.sha256(raw).hexdigest()[:16] != first["h"]:
         raise ValueError("optical sha256 mismatch")

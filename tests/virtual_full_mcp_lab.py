@@ -65,6 +65,23 @@ def run(mcp_source: str, mode: str = "QR", command: str = ":state --compact",
         transport_audit._LAST_ID=0
         sys.path.insert(0,str(Path(mcp_source).resolve()))
         from mcp_server import easychange_tools as mcp
+        # Mirror what the real MCP decoder actually collects (not just
+        # what the Qt sender intended to display).
+        decoded_indexes=set()
+        decode_calls=[0]
+        actual_decoder=mcp._decode_ec2_slots
+        def track_decoder(*args,**kwargs):
+            outcome=actual_decoder(*args,**kwargs)
+            decode_calls[0]+=1
+            if isinstance(outcome,tuple) and outcome:
+                for packet in outcome[0] or []:
+                    if (isinstance(packet,dict)
+                            and packet.get("p")=="EC2"
+                            and packet.get("s")=="QLABFULL01"
+                            and type(packet.get("i")) is int):
+                        decoded_indexes.add(packet["i"])
+            return outcome
+        mcp._decode_ec2_slots=track_decoder
         from app.easychange_execution_store import EasyChangeExecutionStore
         from app.easychange_transport_config import EasyChangeTransportConfig
         from app.optical_transaction_lock import OpticalTransactionLock
@@ -187,9 +204,24 @@ def run(mcp_source: str, mode: str = "QR", command: str = ":state --compact",
         screenshot=None
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future=pool.submit(mcp._send_and_correlate,controller,sequence,command,float(timeout))
-            deadline=time.monotonic()+min(75.0,float(timeout)+35.0)
+            deadline=time.monotonic()+min(33.0,float(timeout)+11.0)
             sends=0
+            next_status=time.monotonic()+5
             while not future.done() and time.monotonic()<deadline:
+                if time.monotonic()>=next_status:
+                    print("VIRTUAL_LAB_PROGRESS",json.dumps({
+                        "seconds":int(time.monotonic()-started),
+                        "hid":sends,
+                        "frames":captures,
+                        "last_result":getattr(window._last_machine_result,"sequence",None),
+                        "page":getattr(window,"_optical_page",None),
+                        "payloads":len(getattr(window,"_optical_payloads",[]) or []),
+                        "pending":bool(getattr(window,"_optical_render_pending",None)),
+                        "mcp_done":future.done(),
+                        "mcp_received_indexes":sorted(decoded_indexes),
+                        "mcp_qr_decode_calls":decode_calls[0],
+                    }),file=sys.stderr,flush=True)
+                    next_status=time.monotonic()+5
                 app.processEvents()
                 try: payload,done=requests.get_nowait()
                 except queue.Empty:pass
@@ -203,7 +235,17 @@ def run(mcp_source: str, mode: str = "QR", command: str = ":state --compact",
                     app.processEvents()
                 QTest.qWait(15)
             if not future.done():
-                raise TimeoutError("FULL_MCP_VIRTUAL_CALL_TIMEOUT")
+                import traceback
+                for ident,stack in sys._current_frames().items():
+                    thread=next((t for t in threading.enumerate() if t.ident==ident),None)
+                    if thread and "ThreadPool" in thread.name:
+                        print("MCP_WORKER_STACK",thread.name,
+                              "".join(traceback.format_stack(stack)[-12:]),
+                              file=sys.stderr,flush=True)
+                print("FULL_MCP_VIRTUAL_CALL_TIMEOUT",file=sys.stderr,flush=True)
+                # Test subprocess is isolated and a blocked worker would make
+                # ThreadPoolExecutor.__exit__ wait forever. Do not affect host.
+                os._exit(124)
             result=future.result()
         replay_outcome=None
         sends_before_replay=sends
@@ -276,7 +318,9 @@ def run(mcp_source: str, mode: str = "QR", command: str = ":state --compact",
             "result_lines_identical_to_disk":(
                 [line.split("|",1)[1] if "|" in line else line
                  for line in read_lines]
-                == (project/"large.txt").read_text(encoding="utf8").splitlines()[:900]
+                == (project/"large.txt").read_text(encoding="utf8").splitlines()[
+                    int(command.split()[2])-1:
+                    int(command.split()[2])-1+int(command.split()[3])]
                 if command.startswith(":read large.txt") else None),
             "same_sequence_replay_issued":bool(replay_identical),
             "same_sequence_replay_from_host":(

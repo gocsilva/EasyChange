@@ -200,3 +200,34 @@ completed via multiple durable-result recovery HID requests with a SINGLE
 original remote execution and correct content. No physical ESP/HDMI claims
 are implied by these virtual successes.
 \nFor local worktrees with concurrent edits, pass --easychange-source to test\nan exact isolated EasyChange checkout instead of the canonical directory.\n
+
+## Adaptive EC2 XZ compression and reduction in recovery queries
+
+EC2 remains zlib for small payloads and for data where compression
+offers little savings. For original results between 8 KiB and 256 KiB,
+the sender chooses XZ preset 0 ONLY when its compressed payload is at
+least 25 percent smaller than the current zlib level-3 output.
+An explicitly marked EC2 packet field e=xz identifies the codec.
+Both decoders check sequence, per-fragment CRC32, full-result SHA-256
+and CRC32. XZ decoding is bounded by a 64 MiB dictionary memory limit
+and the existing full-result output-size limit. Unknown e values are
+rejected, and legacy zlib packets without e remain fully supported.
+
+The MCP optical observer no longer runs repeated slow Tesseract OCR while
+valid correlated QR/PIXEL fragments are arriving. In forced optical
+modes it uses the relevant EC2 reader only. In AUTO mode it probes
+Ubuntu OCR only before a matching EC2 chunk or durable header appears.
+Forced UBUNTU still uses OCR exclusively.
+
+Full virtual MCP / EasyChange integration checks:
+* 900-line QR read before: 6 HID sends, approximately 18 seconds,
+  remote durable recovery required.
+* 900-line QR read after: 1 HID send, 5.9 seconds, no recovery.
+* 900-line PIXEL+QR read: 1 HID send with all 900 lines verified.
+* PIXEL write plus same-sequence replay: 1 original execution,
+  no repeated mutation, exact bytes on disposable filesystem.
+
+Update BOTH MCP and EasyChange before relying on the new bulk codec.
+Durable recovery remains the safe fallback when a frame is genuinely
+missing or a result cannot fit into the initial optical broadcast.
+Physical ESP/HDMI reliability is not proven by the virtual lab.

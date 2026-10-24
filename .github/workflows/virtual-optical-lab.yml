@@ -72,14 +72,16 @@ jobs:
           elif [[ "$KIND" == "esp" ]]; then
             python -m pip install 'pyserial>=3.5,<4'
           fi
-      - name: Test public optical wire contract
-        run: python -m pytest -q "$GITHUB_WORKSPACE/$LAB_SOURCE_DIR/tests/test_virtual_optical_contract.py"
+      - name: Test public wire contract and adaptive XZ
+        run: |
+          python -m pytest -q "$GITHUB_WORKSPACE/$LAB_SOURCE_DIR/tests/test_virtual_optical_contract.py" "$GITHUB_WORKSPACE/$LAB_SOURCE_DIR/tests/test_optical_xz_bulk.py"
       - name: Test real private MCP optical decoder
         if: env.LAB_KIND == 'mcp'
         run: |
           python -m pytest -q \
             component/tests/test_virtual_optical_focus_header.py \
-            component/tests/test_easychange_ubuntu_ocr_transport.py
+            component/tests/test_easychange_ubuntu_ocr_transport.py \
+            component/tests/test_easychange_xz_optical_codec.py
       - name: Test ESP serial host bridge without USB
         if: env.LAB_KIND == 'esp'
         run: |
