@@ -1326,6 +1326,65 @@ def test_log_open_failure_preserves_expired_receipt_and_skips_worker(
     assert spawned == []
 
 
+def test_scheduled_receipt_write_failure_preserves_stale_receipt_and_skips_worker(
+    tmp_path, monkeypatch
+):
+    from contextlib import nullcontext
+
+    repo = tmp_path / "EasyChange"
+    repo.mkdir()
+    (repo / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    receipt_path = tmp_path / "logs" / "receipt.json"
+    receipt_path.parent.mkdir()
+    original_receipt = json.dumps({
+        "schema": self_update.UPDATE_RECEIPT_SCHEMA,
+        "repo_root": str(repo.resolve()),
+        "workspace": str(workspace.resolve()),
+        "state": "RUNNING",
+        "started_at_utc": "2000-01-01T00:00:00+00:00",
+        "worker_pid": 9999,
+        "schedule_error": "PRESERVE_THIS_RECEIPT",
+    }).encode("utf-8")
+    receipt_path.write_bytes(original_receipt)
+    log_path = tmp_path / "logs" / "update.log"
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "update_log_path", lambda: log_path)
+    monkeypatch.setattr(self_update, "_read_git_revisions", lambda _root: {})
+    monkeypatch.setattr(self_update, "_schedule_process_lock", lambda **_kwargs: nullcontext())
+
+    original_path_open = Path.open
+    opened_logs = []
+
+    def track_log_open(path, *args, **kwargs):
+        handle = original_path_open(path, *args, **kwargs)
+        if path == log_path:
+            opened_logs.append(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", track_log_open)
+
+    def fail_receipt_write(_receipt):
+        raise OSError("synthetic receipt persistence failure")
+
+    monkeypatch.setattr(self_update, "_write_update_receipt", fail_receipt_write)
+    spawned = []
+
+    result = self_update.schedule_self_update(
+        workspace,
+        repo_root=repo,
+        platform_name="nt",
+        popen_factory=lambda *args, **kwargs: spawned.append((args, kwargs)),
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "UPDATE_RECEIPT_UNAVAILABLE"
+    assert receipt_path.read_bytes() == original_receipt
+    assert opened_logs and opened_logs[0].closed
+    assert spawned == []
+
+
 def test_old_cleanup_unconfirmed_receipt_still_blocks_synthetic_retry(tmp_path, monkeypatch):
     from contextlib import nullcontext
 
