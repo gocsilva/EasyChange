@@ -175,6 +175,62 @@ def test_worker_relaunches_after_final_receipt_persistence_failures(tmp_path, mo
     assert launches[0][0][0][1:3] == ["-m", "easychange.gui"]
 
 
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_return_code"), [("nonzero", 23), ("exception", 7)]
+)
+def test_worker_records_updater_failure_and_relaunches_synthetically(
+    tmp_path, monkeypatch, failure_mode, expected_return_code
+):
+    from contextlib import nullcontext
+
+    root = tmp_path / "EasyChange"
+    workspace = tmp_path / "workspace"
+    root.mkdir()
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "update.log"
+    receipt_path = tmp_path / "logs" / "update-receipt.json"
+    monkeypatch.setattr(self_update, "update_log_path", lambda: log_path)
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "_schedule_process_lock", lambda **_kwargs: nullcontext())
+    monkeypatch.setattr(
+        self_update,
+        "_read_git_revisions",
+        lambda _root: {
+            "head_sha": "b" * 40,
+            "origin_main_sha": "b" * 40,
+            "matches_origin_main": True,
+        },
+    )
+    launches = []
+    monkeypatch.setattr(
+        self_update.subprocess,
+        "Popen",
+        lambda *args, **kwargs: launches.append((args, kwargs)) or SimpleNamespace(pid=9002),
+    )
+
+    def run_updater(*_args, **_kwargs):
+        if failure_mode == "exception":
+            raise OSError("synthetic updater failure")
+        return SimpleNamespace(returncode=expected_return_code)
+
+    result = self_update.run_update_worker(
+        repo_root=root,
+        workspace=workspace,
+        parent_pid=123,
+        executable="pythonw.exe",
+        run=run_updater,
+        wait_parent=lambda _pid: True,
+        sleep=lambda _seconds: None,
+    )
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert result == expected_return_code
+    assert receipt["state"] == "UPDATE_FAILED"
+    assert receipt["updater_return_code"] == expected_return_code
+    assert receipt["relaunch_state"] == "PROCESS_STARTED"
+    assert len(launches) == 1
+
+
 def test_switch_project_schema_is_generic_and_includes_recovery_example():
     schema = command_schema("switch-project")
     assert schema["mutating"] is True
