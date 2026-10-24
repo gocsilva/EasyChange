@@ -768,6 +768,73 @@ def test_update_timeout_cleanup_failure_quarantines_receipt_and_blocks_retry(tmp
     assert spawned == []
 
 
+def test_unconfirmed_timeout_from_taskkill_persists_quarantine_and_blocks_retry(
+    tmp_path, monkeypatch
+):
+    from contextlib import nullcontext
+
+    root = tmp_path / "EasyChange"
+    workspace = tmp_path / "workspace"
+    root.mkdir()
+    workspace.mkdir()
+    (root / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    log_path = tmp_path / "logs" / "update.log"
+    receipt_path = tmp_path / "logs" / "update-receipt.json"
+    monkeypatch.setattr(self_update, "update_log_path", lambda: log_path)
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "_schedule_process_lock", lambda **_kwargs: nullcontext())
+
+    class ProcessTreeStillRunning:
+        pid = 4459
+
+        def wait(self, *, timeout):
+            raise subprocess.TimeoutExpired("updater", timeout)
+
+        def poll(self):
+            return None
+
+    process_launches = []
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *args, **kwargs: process_launches.append((args, kwargs))
+        or ProcessTreeStillRunning(),
+    )
+    kill_calls = []
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: kill_calls.append((args, kwargs))
+        or SimpleNamespace(returncode=0),
+    )
+
+    result = self_update.run_update_worker(
+        repo_root=root,
+        workspace=workspace,
+        parent_pid=123,
+        executable="pythonw.exe",
+        wait_parent=lambda _pid: True,
+        sleep=lambda _seconds: None,
+    )
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert result == 7
+    assert receipt["state"] == "UPDATE_CLEANUP_UNCONFIRMED"
+    assert receipt["cleanup_error"].startswith("pid=4459:")
+    assert len(process_launches) == 1  # updater only; no GUI relaunch
+    assert kill_calls[0][0][0][-4:] == ["/PID", "4459", "/T", "/F"]
+
+    retry_launches = []
+    retry = self_update.schedule_self_update(
+        workspace,
+        repo_root=root,
+        platform_name="nt",
+        popen_factory=lambda *args, **kwargs: retry_launches.append((args, kwargs)),
+    )
+    assert retry["error"] == "UPDATE_CLEANUP_UNCONFIRMED"
+    assert retry_launches == []
+
+
 def test_self_update_status_text_command_reads_receipt_without_mutating(tmp_path, monkeypatch):
     receipt_path = tmp_path / "update-receipt.json"
     monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
