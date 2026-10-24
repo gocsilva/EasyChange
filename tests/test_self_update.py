@@ -697,6 +697,37 @@ def test_update_timeout_requires_process_exit_after_taskkill_success():
     assert kill_calls[0][0][-4:] == ["/PID", "4458", "/T", "/F"]
 
 
+def test_update_timeout_taskkill_exception_is_unconfirmed():
+    wait_calls = []
+
+    class TimedOutProcess:
+        pid = 4460
+
+        def wait(self, *, timeout):
+            wait_calls.append(timeout)
+            raise subprocess.TimeoutExpired("updater", timeout)
+
+        def poll(self):
+            return None
+
+    def fail_taskkill(*_args, **_kwargs):
+        raise OSError("synthetic taskkill failure")
+
+    with pytest.raises(self_update.UpdateProcessTreeCleanupUnconfirmed) as exc_info:
+        self_update._run_updater_with_tree_timeout(
+            ["cmd.exe", "/d", "/c", "Atualizar_EasyChange.bat"],
+            cwd="C:/EasyChange",
+            env={},
+            stdout=None,
+            timeout=900,
+            popen_factory=lambda *_args, **_kwargs: TimedOutProcess(),
+            run_factory=fail_taskkill,
+        )
+
+    assert "pid=4460:OSError" in str(exc_info.value)
+    assert wait_calls == [900]
+
+
 def test_update_process_status_error_requires_tree_cleanup():
     class TimedOutProcess:
         pid = 4456
