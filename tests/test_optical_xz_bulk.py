@@ -78,5 +78,5 @@ def test_truncated_xz_stream_is_rejected_after_fragment_crc_check():
     packet["x"] = f"{binascii.crc32(packet['d'].encode('ascii')) & 0xffffffff:08x}"
     packets[-1] = json.dumps(packet, separators=(",", ":"))
 
-    with pytest.raises(ValueError, match="invalid or oversized optical xz stream"):
+    with pytest.raises(ValueError, match="invalid optical xz stream"):
         decode_result_chunks(packets)

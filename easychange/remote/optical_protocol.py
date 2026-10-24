@@ -669,9 +669,10 @@ def decode_result_chunks(payloads: Collection[str]) -> dict[str, Any]:
                 format=lzma.FORMAT_XZ,memlimit=64*1024*1024)
             raw=decoder.decompress(
                 compressed,max_length=MAX_EC2_RESULT_BYTES+1)
-            if (len(raw)>MAX_EC2_RESULT_BYTES or not decoder.eof
-                    or decoder.unused_data):
-                raise ValueError("invalid or oversized optical xz stream")
+            if len(raw)>MAX_EC2_RESULT_BYTES:
+                raise ValueError("optical decompressed result too large")
+            if not decoder.eof or decoder.unused_data:
+                raise ValueError("invalid optical xz stream")
         elif encoding is None:
             decoder=zlib.decompressobj()
             raw=decoder.decompress(compressed,MAX_EC2_RESULT_BYTES+1)

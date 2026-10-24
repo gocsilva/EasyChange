@@ -632,6 +632,55 @@ def test_ec2_rejects_trailing_or_incomplete_zlib_stream():
             decode_result_chunks([json.dumps(packet)])
 
 
+def _xz_bulk_result_packets():
+    result=Result(True,"read",{
+        "lines":[f"{i:04d}|public string Value{i} {{ get; set; }}"
+                 for i in range(900)],
+    },sequence="QXZBOUND")
+    packets=encode_result_chunks(result,chunk_chars=180)
+    assert json.loads(packets[0])["e"]=="xz"
+    return packets
+
+
+def _repack_ec2_compressed_payload(packets,compressed):
+    import base64
+    import binascii
+
+    token=base64.urlsafe_b64encode(compressed).decode("ascii").rstrip("=")
+    pieces=[token[i:i+180] for i in range(0,len(token),180)]
+    template=json.loads(packets[0])
+    repacked=[]
+    for index,piece in enumerate(pieces):
+        packet=dict(template)
+        packet.update(i=index,n=len(pieces),d=piece)
+        packet["x"]=f"{binascii.crc32(piece.encode('ascii')) & 0xffffffff:08x}"
+        repacked.append(json.dumps(packet,separators=(",",":")))
+    return repacked
+
+
+def test_ec2_xz_decompression_limit_rejects_expansion_bomb(monkeypatch):
+    import pytest
+    import easychange.remote.optical_protocol as protocol
+
+    packets=_xz_bulk_result_packets()
+    monkeypatch.setattr(protocol,"MAX_EC2_RESULT_BYTES",1024)
+    with pytest.raises(ValueError,match="optical decompressed result too large"):
+        decode_result_chunks(packets)
+
+
+def test_ec2_xz_rejects_trailing_bytes_even_with_valid_fragment_crc():
+    import base64
+
+    packets=_xz_bulk_result_packets()
+    token="".join(json.loads(packet)["d"] for packet in packets)
+    compressed=base64.urlsafe_b64decode(token+"="*(-len(token)%4))
+    trailing=_repack_ec2_compressed_payload(packets,compressed+b"TRAILING")
+
+    import pytest
+    with pytest.raises(ValueError,match="invalid optical xz stream"):
+        decode_result_chunks(trailing)
+
+
 def test_ec2_status_header_contains_small_definitive_manifest():
     import json
 
