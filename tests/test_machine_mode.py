@@ -9,6 +9,7 @@ import pytest
 pytest.importorskip("PySide6")
 pytest.importorskip("qrcode")
 
+from PySide6.QtCore import QEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -323,6 +324,24 @@ def test_machine_mode_focus_command_never_promotes_inactive_window(tmp_path, mon
     assert result["focus_restore_attempted"] is False
     assert result["focus_restore_skipped"] == "WINDOW_NOT_ACTIVE"
     assert result["user_focus_override"] is True
+    window.close(); app.processEvents()
+
+
+def test_header_reports_focus_only_for_active_window_command_widget(
+    tmp_path, monkeypatch
+):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Workspace.open(tmp_path), machine_mode=True, hid_mode=True)
+    window.show(); app.processEvents()
+    monkeypatch.setattr(window, "isActiveWindow", lambda: True)
+    window.command.setFocus(); app.processEvents()
+    window._refresh_header()
+    assert "FOCUS: COMMAND" in window.header.text()
+
+    monkeypatch.setattr(window, "isActiveWindow", lambda: False)
+    QApplication.sendEvent(window, QEvent(QEvent.Type.ActivationChange))
+    app.processEvents()
+    assert "FOCUS: OTHER" in window.header.text()
     window.close(); app.processEvents()
 
 

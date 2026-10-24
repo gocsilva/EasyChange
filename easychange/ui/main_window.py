@@ -552,9 +552,20 @@ class MainWindow(QMainWindow):
         }
 
     def eventFilter(self, watched, event) -> bool:
-        if watched is self.command and event.type() == QEvent.Type.FocusOut and self._machine and not self._workspace_dialog_open:
-            QTimer.singleShot(0, self._restore_command_focus)
+        if watched is self.command:
+            if event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+                QTimer.singleShot(0, self._refresh_header)
+            if (event.type() == QEvent.Type.FocusOut and self._machine
+                    and not self._workspace_dialog_open):
+                QTimer.singleShot(0, self._restore_command_focus)
         return super().eventFilter(watched, event)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if (event.type() in (QEvent.Type.ActivationChange,
+                             QEvent.Type.WindowStateChange)
+                and hasattr(self, "header")):
+            QTimer.singleShot(0, self._refresh_header)
 
     def _restore_command_focus(self) -> None:
         if (
@@ -957,7 +968,12 @@ class MainWindow(QMainWindow):
 
     def _refresh_header(self) -> None:
         transport = "HID/COMPACT" if self.service.output == "compact" else "TEXT"
-        self.header.setText(f"EasyChange | {'MACHINE' if self._machine else 'HUMAN'} | {transport} | FOCUS: COMMAND | {self.service.workspace.root_path}")
+        focus = (
+            "COMMAND"
+            if self.isActiveWindow() and self.command.hasFocus()
+            else "OTHER"
+        )
+        self.header.setText(f"EasyChange | {'MACHINE' if self._machine else 'HUMAN'} | {transport} | FOCUS: {focus} | {self.service.workspace.root_path}")
 
     def execute_command(self) -> None:
         text = self.command.text(); self.command.clear()
