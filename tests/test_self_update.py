@@ -89,6 +89,36 @@ def test_update_receipt_replace_failure_preserves_previous_receipt_and_cleans_te
     assert list(tmp_path.glob(".update-receipt-*.tmp")) == []
 
 
+def test_update_receipt_write_failure_closes_stream_and_cleans_temp(tmp_path, monkeypatch):
+    import os
+
+    receipt_path = tmp_path / "update-receipt.json"
+    receipt_path.write_text('{"state":"PREVIOUS"}', encoding="utf-8")
+    streams = []
+    real_fdopen = os.fdopen
+
+    def tracked_fdopen(*args, **kwargs):
+        stream = real_fdopen(*args, **kwargs)
+        streams.append(stream)
+        return stream
+
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(os, "fdopen", tracked_fdopen)
+    monkeypatch.setattr(
+        self_update.json,
+        "dump",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("synthetic receipt write failure")),
+    )
+
+    with pytest.raises(OSError, match="synthetic receipt write failure"):
+        self_update._write_update_receipt({"state": "SCHEDULED"})
+
+    assert len(streams) == 1
+    assert streams[0].closed is True
+    assert receipt_path.read_text(encoding="utf-8") == '{"state":"PREVIOUS"}'
+    assert list(tmp_path.glob(".update-receipt-*.tmp")) == []
+
+
 def test_switch_project_schema_is_generic_and_includes_recovery_example():
     schema = command_schema("switch-project")
     assert schema["mutating"] is True
