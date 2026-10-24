@@ -4,13 +4,16 @@ from __future__ import annotations
 import argparse
 import ctypes
 from datetime import datetime, timezone
+import errno
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -170,12 +173,78 @@ def schedule_self_update(
     popen_factory: Callable = subprocess.Popen,
 ) -> dict:
     """Schedule at most one updater per GUI process and active receipt."""
-    with _SCHEDULE_LOCK:
-        return _schedule_self_update_once(
-            workspace, repo_root=repo_root, executable=executable,
-            parent_pid=parent_pid, platform_name=platform_name,
-            popen_factory=popen_factory,
-        )
+    if (platform_name or os.name) != "nt":
+        return {"ok": False, "error": "SELF_UPDATE_REQUIRES_WINDOWS"}
+    try:
+        with _SCHEDULE_LOCK, _schedule_process_lock():
+            return _schedule_self_update_once(
+                workspace, repo_root=repo_root, executable=executable,
+                parent_pid=parent_pid, platform_name=platform_name,
+                popen_factory=popen_factory,
+            )
+    except RuntimeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@contextmanager
+def _schedule_process_lock(path: str | Path | None = None, *, timeout: float = 2.0):
+    """Serialize update receipt check-and-spawn across GUI processes."""
+    lock_path = Path(path) if path is not None else update_receipt_path().with_name(
+        ".update-schedule.lock"
+    )
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError("UPDATE_SCHEDULER_LOCK_UNAVAILABLE") from exc
+    if lock_path.is_symlink():
+        raise RuntimeError("UPDATE_SCHEDULER_UNSAFE_LOCK_PATH")
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise RuntimeError("UPDATE_SCHEDULER_LOCK_UNAVAILABLE") from exc
+    try:
+        handle = os.fdopen(descriptor, "r+b")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with handle:
+        identity = os.fstat(handle.fileno())
+        if not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1:
+            raise RuntimeError("UPDATE_SCHEDULER_UNSAFE_LOCK_TYPE")
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            handle.seek(0)
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if (exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK)
+                        and getattr(exc, "winerror", None) not in (33, 36)):
+                    raise RuntimeError("UPDATE_SCHEDULER_LOCK_UNAVAILABLE") from exc
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("UPDATE_SCHEDULER_LOCK_BUSY") from exc
+                time.sleep(min(0.05, remaining))
+        try:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(bytes([0]))
+                handle.flush()
+            yield
+        finally:
+            handle.seek(0)
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _active_update_handoff(root: Path, workspace: Path) -> dict | None:

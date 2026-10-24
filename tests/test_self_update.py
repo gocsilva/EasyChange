@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import subprocess
 import json
+import multiprocessing
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from easychange.core.command_metadata import command_schema
 from easychange.core.command_service import CommandService
 from easychange.core.operation_registry import TEXT_MUTATION_COMMANDS
 from easychange.core.workspace import Workspace
 from easychange import self_update
+
+
+def _hold_schedule_process_lock(path, acquired, release):
+    with self_update._schedule_process_lock(path, timeout=5):
+        acquired.set()
+        release.wait(10)
 
 
 def test_self_update_is_documented_as_a_sequenced_mutation():
@@ -515,6 +523,30 @@ def test_self_update_same_checkout_different_workspace_reuses_worker(tmp_path,mo
     assert len(launches)==1
     assert second.get("already_scheduled") is True
     assert second["workspace"]==str(workspace_a.resolve())
+
+
+def test_update_schedule_lock_serializes_separate_processes(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    acquired = context.Event()
+    release = context.Event()
+    lock_path = tmp_path / "update-schedule.lock"
+    process = context.Process(
+        target=_hold_schedule_process_lock,
+        args=(str(lock_path), acquired, release),
+    )
+    process.start()
+    try:
+        assert acquired.wait(10)
+        with pytest.raises(RuntimeError, match="UPDATE_SCHEDULER_LOCK_BUSY"):
+            with self_update._schedule_process_lock(lock_path, timeout=0.1):
+                raise AssertionError("a second process must not enter the scheduler")
+    finally:
+        release.set()
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+    assert process.exitcode == 0
 
 
 def test_oversized_update_receipt_is_rejected_without_git_or_worker_handoff(tmp_path, monkeypatch):
