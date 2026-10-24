@@ -1168,6 +1168,42 @@ def test_duplicate_self_update_schedule_does_not_spawn_two_workers(tmp_path,monk
     assert second.get("already_scheduled") is True
 
 
+@pytest.mark.parametrize("started_at_utc", ["not-a-timestamp", "2099-01-01T00:00:00+00:00"])
+def test_uncertain_active_receipt_blocks_a_new_worker(
+    tmp_path, monkeypatch, started_at_utc
+):
+    from contextlib import nullcontext
+
+    repo = tmp_path / "EasyChange"
+    repo.mkdir()
+    (repo / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    receipt_path = tmp_path / "logs" / "receipt.json"
+    receipt_path.parent.mkdir()
+    receipt_path.write_text(json.dumps({
+        "schema": self_update.UPDATE_RECEIPT_SCHEMA,
+        "repo_root": str(repo.resolve()),
+        "workspace": str(workspace.resolve()),
+        "state": "RUNNING",
+        "started_at_utc": started_at_utc,
+    }), encoding="utf-8")
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "_schedule_process_lock", lambda **_kwargs: nullcontext())
+    spawned = []
+
+    result = self_update.schedule_self_update(
+        workspace,
+        repo_root=repo,
+        platform_name="nt",
+        popen_factory=lambda *args, **kwargs: spawned.append((args, kwargs)),
+    )
+
+    assert result["ok"] is True
+    assert result["already_scheduled"] is True
+    assert spawned == []
+
+
 def test_self_update_same_checkout_different_workspace_reuses_worker(tmp_path,monkeypatch):
     repo=tmp_path/"EasyChange"
     repo.mkdir()
