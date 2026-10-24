@@ -231,6 +231,89 @@ def test_worker_records_updater_failure_and_relaunches_synthetically(
     assert len(launches) == 1
 
 
+def test_worker_cancels_and_records_when_parent_does_not_exit(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+
+    root = tmp_path / "EasyChange"
+    workspace = tmp_path / "workspace"
+    root.mkdir()
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "update.log"
+    receipt_path = tmp_path / "logs" / "update-receipt.json"
+    monkeypatch.setattr(self_update, "update_log_path", lambda: log_path)
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "_schedule_process_lock", lambda **_kwargs: nullcontext())
+    updater_calls = []
+    launches = []
+    monkeypatch.setattr(
+        self_update.subprocess,
+        "Popen",
+        lambda *args, **kwargs: launches.append((args, kwargs)),
+    )
+
+    result = self_update.run_update_worker(
+        repo_root=root,
+        workspace=workspace,
+        parent_pid=123,
+        executable="pythonw.exe",
+        run=lambda *_args, **_kwargs: updater_calls.append(True),
+        wait_parent=lambda _pid: False,
+        sleep=lambda _seconds: None,
+    )
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert result == 6
+    assert receipt["state"] == "CANCELLED_PARENT_TIMEOUT"
+    assert receipt["updater_return_code"] == 6
+    assert updater_calls == []
+    assert launches == []
+
+
+def test_worker_fails_closed_when_running_receipt_cannot_be_persisted(
+    tmp_path, monkeypatch
+):
+    from contextlib import nullcontext
+
+    root = tmp_path / "EasyChange"
+    workspace = tmp_path / "workspace"
+    root.mkdir()
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "update.log"
+    receipt_path = tmp_path / "logs" / "update-receipt.json"
+    monkeypatch.setattr(self_update, "update_log_path", lambda: log_path)
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "_schedule_process_lock", lambda **_kwargs: nullcontext())
+    monkeypatch.setattr(
+        self_update,
+        "_write_update_receipt",
+        lambda _receipt: (_ for _ in ()).throw(OSError("synthetic receipt unavailable")),
+    )
+    wait_calls = []
+    updater_calls = []
+    launches = []
+    monkeypatch.setattr(
+        self_update.subprocess,
+        "Popen",
+        lambda *args, **kwargs: launches.append((args, kwargs)),
+    )
+
+    result = self_update.run_update_worker(
+        repo_root=root,
+        workspace=workspace,
+        parent_pid=123,
+        executable="pythonw.exe",
+        run=lambda *_args, **_kwargs: updater_calls.append(True),
+        wait_parent=lambda _pid: wait_calls.append(_pid) or True,
+        sleep=lambda _seconds: None,
+    )
+
+    assert result == 9
+    assert wait_calls == []
+    assert updater_calls == []
+    assert launches == []
+    assert not receipt_path.exists()
+
+
 def test_switch_project_schema_is_generic_and_includes_recovery_example():
     schema = command_schema("switch-project")
     assert schema["mutating"] is True
