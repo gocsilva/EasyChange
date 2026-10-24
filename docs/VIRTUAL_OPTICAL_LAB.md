@@ -231,3 +231,27 @@ Update BOTH MCP and EasyChange before relying on the new bulk codec.
 Durable recovery remains the safe fallback when a frame is genuinely
 missing or a result cannot fit into the initial optical broadcast.
 Physical ESP/HDMI reliability is not proven by the virtual lab.
+
+
+
+## Optical resilience through virtual HDMI frame loss
+
+FULL local MCP lab supports --drop-page 2 to hide one optical page on the
+first rotation, then permits the next rotation to deliver it. If supported
+by the scene's optical page count, virtual_hdmi_dropped_frames proves loss
+was actually injected. The normal CI MCP job tests this short transient loss.
+
+    tests\run_virtual_full_mcp_lab.bat --mode QR --command ":read large.txt 1 900" --timeout 24 --drop-page 2
+
+Persistent loss is a SEPARATE intentionally slow manual regression: use
+--drop-page 1 --persistent-loss on a PIXEL write. The original mutation
+must execute only once despite subsequent durable recovery queries.
+
+Local evidence: transient loss of 11 HDMI virtual frames in a 900-line QR
+read finished with a single HID send and all 900 lines byte-identical
+in about 7.8 seconds. Persistent loss of a PIXEL receipt page needed
+4 HID sends and 44.6 seconds, but executed the write once with an exact
+on-disk match and a complete degraded receipt.
+
+The test watchdog includes a larger recovery budget, but the PRODUCTION
+MCP capture/timeout was not extended. Physical ESP and HDMI are untouched.

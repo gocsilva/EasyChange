@@ -20,7 +20,8 @@ import time
 def run(mcp_source: str, mode: str = "QR", command: str = ":state --compact",
         evidence_dir: str = "", timeout: float = 24.0,
         replay_identical: bool = False, tesseract: str = "",
-        easychange_source: str = "") -> dict:
+        easychange_source: str = "",
+        drop_page: int = -1, persistent_loss: bool = False) -> dict:
     # The real EasyChange CommandService supports process jobs and host
     # commands. Forbid those entirely: the lab must only touch disposable
     # source/read/search or its one allowlisted output file.
@@ -188,9 +189,32 @@ def run(mcp_source: str, mode: str = "QR", command: str = ":state --compact",
             arr=np.frombuffer(img.bits(),dtype=np.uint8).reshape(img.height(),img.width(),3)
             return cv2.cvtColor(arr,cv2.COLOR_RGB2BGR).copy()
         captures=0
+        dropped=0
+        skipped_target_first_pass=False
+        active_dropped_page=False
         def update_hdmi():
-            nonlocal captures
-            capture.publish(frame(),window._machine and window.command.hasFocus())
+            nonlocal captures,dropped,skipped_target_first_pass,active_dropped_page
+            picture=frame()
+            original_reply=getattr(window._last_machine_result,"sequence",None)=="QLABFULL01"
+            count=len(getattr(window,"_optical_payloads",[]) or [])
+            if drop_page >= 0 and original_reply and count:
+                # The Qt counter indicates the NEXT page after commit.
+                # In the real capture path an optical page may disappear for
+                # one dwell due to HDMI resampling, Teams/GPU contention etc.
+                _slots,_pages,*_=window._optical_page_plan()
+                current=(int(window._optical_page)-1)%max(1,_pages)
+                on_target=current==drop_page and _pages>drop_page
+                if active_dropped_page and not on_target:
+                    active_dropped_page=False
+                    skipped_target_first_pass=True
+                should_drop=on_target and (
+                    persistent_loss or not skipped_target_first_pass
+                )
+                if should_drop:
+                    active_dropped_page=True
+                    picture=np.zeros_like(picture)
+                    dropped+=1
+            capture.publish(picture,window._machine and window.command.hasFocus())
             captures+=1
         timer=QTimer()
         timer.setInterval(85)
@@ -204,7 +228,7 @@ def run(mcp_source: str, mode: str = "QR", command: str = ":state --compact",
         screenshot=None
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future=pool.submit(mcp._send_and_correlate,controller,sequence,command,float(timeout))
-            deadline=time.monotonic()+min(33.0,float(timeout)+11.0)
+            deadline=time.monotonic()+min(82.0,float(timeout)+(49.0 if persistent_loss else 23.0))
             sends=0
             next_status=time.monotonic()+5
             while not future.done() and time.monotonic()<deadline:
@@ -285,6 +309,9 @@ def run(mcp_source: str, mode: str = "QR", command: str = ":state --compact",
         report={
             "mode":mode,"command":command,"sequence":sequence,
             "virtual":True,"hid_sends":sends,"virtual_hdmi_frames":captures,
+            "virtual_hdmi_dropped_frames":dropped,
+            "simulated_drop_page":drop_page,
+            "simulated_persistent_loss":persistent_loss,
             "elapsed_ms":round((time.monotonic()-started)*1000,2),
             "remote_executed":bool(original_ready),
             "remote_ok":original_ready[-1].get("ok") if original_ready else None,
@@ -358,11 +385,20 @@ def main():
     arg.add_argument("--replay-identical",action="store_true")
     arg.add_argument("--tesseract",default="")
     arg.add_argument("--easychange-source",default="")
+    arg.add_argument("--drop-page",type=int,default=-1)
+    arg.add_argument("--persistent-loss",action="store_true")
+    arg.add_argument("--expect-direct",action="store_true")
     args=arg.parse_args()
     result=run(args.mcp_source,args.mode,args.command,args.evidence_dir,
                args.timeout,args.replay_identical,args.tesseract,
-               args.easychange_source)
+               args.easychange_source,args.drop_page,args.persistent_loss)
     print(json.dumps(result,ensure_ascii=False,indent=2))
+    if args.drop_page >= 0 and result["virtual_hdmi_dropped_frames"] < 1:
+        raise SystemExit("VIRTUAL_HDMI_LOSS_NOT_INJECTED")
+    if args.expect_direct and (
+        result["hid_sends"] != 1 or result["mcp_transport_state"] != "HEALTHY"
+    ):
+        raise SystemExit("UNEXPECTED_DURABLE_RECOVERY_ON_DIRECT_OPTICAL_TEST")
     if not result["mcp_result_complete"]:raise SystemExit(2)
     if not result["remote_executed"] or result["remote_execution_count"]!=1:
         raise SystemExit(3)

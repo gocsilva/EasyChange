@@ -115,6 +115,7 @@ jobs:
           python "$engine" --mcp-source "$mcp_source" --mode PIXEL --command ':write saved.txt SafeVirtualReplay' --replay-identical
           python "$engine" --mcp-source "$mcp_source" --mode PIXEL+QR --command ':search greeting'
           python "$engine" --mcp-source "$mcp_source" --mode QR --command ':read large.txt 1 900' --timeout 20
+          python "$engine" --mcp-source "$mcp_source" --mode QR --command ':read large.txt 1 900' --timeout 24 --drop-page 2 --expect-direct
       - name: Report validated CRC and unresolved OCR failures
         if: always()
         shell: bash
