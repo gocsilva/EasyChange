@@ -301,8 +301,14 @@ def _run_updater_with_tree_timeout(
     )
     try:
         return int(process.wait(timeout=timeout))
-    except subprocess.TimeoutExpired as exc:
-        if process.poll() is not None:
+    except Exception as wait_exc:
+        try:
+            polled = process.poll()
+        except Exception:
+            # An unreadable process handle does not prove that cmd.exe or its
+            # descendants stopped; fall through to explicit tree cleanup.
+            polled = None
+        if polled is not None:
             return int(process.returncode)
         system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
         taskkill = system_root / "System32" / "taskkill.exe"
@@ -322,7 +328,7 @@ def _run_updater_with_tree_timeout(
         except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as cleanup_exc:
             raise UpdateProcessTreeCleanupUnconfirmed(
                 f"pid={process.pid}:{type(cleanup_exc).__name__}"
-            ) from exc
+            ) from wait_exc
         return 124
 
 

@@ -357,16 +357,16 @@ def test_update_timeout_kills_the_batch_process_tree_before_retry():
     assert kill_calls[0][1]["timeout"] == 15
 
 
-def test_update_timeout_reports_unconfirmed_tree_cleanup():
+def test_update_process_status_error_requires_tree_cleanup():
     class TimedOutProcess:
         pid = 4456
         returncode = None
 
         def wait(self, *, timeout):
-            raise subprocess.TimeoutExpired("updater", timeout)
+            raise OSError("process handle unavailable")
 
         def poll(self):
-            return None
+            raise OSError("process status unavailable")
 
     with pytest.raises(self_update.UpdateProcessTreeCleanupUnconfirmed):
         self_update._run_updater_with_tree_timeout(
