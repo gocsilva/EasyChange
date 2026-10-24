@@ -29,15 +29,18 @@ def test_autonomous_update_reuses_durable_handoff_without_starting_gui(tmp_path)
         service.close()
 
 
-def test_autonomous_status_is_nonmutating_and_fresh(monkeypatch,tmp_path):
+def test_autonomous_status_is_nonmutating_and_reports_quarantine(monkeypatch,tmp_path):
     monkeypatch.setattr(self_update,"read_update_status",
-                        lambda:{"state":"UPDATED","installed_git_sha":"f"*40})
+                        lambda:{"state":"UPDATE_CLEANUP_UNCONFIRMED",
+                                "cleanup_error":"pid=4455:AccessDenied",
+                                "update_in_progress":True})
     service=CommandService(Workspace.open(tmp_path),defer_initial_maintenance=True)
     try:
         outcome=service.execute(":autonomous-update-status")
         assert outcome.ok is True
-        assert outcome.data["state"]=="UPDATED"
-        assert outcome.data["installed_git_sha"]=="f"*40
+        assert outcome.data["state"]=="UPDATE_CLEANUP_UNCONFIRMED"
+        assert outcome.data["cleanup_error"]=="pid=4455:AccessDenied"
+        assert outcome.data["update_in_progress"] is True
     finally:
         service.close()
 
@@ -103,3 +106,60 @@ def test_autonomous_update_refuses_to_restart_with_unsaved_editor_changes(monkey
     assert scheduled == []
     assert timers == []
     assert window._update_restart_scheduled is False
+
+
+def test_quarantined_update_error_is_returned_without_restart(monkeypatch, tmp_path):
+    from easychange.ui.main_window import MainWindow
+
+    workspace = SimpleNamespace(root_path=tmp_path)
+    command_result = Result(
+        True,
+        "autonomous-update",
+        data={"update_request": "github_main"},
+        sequence="QUPDQUARANT1",
+    )
+    scheduled = []
+    timers = []
+    output_lines = []
+    monkeypatch.setattr(
+        ui,
+        "schedule_self_update",
+        lambda *args, **kwargs: scheduled.append((args, kwargs)) or {
+            "ok": False,
+            "error": "UPDATE_CLEANUP_UNCONFIRMED",
+            "worker_pid": 4455,
+        },
+    )
+    monkeypatch.setattr(ui.QTimer, "singleShot", lambda *args: timers.append(args))
+    window = SimpleNamespace(
+        editor=SimpleNamespace(
+            document=lambda: SimpleNamespace(isModified=lambda: False),
+            toPlainText=lambda: "",
+        ),
+        _active_path=None,
+        service=SimpleNamespace(
+            execute=lambda _text: command_result,
+            workspace=workspace,
+            machine=False,
+            output="compact",
+        ),
+        _machine=False,
+        _update_restart_scheduled=False,
+        _refresh_header=lambda: None,
+        _sync_optical_transport_controls=lambda: None,
+        focus_command=lambda: {"command_focus_confirmed": True},
+        output=SimpleNamespace(setPlainText=output_lines.append),
+        _update_machine_qr=lambda _result: None,
+        close=lambda: None,
+    )
+    window._has_unsaved_editor_changes = lambda **_kwargs: False
+
+    MainWindow._run_command(window, ":ec QUPDQUARANT1 autonomous-update")
+
+    assert len(scheduled) == 1
+    assert command_result.ok is False
+    assert command_result.code == "UPDATE_CLEANUP_UNCONFIRMED"
+    assert command_result.error == "UPDATE_CLEANUP_UNCONFIRMED"
+    assert "UPDATE_CLEANUP_UNCONFIRMED" in output_lines[-1]
+    assert window._update_restart_scheduled is False
+    assert timers == []
