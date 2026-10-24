@@ -219,6 +219,8 @@ def test_update_worker_runs_github_updater_then_reopens_same_workspace(tmp_path,
 
 
 def test_update_worker_persists_verifiable_git_receipt(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
     repo = tmp_path / "EasyChange"
     repo.mkdir()
     (repo / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
@@ -244,6 +246,16 @@ def test_update_worker_persists_verifiable_git_receipt(tmp_path, monkeypatch):
         "Popen",
         lambda *_args, **_kwargs: SimpleNamespace(pid=99),
     )
+    original_lock = self_update._schedule_process_lock
+    lock_entries = []
+
+    @contextmanager
+    def track_lock(*args, **kwargs):
+        with original_lock(*args, **kwargs):
+            lock_entries.append(True)
+            yield
+
+    monkeypatch.setattr(self_update, "_schedule_process_lock", track_lock)
 
     result = self_update.run_update_worker(
         repo_root=repo,
@@ -265,6 +277,7 @@ def test_update_worker_persists_verifiable_git_receipt(tmp_path, monkeypatch):
     assert status["current_matches_receipt"] is True
     assert status["current_matches_origin_main"] is True
     assert status["updater_return_code"] == 0
+    assert len(lock_entries) == 3
 
 
 def test_self_update_status_text_command_reads_receipt_without_mutating(tmp_path, monkeypatch):

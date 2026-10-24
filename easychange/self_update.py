@@ -449,14 +449,19 @@ def run_update_worker(
 
     def persist_receipt(log=None):
         try:
-            _write_update_receipt(receipt)
-        except OSError as exc:
+            with _schedule_process_lock(timeout=5.0):
+                _write_update_receipt(receipt)
+            return True
+        except (OSError, RuntimeError) as exc:
             if log is not None:
                 log.write(f"[SELF_UPDATE] receipt_write_failed={type(exc).__name__}\n")
+            return False
 
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"\n[SELF_UPDATE] repo={root} workspace={target_workspace}\n")
-        persist_receipt(log)
+        if not persist_receipt(log):
+            log.write("[SELF_UPDATE] unable to persist RUNNING receipt; update cancelled.\n")
+            return 9
         if not wait_parent(parent_pid):
             log.write("[SELF_UPDATE] GUI did not exit before timeout; update cancelled.\n")
             receipt.update(
