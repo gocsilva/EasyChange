@@ -728,6 +728,43 @@ def test_update_timeout_taskkill_exception_is_unconfirmed():
     assert wait_calls == [900]
 
 
+def test_update_timeout_poll_error_needs_final_exit_confirmation():
+    wait_calls = []
+    kill_calls = []
+    poll_calls = []
+
+    class UnreadableProcess:
+        pid = 4461
+
+        def wait(self, *, timeout):
+            wait_calls.append(timeout)
+            raise subprocess.TimeoutExpired("updater", timeout)
+
+        def poll(self):
+            poll_calls.append(True)
+            raise OSError("synthetic process status failure")
+
+    def run_taskkill(argv, **kwargs):
+        kill_calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    with pytest.raises(self_update.UpdateProcessTreeCleanupUnconfirmed) as exc_info:
+        self_update._run_updater_with_tree_timeout(
+            ["cmd.exe", "/d", "/c", "Atualizar_EasyChange.bat"],
+            cwd="C:/EasyChange",
+            env={},
+            stdout=None,
+            timeout=900,
+            popen_factory=lambda *_args, **_kwargs: UnreadableProcess(),
+            run_factory=run_taskkill,
+        )
+
+    assert "pid=4461:TimeoutExpired" in str(exc_info.value)
+    assert wait_calls == [900, 10]
+    assert poll_calls == [True]
+    assert kill_calls[0][0][-4:] == ["/PID", "4461", "/T", "/F"]
+
+
 def test_update_process_status_error_requires_tree_cleanup():
     class TimedOutProcess:
         pid = 4456
