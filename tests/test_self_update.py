@@ -319,6 +319,115 @@ def test_superseded_update_worker_does_not_overwrite_new_handoff(tmp_path, monke
     assert json.loads(receipt_path.read_text(encoding="utf-8")) == latest
 
 
+def test_update_timeout_kills_the_batch_process_tree_before_retry():
+    process_calls = []
+
+    class TimedOutProcess:
+        pid = 4455
+
+        def wait(self, *, timeout):
+            process_calls.append(timeout)
+            if len(process_calls) == 1:
+                raise subprocess.TimeoutExpired("updater", timeout)
+            return -9
+
+        def poll(self):
+            return None
+
+    process = TimedOutProcess()
+    kill_calls = []
+
+    def run_taskkill(argv, **kwargs):
+        kill_calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    result = self_update._run_updater_with_tree_timeout(
+        ["cmd.exe", "/d", "/c", "Atualizar_EasyChange.bat"],
+        cwd="C:/EasyChange",
+        env={},
+        stdout=None,
+        timeout=900,
+        popen_factory=lambda *_args, **_kwargs: process,
+        run_factory=run_taskkill,
+    )
+
+    assert result == 124
+    assert process_calls == [900, 10]
+    assert kill_calls[0][0][-4:] == ["/PID", "4455", "/T", "/F"]
+    assert kill_calls[0][1]["timeout"] == 15
+
+
+def test_update_timeout_reports_unconfirmed_tree_cleanup():
+    class TimedOutProcess:
+        pid = 4456
+        returncode = None
+
+        def wait(self, *, timeout):
+            raise subprocess.TimeoutExpired("updater", timeout)
+
+        def poll(self):
+            return None
+
+    with pytest.raises(self_update.UpdateProcessTreeCleanupUnconfirmed):
+        self_update._run_updater_with_tree_timeout(
+            ["cmd.exe", "/d", "/c", "Atualizar_EasyChange.bat"],
+            cwd="C:/EasyChange",
+            env={},
+            stdout=None,
+            timeout=900,
+            popen_factory=lambda *_args, **_kwargs: TimedOutProcess(),
+            run_factory=lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
+        )
+
+
+def test_update_timeout_cleanup_failure_quarantines_receipt_and_blocks_retry(tmp_path, monkeypatch):
+    repo = tmp_path / "EasyChange"
+    repo.mkdir()
+    (repo / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "update.log"
+    receipt_path = tmp_path / "logs" / "update-receipt.json"
+    monkeypatch.setattr(self_update, "update_log_path", lambda: log_path)
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(
+        self_update,
+        "_run_updater_with_tree_timeout",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            self_update.UpdateProcessTreeCleanupUnconfirmed("pid=4455:RuntimeError")
+        ),
+    )
+
+    result = self_update.run_update_worker(
+        repo_root=repo,
+        workspace=workspace,
+        parent_pid=123,
+        executable="pythonw.exe",
+        wait_parent=lambda _pid: True,
+        sleep=lambda _seconds: None,
+    )
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert result == 7
+    assert receipt["state"] == "UPDATE_CLEANUP_UNCONFIRMED"
+    assert self_update._active_update_handoff(repo.resolve(), workspace.resolve()) == receipt
+    assert self_update._update_receipt_activity(receipt) == (True, False)
+    status = self_update.read_update_status(repo_root=repo)
+    assert status["state"] == "UPDATE_CLEANUP_UNCONFIRMED"
+    assert status["update_in_progress"] is True
+    assert status["cleanup_error"] == "pid=4455:RuntimeError"
+    spawned = []
+    retry = self_update.schedule_self_update(
+        workspace,
+        repo_root=repo,
+        platform_name="nt",
+        popen_factory=lambda *args, **kwargs: spawned.append((args, kwargs)),
+    )
+    assert retry["ok"] is False
+    assert retry["error"] == "UPDATE_CLEANUP_UNCONFIRMED"
+    assert spawned == []
+
+
 def test_self_update_status_text_command_reads_receipt_without_mutating(tmp_path, monkeypatch):
     receipt_path = tmp_path / "update-receipt.json"
     monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)

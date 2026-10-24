@@ -28,6 +28,10 @@ MAX_UPDATE_RECEIPT_BYTES = 64 * 1024
 _SCHEDULE_LOCK = threading.RLock()
 
 
+class UpdateProcessTreeCleanupUnconfirmed(RuntimeError):
+    """The timed-out updater process tree could not be confirmed stopped."""
+
+
 def installation_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -100,6 +104,8 @@ def _read_git_revisions(repo_root: str | Path) -> dict:
 def _update_receipt_activity(receipt: dict, *, now: datetime | None = None) -> tuple[bool, bool]:
     """Bound stale SCHEDULED/RUNNING receipts using the handoff timeout."""
     state = receipt.get("state")
+    if state == "UPDATE_CLEANUP_UNCONFIRMED":
+        return True, False
     if state not in {"SCHEDULED", "RUNNING"}:
         return False, False
     try:
@@ -156,6 +162,7 @@ def read_update_status(*, repo_root: str | Path | None = None) -> dict:
         "workspace": receipt.get("workspace"),
         "worker_pid": receipt.get("worker_pid"),
         "schedule_error": receipt.get("schedule_error"),
+        "cleanup_error": receipt.get("cleanup_error"),
         "finished_at_utc": receipt.get("finished_at_utc"),
         "started_at_utc": receipt.get("started_at_utc"),
         "update_in_progress": update_in_progress,
@@ -261,12 +268,62 @@ def _active_update_handoff(root: Path, workspace: Path) -> dict | None:
     if not isinstance(existing, dict) or existing.get("schema") != UPDATE_RECEIPT_SCHEMA:
         raise RuntimeError("UPDATE_RECEIPT_INVALID")
     if (existing.get("repo_root") != str(root)
-            or existing.get("state") not in {"SCHEDULED", "RUNNING"}):
+            or existing.get("state") not in {
+                "SCHEDULED", "RUNNING", "UPDATE_CLEANUP_UNCONFIRMED"
+            }):
         return None
     active, _stale = _update_receipt_activity(existing)
     if not active:
         return None
     return existing
+
+
+def _run_updater_with_tree_timeout(
+    command: Sequence[str],
+    *,
+    cwd: str,
+    env: dict,
+    stdout,
+    timeout: int,
+    popen_factory: Callable | None = None,
+    run_factory: Callable | None = None,
+) -> int:
+    """Run the batch updater and kill its descendants before permitting retry."""
+    popen_factory = popen_factory or subprocess.Popen
+    run_factory = run_factory or subprocess.run
+    process = popen_factory(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=stdout,
+        stderr=subprocess.STDOUT,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+    )
+    try:
+        return int(process.wait(timeout=timeout))
+    except subprocess.TimeoutExpired as exc:
+        if process.poll() is not None:
+            return int(process.returncode)
+        system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+        taskkill = system_root / "System32" / "taskkill.exe"
+        try:
+            killed = run_factory(
+                [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+            )
+            if int(killed.returncode) != 0:
+                raise RuntimeError("TASKKILL_RETURNED_NONZERO")
+            process.wait(timeout=10)
+        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as cleanup_exc:
+            raise UpdateProcessTreeCleanupUnconfirmed(
+                f"pid={process.pid}:{type(cleanup_exc).__name__}"
+            ) from exc
+        return 124
 
 
 def _schedule_self_update_once(
@@ -291,6 +348,13 @@ def _schedule_self_update_once(
     target_workspace = Path(workspace).resolve()
     existing = _active_update_handoff(root, target_workspace)
     if existing is not None:
+        if existing.get("state") == "UPDATE_CLEANUP_UNCONFIRMED":
+            return {
+                "ok": False,
+                "error": "UPDATE_CLEANUP_UNCONFIRMED",
+                "worker_pid": existing.get("worker_pid"),
+                "workspace": existing.get("workspace"),
+            }
         return {
             "ok": True, "scheduled": True, "already_scheduled": True,
             "worker_pid": existing.get("worker_pid"),
@@ -433,7 +497,7 @@ def run_update_worker(
     parent_pid: int,
     executable: str,
     handoff_id: str | None = None,
-    run: Callable = subprocess.run,
+    run: Callable | None = None,
     wait_parent: Callable = _wait_for_parent_exit,
     sleep: Callable = time.sleep,
 ) -> int:
@@ -497,21 +561,36 @@ def run_update_worker(
         env["EASYCHANGE_NONINTERACTIVE"] = "1"
         command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(updater)]
         try:
-            completed = run(
-                command,
-                cwd=str(root),
-                env=env,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                timeout=UPDATE_TIMEOUT_SECONDS,
-                check=False,
-                # The updater runs from a detached background Python worker.
-                # Without this flag Windows creates a *visible* cmd.exe window
-                # over EasyChange, steals HID keyboard focus and makes MCP
-                # capture only the previous EC2 QR for tens of seconds.
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+            if run is not None:
+                completed = run(
+                    command,
+                    cwd=str(root),
+                    env=env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    timeout=UPDATE_TIMEOUT_SECONDS,
+                    check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+                )
+                return_code = int(completed.returncode)
+            else:
+                return_code = _run_updater_with_tree_timeout(
+                    command,
+                    cwd=str(root),
+                    env=env,
+                    stdout=log,
+                    timeout=UPDATE_TIMEOUT_SECONDS,
+                )
+        except UpdateProcessTreeCleanupUnconfirmed as exc:
+            log.write(f"[SELF_UPDATE] updater process tree cleanup unconfirmed: {exc}\n")
+            receipt.update(
+                state="UPDATE_CLEANUP_UNCONFIRMED",
+                updater_return_code=7,
+                cleanup_error=str(exc)[:160],
+                finished_at_utc=_utc_now(),
             )
-            return_code = int(completed.returncode)
+            persist_receipt(log)
+            return 7
         except (OSError, subprocess.SubprocessError) as exc:
             log.write(f"[SELF_UPDATE] updater failed: {exc}\n")
             return_code = 7
