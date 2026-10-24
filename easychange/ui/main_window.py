@@ -1376,10 +1376,9 @@ class MainWindow(QMainWindow):
 
         try:
             target = self.service.workspace.resolve(self._active_path, must_exist=True)
-            if discard_easychange:
-                install_root = installation_root().resolve()
-                if target.resolve().is_relative_to(install_root):
-                    return False
+            # Never treat unsaved source files inside the EasyChange
+            # installation as disposable. Restart/update would discard the
+            # buffer just as surely as for a workspace outside the checkout.
             return target.read_text(encoding="utf-8-sig") != text
         except (OSError, UnicodeError, ValueError, PermissionError):
             # If the active file cannot be compared safely, keep the edit guard.

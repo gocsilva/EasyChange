@@ -511,7 +511,7 @@ def test_self_update_rejects_non_windows(tmp_path):
     assert result == {"ok": False, "error": "SELF_UPDATE_REQUIRES_WINDOWS"}
 
 
-def test_unsaved_editor_guard_compares_disk_and_can_discard_easychange(tmp_path, monkeypatch):
+def test_unsaved_editor_guard_protects_any_dirty_file_including_easychange(tmp_path, monkeypatch):
     from easychange.ui import main_window as ui
     MainWindow = ui.MainWindow
 
@@ -553,10 +553,12 @@ def test_unsaved_editor_guard_compares_disk_and_can_discard_easychange(tmp_path,
     assert MainWindow._has_unsaved_editor_changes(
         window(modified=True, text="memory text", active_path=changed_file)
     ) is True
+    # Even a source file inside the EasyChange installation is user work:
+    # automatic Git update/restart must NOT drop uncommitted editor content.
     assert MainWindow._has_unsaved_editor_changes(
         window(modified=True, text="memory version", active_path=install_file),
         discard_easychange=True,
-    ) is False
+    ) is True
     assert MainWindow._has_unsaved_editor_changes(
         window(modified=True, text="memory version", active_path=install_file)
     ) is True
