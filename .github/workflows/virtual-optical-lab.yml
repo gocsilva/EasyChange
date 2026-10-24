@@ -81,7 +81,8 @@ jobs:
           python -m pytest -q \
             component/tests/test_virtual_optical_focus_header.py \
             component/tests/test_easychange_ubuntu_ocr_transport.py \
-            component/tests/test_easychange_xz_optical_codec.py
+            component/tests/test_easychange_xz_optical_codec.py \
+            component/tests/test_easychange_post_optical_recovery_budget.py
       - name: Test ESP serial host bridge without USB
         if: env.LAB_KIND == 'esp'
         run: |

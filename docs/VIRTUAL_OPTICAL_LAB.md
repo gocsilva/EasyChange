@@ -255,3 +255,23 @@ on-disk match and a complete degraded receipt.
 
 The test watchdog includes a larger recovery budget, but the PRODUCTION
 MCP capture/timeout was not extended. Physical ESP and HDMI are untouched.
+
+
+## Recovery grace after genuinely unreadable HDMI pages
+
+A permanently obscured QR carousel page cannot be fixed by waiting for
+its next revolution. Safe durable recovery begins only after the initial
+optical observation fails. Its deadline now has its own bounded grace
+(20 to 48 seconds), independent of the already-consumed optical budget.
+The read is NEVER reexecuted, and a recovered reply is clearly DEGRADED.
+
+Validated in the local Qt/virtual ESP/HDMI laboratory:
+- Clean 900-line QR: 1 HID, about 5.6 s, checksum verified;
+- Transient first-pass loss: 1 HID, 7.4-7.6 s, all 900 lines verified;
+- Permanently missing page: 7 HID durable queries, about 52 s,
+  all 900 lines restored; original operation executed once;
+- Same-sequence PIXEL write: never duplicated, receipt replayed from host.
+
+The new fast unit test protects the independent bounded recovery budget.
+The slow permanent-loss stress scenario is opt-in via --drop-page 1
+--persistent-loss in the full MCP lab, not the normal CI default.
