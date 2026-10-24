@@ -557,7 +557,6 @@ def test_unsaved_editor_guard_protects_any_dirty_file_including_easychange(tmp_p
     # automatic Git update/restart must NOT drop uncommitted editor content.
     assert MainWindow._has_unsaved_editor_changes(
         window(modified=True, text="memory version", active_path=install_file),
-        discard_easychange=True,
     ) is True
     assert MainWindow._has_unsaved_editor_changes(
         window(modified=True, text="memory version", active_path=install_file)

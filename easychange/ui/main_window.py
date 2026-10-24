@@ -1261,7 +1261,7 @@ class MainWindow(QMainWindow):
         }
         if precomputed_result is not None:
             result = precomputed_result
-        elif is_update_command and self._has_unsaved_editor_changes(discard_easychange=True):
+        elif is_update_command and self._has_unsaved_editor_changes():
             result = Result(
                 False,
                 "self-update",
@@ -1366,7 +1366,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_update_restart_scheduled", False):
             QTimer.singleShot(RESTART_GRACE_SECONDS * 1000, self.close)
 
-    def _has_unsaved_editor_changes(self, *, discard_easychange: bool = False) -> bool:
+    def _has_unsaved_editor_changes(self) -> bool:
         """Return true when a dirty editor has content that differs from disk."""
         if not self.editor.document().isModified():
             return False
