@@ -1205,6 +1205,10 @@ def test_expired_running_receipt_allows_synthetic_worker_retry(tmp_path, monkeyp
         "workspace": str(workspace.resolve()),
         "state": "RUNNING",
         "started_at_utc": "2000-01-01T00:00:00+00:00",
+        "worker_pid": 9999,
+        "schedule_error": "OLD_SCHEDULE_ERROR",
+        "cleanup_error": "OLD_CLEANUP_ERROR",
+        "finished_at_utc": "2000-01-01T00:01:00+00:00",
     }), encoding="utf-8")
     monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
     monkeypatch.setattr(self_update, "update_log_path", lambda: tmp_path / "logs" / "update.log")
@@ -1223,7 +1227,12 @@ def test_expired_running_receipt_allows_synthetic_worker_retry(tmp_path, monkeyp
     assert result["ok"] is True
     assert result.get("already_scheduled") is not True
     assert len(spawned) == 1
-    assert json.loads(receipt_path.read_text(encoding="utf-8"))["state"] == "SCHEDULED"
+    replacement = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert replacement["state"] == "SCHEDULED"
+    assert replacement["worker_pid"] == 4321
+    assert replacement["finished_at_utc"] is None
+    assert "schedule_error" not in replacement
+    assert "cleanup_error" not in replacement
 
 
 def test_old_cleanup_unconfirmed_receipt_still_blocks_synthetic_retry(tmp_path, monkeypatch):
