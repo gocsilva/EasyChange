@@ -1280,6 +1280,70 @@ def test_failed_retry_replaces_expired_receipt_without_old_metadata(tmp_path, mo
     assert "cleanup_error" not in replacement
 
 
+def test_post_spawn_pid_receipt_write_failure_keeps_handoff_deduplicated(
+    tmp_path, monkeypatch
+):
+    from contextlib import nullcontext
+
+    repo = tmp_path / "EasyChange"
+    repo.mkdir()
+    (repo / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    receipt_path = tmp_path / "logs" / "receipt.json"
+    receipt_path.parent.mkdir()
+    receipt_path.write_text(json.dumps({
+        "schema": self_update.UPDATE_RECEIPT_SCHEMA,
+        "repo_root": str(repo.resolve()),
+        "workspace": str(workspace.resolve()),
+        "state": "RUNNING",
+        "started_at_utc": "2000-01-01T00:00:00+00:00",
+    }), encoding="utf-8")
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "update_log_path", lambda: tmp_path / "logs" / "update.log")
+    monkeypatch.setattr(self_update, "_read_git_revisions", lambda _root: {})
+    monkeypatch.setattr(self_update, "_schedule_process_lock", lambda **_kwargs: nullcontext())
+    write_receipt = self_update._write_update_receipt
+    writes = []
+
+    def fail_pid_annotation(receipt):
+        writes.append(receipt.copy())
+        if len(writes) == 2:
+            raise OSError("synthetic post-spawn receipt update failure")
+        write_receipt(receipt)
+
+    monkeypatch.setattr(self_update, "_write_update_receipt", fail_pid_annotation)
+    spawned = []
+
+    def popen_factory(*args, **kwargs):
+        spawned.append((args, kwargs))
+        return SimpleNamespace(pid=4321)
+
+    first = self_update.schedule_self_update(
+        workspace,
+        repo_root=repo,
+        platform_name="nt",
+        popen_factory=popen_factory,
+    )
+
+    stored = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert first["ok"] is True
+    assert stored["state"] == "SCHEDULED"
+    assert stored["worker_pid"] is None
+    assert len(spawned) == 1
+
+    second = self_update.schedule_self_update(
+        workspace,
+        repo_root=repo,
+        platform_name="nt",
+        popen_factory=popen_factory,
+    )
+
+    assert second["ok"] is True
+    assert second["already_scheduled"] is True
+    assert len(spawned) == 1
+
+
 def test_log_open_failure_preserves_expired_receipt_and_skips_worker(
     tmp_path, monkeypatch
 ):
