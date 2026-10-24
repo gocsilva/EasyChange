@@ -236,7 +236,9 @@ def _expand_transport_value(
     return value
 
 
-def _encode_raw(value: dict[str, Any]) -> tuple[bytes, bytes, str]:
+def _encode_raw(
+    value: dict[str, Any], *, defer_compression_limits: bool = False,
+) -> tuple[bytes, bytes, str]:
     # Enforce the receiver's byte budget during JSON encoding. A full
     # json.dumps() copy of an oversized result would spike memory before the
     # compression/QR stages could reject the envelope.
@@ -258,10 +260,10 @@ def _encode_raw(value: dict[str, Any]) -> tuple[bytes, bytes, str]:
     raw=bytes(output)
     # Preserve the old three-value compression API for existing callers.
     compressed=zlib.compress(raw,level=OPTICAL_COMPRESSION_LEVEL)
-    if len(compressed)>MAX_EC2_COMPRESSED_BYTES:
+    if not defer_compression_limits and len(compressed)>MAX_EC2_COMPRESSED_BYTES:
         raise ValueError("OPTICAL_COMPRESSED_RESULT_TOO_LARGE")
     token=base64.urlsafe_b64encode(compressed).decode("ascii").rstrip("=")
-    if len(token)>MAX_EC2_TOKEN_CHARS:
+    if not defer_compression_limits and len(token)>MAX_EC2_TOKEN_CHARS:
         raise ValueError("OPTICAL_RESULT_TOKEN_TOO_LARGE")
     return raw,compressed,token
 
@@ -307,7 +309,11 @@ def _transport_components(
         # UTF-8 metadata by downstream QR/result consumers.
         raise ValueError("OPTICAL_SEQUENCE_INVALID_UNICODE")
     wire_value = _compact_transport_value(value)
-    raw, compressed, token = _encode_raw(wire_value)
+    # The zlib representation is an intermediate when XZ can produce a
+    # smaller valid EC2 payload. Enforce wire limits after codec selection.
+    raw, compressed, token = _encode_raw(
+        wire_value, defer_compression_limits=True,
+    )
     encoding="zlib"
     # Opt in at the EC2 envelope layer rather than changing _encode_raw API.
     # Use XZ only when it meaningfully shortens the optical packet carousel.
@@ -317,6 +323,10 @@ def _transport_components(
             compressed=candidate
             encoding="xz"
             token=base64.urlsafe_b64encode(compressed).decode("ascii").rstrip("=")
+    if len(compressed)>MAX_EC2_COMPRESSED_BYTES:
+        raise ValueError("OPTICAL_COMPRESSED_RESULT_TOO_LARGE")
+    if len(token)>MAX_EC2_TOKEN_CHARS:
+        raise ValueError("OPTICAL_RESULT_TOKEN_TOO_LARGE")
     size = adaptive_chunk_chars(len(token)) if chunk_chars is None else int(chunk_chars)
     if size < 120:
         raise ValueError("chunk_chars must be >= 120")

@@ -283,7 +283,7 @@ def test_ec2_encoder_rejects_packet_count_above_mcp_receiver_budget(monkeypatch)
     import easychange.remote.optical_protocol as optical
 
     monkeypatch.setattr(optical, "MAX_EC2_PACKETS", 3)
-    monkeypatch.setattr(optical, "_encode_raw", lambda _value: (b"{}", b"compressed", "A" * 1000))
+    monkeypatch.setattr(optical, "_encode_raw", lambda _value, **_kwargs: (b"{}", b"compressed", "A" * 1000))
     with pytest.raises(ValueError, match="OPTICAL_PACKET_COUNT_TOO_LARGE"):
         optical._transport_components({"sequence": "QCAP", "ok": True})
 
@@ -293,6 +293,26 @@ def test_ec2_encoder_rejects_packet_count_above_mcp_receiver_budget(monkeypatch)
     )
     with pytest.raises(ValueError, match="OPTICAL_PACKET_COUNT_TOO_LARGE"):
         encode_result_chunks({"sequence": "QCAP", "ok": True}, prepared=prepared)
+
+
+def test_xz_fallback_can_fit_when_zlib_intermediate_exceeds_wire_limit(monkeypatch):
+    from unittest.mock import patch
+    import easychange.remote.optical_protocol as optical
+
+    monkeypatch.setattr(optical, "MAX_EC2_COMPRESSED_BYTES", 100)
+    monkeypatch.setattr(optical, "MAX_EC2_TOKEN_CHARS", 136)
+    value = {
+        "sequence": "QXZLIMIT",
+        "ok": True,
+        "data": "x" * optical.OPTICAL_XZ_MIN_RAW_BYTES,
+    }
+    xz_payload = b"x" * 80
+    with patch.object(optical.zlib, "compress", return_value=b"z" * 200), \
+         patch.object(optical.lzma, "compress", return_value=xz_payload):
+        components = optical._transport_components(value)
+
+    assert components[-1] == "xz"
+    assert optical.base64.urlsafe_b64decode(components[2] + "==") == xz_payload
 
 
 def test_ec2_encoder_refuses_huge_single_token_without_encoding_second_copy(monkeypatch):
