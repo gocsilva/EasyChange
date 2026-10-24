@@ -119,6 +119,62 @@ def test_update_receipt_write_failure_closes_stream_and_cleans_temp(tmp_path, mo
     assert list(tmp_path.glob(".update-receipt-*.tmp")) == []
 
 
+def test_worker_relaunches_after_final_receipt_persistence_failures(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+
+    root = tmp_path / "EasyChange"
+    workspace = tmp_path / "workspace"
+    root.mkdir()
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "update.log"
+    receipt_path = tmp_path / "logs" / "update-receipt.json"
+    monkeypatch.setattr(self_update, "update_log_path", lambda: log_path)
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "_schedule_process_lock", lambda **_kwargs: nullcontext())
+    monkeypatch.setattr(
+        self_update,
+        "_read_git_revisions",
+        lambda _root: {
+            "head_sha": "a" * 40,
+            "origin_main_sha": "a" * 40,
+            "matches_origin_main": True,
+        },
+    )
+    real_write = self_update._write_update_receipt
+    write_states = []
+
+    def fail_final_receipts(receipt):
+        write_states.append(receipt["state"])
+        if receipt["state"] in {"UPDATED", "PROCESS_STARTED"}:
+            raise OSError("synthetic final receipt failure")
+        real_write(receipt)
+
+    monkeypatch.setattr(self_update, "_write_update_receipt", fail_final_receipts)
+    launches = []
+    monkeypatch.setattr(
+        self_update.subprocess,
+        "Popen",
+        lambda *args, **kwargs: launches.append((args, kwargs)) or SimpleNamespace(pid=9001),
+    )
+
+    result = self_update.run_update_worker(
+        repo_root=root,
+        workspace=workspace,
+        parent_pid=123,
+        executable="pythonw.exe",
+        run=lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+        wait_parent=lambda _pid: True,
+        sleep=lambda _seconds: None,
+    )
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert result == 0
+    assert write_states == ["RUNNING", "UPDATED", "UPDATED"]
+    assert receipt["state"] == "RUNNING"
+    assert len(launches) == 1
+    assert launches[0][0][0][1:3] == ["-m", "easychange.gui"]
+
+
 def test_switch_project_schema_is_generic_and_includes_recovery_example():
     schema = command_schema("switch-project")
     assert schema["mutating"] is True
