@@ -960,6 +960,31 @@ def test_self_update_status_marks_expired_active_receipt_stale(tmp_path, monkeyp
     assert status["update_stale"] is True
 
 
+def test_future_active_receipt_is_not_marked_stale():
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    receipt = {
+        "state": "RUNNING",
+        "started_at_utc": (now + timedelta(hours=1)).isoformat(),
+    }
+
+    assert self_update._update_receipt_activity(receipt, now=now) == (True, False)
+
+
+def test_malformed_active_receipt_timestamp_is_not_marked_stale():
+    from datetime import datetime, timezone
+
+    receipt = {
+        "state": "RUNNING",
+        "started_at_utc": "not-a-timestamp",
+    }
+
+    assert self_update._update_receipt_activity(
+        receipt, now=datetime.now(timezone.utc)
+    ) == (True, False)
+
+
 def test_self_update_rejects_non_windows(tmp_path):
     result = self_update.schedule_self_update(tmp_path, platform_name="posix")
     assert result == {"ok": False, "error": "SELF_UPDATE_REQUIRES_WINDOWS"}

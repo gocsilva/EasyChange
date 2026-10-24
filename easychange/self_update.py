@@ -129,10 +129,15 @@ def _update_receipt_activity(receipt: dict, *, now: datetime | None = None) -> t
             if state == "SCHEDULED"
             else UPDATE_TIMEOUT_SECONDS + 120
         )
-        fresh = -5 <= age <= maximum
+        if age < -5:
+            # A future timestamp may reflect clock skew; it cannot prove the
+            # updater is gone, so keep the handoff active rather than retrying.
+            return True, False
+        fresh = age <= maximum
         return fresh, not fresh
     except (ValueError, TypeError, OverflowError):
-        return False, True
+        # Invalid timestamps also cannot prove that another worker stopped.
+        return True, False
 
 
 def read_update_status(*, repo_root: str | Path | None = None) -> dict:
