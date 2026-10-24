@@ -487,6 +487,27 @@ def test_ec2_fragment_crc_rejects_corruption():
         decode_result_chunks(corrupted)
 
 
+def test_ec2_full_payload_digest_and_crc_failures_do_not_poison_retry():
+    import json
+    import pytest
+
+    packets=encode_result_chunks(Result(
+        True,"read",{"lines":[f"{i:04d}|stable result" for i in range(180)]},
+        sequence="QDIGESTCRC"))
+    for field,message in (("h","optical sha256 mismatch"),
+                          ("c","optical crc32 mismatch")):
+        altered=[]
+        for encoded in packets:
+            packet=json.loads(encoded)
+            value=packet[field]
+            packet[field]=("0" if value[0]!="0" else "1")+value[1:]
+            altered.append(json.dumps(packet,separators=(",",":")))
+        with pytest.raises(ValueError,match=message):
+            decode_result_chunks(altered)
+
+    assert decode_result_chunks(packets)["sequence"]=="QDIGESTCRC"
+
+
 def test_ec2_rejects_ambiguous_packet_fields_and_nonfinite_json():
     import pytest
     from easychange.remote.optical_protocol import decode_ec2_packet_json
