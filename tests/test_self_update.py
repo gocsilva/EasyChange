@@ -851,6 +851,7 @@ def test_unconfirmed_timeout_from_taskkill_persists_quarantine_and_blocks_retry(
     monkeypatch.setattr(self_update, "update_log_path", lambda: log_path)
     monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
     monkeypatch.setattr(self_update, "_schedule_process_lock", lambda **_kwargs: nullcontext())
+    monkeypatch.setattr(self_update, "_read_git_revisions", lambda _root: {})
 
     class ProcessTreeStillRunning:
         pid = 4459
@@ -891,6 +892,10 @@ def test_unconfirmed_timeout_from_taskkill_persists_quarantine_and_blocks_retry(
     assert receipt["cleanup_error"].startswith("pid=4459:")
     assert len(process_launches) == 1  # updater only; no GUI relaunch
     assert kill_calls[0][0][0][-4:] == ["/PID", "4459", "/T", "/F"]
+    status = self_update.read_update_status(repo_root=root)
+    assert status["state"] == "UPDATE_CLEANUP_UNCONFIRMED"
+    assert status["update_in_progress"] is True
+    assert status["update_stale"] is False
 
     retry_launches = []
     retry = self_update.schedule_self_update(
