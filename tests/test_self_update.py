@@ -357,6 +357,32 @@ def test_update_timeout_kills_the_batch_process_tree_before_retry():
     assert kill_calls[0][1]["timeout"] == 15
 
 
+def test_update_timeout_does_not_kill_process_that_exited_before_cleanup():
+    class ExitedProcess:
+        pid = 4457
+        returncode = 0
+
+        def wait(self, *, timeout):
+            raise subprocess.TimeoutExpired("updater", timeout)
+
+        def poll(self):
+            return self.returncode
+
+    kill_calls = []
+    result = self_update._run_updater_with_tree_timeout(
+        ["cmd.exe", "/d", "/c", "Atualizar_EasyChange.bat"],
+        cwd="C:/EasyChange",
+        env={},
+        stdout=None,
+        timeout=900,
+        popen_factory=lambda *_args, **_kwargs: ExitedProcess(),
+        run_factory=lambda *args, **kwargs: kill_calls.append((args, kwargs)),
+    )
+
+    assert result == 0
+    assert kill_calls == []
+
+
 def test_update_process_status_error_requires_tree_cleanup():
     class TimedOutProcess:
         pid = 4456
