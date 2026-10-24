@@ -1235,6 +1235,51 @@ def test_expired_running_receipt_allows_synthetic_worker_retry(tmp_path, monkeyp
     assert "cleanup_error" not in replacement
 
 
+def test_failed_retry_replaces_expired_receipt_without_old_metadata(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+
+    repo = tmp_path / "EasyChange"
+    repo.mkdir()
+    (repo / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    receipt_path = tmp_path / "logs" / "receipt.json"
+    receipt_path.parent.mkdir()
+    receipt_path.write_text(json.dumps({
+        "schema": self_update.UPDATE_RECEIPT_SCHEMA,
+        "repo_root": str(repo.resolve()),
+        "workspace": str(workspace.resolve()),
+        "state": "RUNNING",
+        "started_at_utc": "2000-01-01T00:00:00+00:00",
+        "worker_pid": 9999,
+        "schedule_error": "OLD_SCHEDULE_ERROR",
+        "cleanup_error": "OLD_CLEANUP_ERROR",
+    }), encoding="utf-8")
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "update_log_path", lambda: tmp_path / "logs" / "update.log")
+    monkeypatch.setattr(self_update, "_read_git_revisions", lambda _root: {})
+    monkeypatch.setattr(self_update, "_schedule_process_lock", lambda **_kwargs: nullcontext())
+
+    def fail_spawn(*_args, **_kwargs):
+        raise OSError("synthetic spawn failure")
+
+    result = self_update.schedule_self_update(
+        workspace,
+        repo_root=repo,
+        platform_name="nt",
+        popen_factory=fail_spawn,
+    )
+
+    replacement = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert result["ok"] is False
+    assert result["error"] == "UPDATE_WORKER_START_FAILED"
+    assert replacement["state"] == "SCHEDULE_FAILED"
+    assert replacement["worker_pid"] is None
+    assert replacement["schedule_error"].startswith("OSError:")
+    assert "OLD_SCHEDULE_ERROR" not in replacement["schedule_error"]
+    assert "cleanup_error" not in replacement
+
+
 def test_old_cleanup_unconfirmed_receipt_still_blocks_synthetic_retry(tmp_path, monkeypatch):
     from contextlib import nullcontext
 
