@@ -68,6 +68,27 @@ def test_update_receipt_writer_closes_descriptor_when_fdopen_fails(tmp_path, mon
             pass
 
 
+def test_update_receipt_replace_failure_preserves_previous_receipt_and_cleans_temp(
+    tmp_path, monkeypatch
+):
+    import os
+
+    receipt_path = tmp_path / "update-receipt.json"
+    receipt_path.write_text('{"state":"PREVIOUS"}', encoding="utf-8")
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(
+        os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("synthetic replace failure")),
+    )
+
+    with pytest.raises(OSError, match="synthetic replace failure"):
+        self_update._write_update_receipt({"state": "SCHEDULED"})
+
+    assert receipt_path.read_text(encoding="utf-8") == '{"state":"PREVIOUS"}'
+    assert list(tmp_path.glob(".update-receipt-*.tmp")) == []
+
+
 def test_switch_project_schema_is_generic_and_includes_recovery_example():
     schema = command_schema("switch-project")
     assert schema["mutating"] is True
