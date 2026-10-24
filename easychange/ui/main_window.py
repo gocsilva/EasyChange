@@ -1255,10 +1255,13 @@ class MainWindow(QMainWindow):
             parts = raw.split(maxsplit=2)
             if len(parts) == 3:
                 sequence, raw = parts[1], parts[2]
-        is_self_update = raw.lstrip(":").strip().casefold() == "self-update"
+        is_update_command = raw.lstrip(":").strip().casefold() in {
+            "self-update",
+            "autonomous-update",
+        }
         if precomputed_result is not None:
             result = precomputed_result
-        elif is_self_update and self._has_unsaved_editor_changes(discard_easychange=True):
+        elif is_update_command and self._has_unsaved_editor_changes(discard_easychange=True):
             result = Result(
                 False,
                 "self-update",
@@ -1336,7 +1339,7 @@ class MainWindow(QMainWindow):
             # Every sequenced result is immutable after journal commit:
             # appending focus diagnostics here changes the EC2 checksum,
             # breaks durable replay equivalence and increases QR payload.
-            if not is_self_update and not result.sequence:
+            if not is_update_command and not result.sequence:
                 result.data["easychange_focus"] = focus
                 result.data["command_focus_confirmed"] = bool(
                     focus.get("command_focus_confirmed")
