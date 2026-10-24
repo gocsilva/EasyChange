@@ -126,6 +126,25 @@ def test_durable_ec2_rejects_falsy_nonboolean_mutations_and_invalid_lengths():
     assert literal["m"] is None and literal["l"]==16 and literal["s"]=="QHDRTYPES1"
 
 
+def test_durable_ec2_rejects_invalid_sha_before_serialization():
+    import pytest
+    from unittest.mock import patch
+    import easychange.remote.optical_protocol as optical
+
+    base={"sequence":"QHDRSHA1","finished":True,"success":True,
+          "sha256":"a"*64,"payload_length":16,"mutation":False}
+    for digest in (False, 0, [], {}, "bad", "a"*63, "g"*64, "a"*65):
+        with patch.object(optical.json, "dumps",
+                          side_effect=AssertionError("INVALID_SHA_SERIALIZED")):
+            with pytest.raises(ValueError, match="OPTICAL_HEADER_FIELD_INVALID"):
+                optical.encode_durable_result_header({**base,"sha256":digest})
+
+    for digest in (None, ""):
+        rendered=json.loads(optical.encode_durable_result_header(
+            {**base,"sha256":digest}))
+        assert rendered["h"]==""
+
+
 def test_ec2_never_interprets_truthy_nonboolean_as_success():
     import pytest
     from easychange.remote import optical_protocol as optical

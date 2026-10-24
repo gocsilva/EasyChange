@@ -444,8 +444,12 @@ def encode_durable_result_header(header: dict[str, Any]) -> str:
     if type(mutation) is not bool:
         raise ValueError("OPTICAL_MUTATION_BOOLEAN_REQUIRED")
     mutation_state=header.get("mutation_state") if mutation else None
-    sha256=header.get("sha256") or ""
-    if type(sha256) is not str:
+    sha256=header.get("sha256", "")
+    if sha256 is None:
+        sha256=""
+    if type(sha256) is not str or (
+            sha256 and (len(sha256) != 64
+                        or any(ch not in "0123456789abcdefABCDEF" for ch in sha256))):
         raise ValueError("OPTICAL_HEADER_FIELD_INVALID")
     fields={
         "p": HEADER_PROTOCOL, "v": 1, "s": sequence, "f": True,
