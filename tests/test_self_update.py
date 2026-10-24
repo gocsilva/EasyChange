@@ -1228,3 +1228,39 @@ def test_oversized_update_receipt_is_rejected_without_git_or_worker_handoff(tmp_
     )
     assert result == {"ok": False, "error": "UPDATE_RECEIPT_UNREADABLE"}
     assert spawned == []
+
+
+@pytest.mark.parametrize(
+    ("receipt_text", "expected_error"),
+    [
+        ("{\"schema\":", "UPDATE_RECEIPT_UNREADABLE"),
+        (
+            json.dumps({"schema": "wrong-schema", "state": "UPDATE_CLEANUP_UNCONFIRMED"}),
+            "UPDATE_RECEIPT_INVALID",
+        ),
+    ],
+)
+def test_malformed_or_wrong_schema_receipt_blocks_retry(
+    tmp_path, monkeypatch, receipt_text, expected_error
+):
+    root = tmp_path / "EasyChange"
+    workspace = tmp_path / "workspace"
+    root.mkdir()
+    workspace.mkdir()
+    (root / "Atualizar_EasyChange.bat").write_text("@echo off\n", encoding="utf-8")
+    receipt_path = tmp_path / "logs" / "update-receipt.json"
+    receipt_path.parent.mkdir()
+    receipt_path.write_text(receipt_text, encoding="utf-8")
+    monkeypatch.setattr(self_update, "update_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(self_update, "update_log_path", lambda: tmp_path / "update.log")
+    spawned = []
+
+    result = self_update.schedule_self_update(
+        workspace,
+        repo_root=root,
+        platform_name="nt",
+        popen_factory=lambda *args, **kwargs: spawned.append((args, kwargs)),
+    )
+
+    assert result == {"ok": False, "error": expected_error}
+    assert spawned == []
