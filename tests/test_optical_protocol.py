@@ -17,7 +17,7 @@ def test_invalid_retransmission_index_collection_skips_large_compression():
         (index for index in [0]),
         "not an index collection",
         None,
-        list(range(optical.MAX_EC2_PACKETS+1)),
+        list(range(optical.MAX_EC2_INDEX_REQUESTS+1)),
     )
     for candidate in invalid:
         if candidate is None:
@@ -266,6 +266,33 @@ def test_ec2_encoder_caps_utf8_json_bytes_before_compression(monkeypatch):
     assert json.loads(raw)==valid
     assert zipped
     assert isinstance(token,str)
+
+
+def test_ec2_result_budget_matches_mcp_receiver_limit():
+    import easychange.remote.optical_protocol as optical
+
+    assert optical.MAX_EC2_RESULT_BYTES == 8 * 1024 * 1024
+    assert optical.MAX_EC2_COMPRESSED_BYTES == 2 * 1024 * 1024
+    assert optical.MAX_EC2_TOKEN_CHARS == ((2 * 1024 * 1024 + 2) // 3) * 4
+    assert optical.MAX_EC2_PACKETS == 4096
+    assert optical.MAX_EC2_INDEX_REQUESTS == 200_000
+
+
+def test_ec2_encoder_rejects_packet_count_above_mcp_receiver_budget(monkeypatch):
+    import pytest
+    import easychange.remote.optical_protocol as optical
+
+    monkeypatch.setattr(optical, "MAX_EC2_PACKETS", 3)
+    monkeypatch.setattr(optical, "_encode_raw", lambda _value: (b"{}", b"compressed", "A" * 1000))
+    with pytest.raises(ValueError, match="OPTICAL_PACKET_COUNT_TOO_LARGE"):
+        optical._transport_components({"sequence": "QCAP", "ok": True})
+
+    prepared = optical.PreparedOpticalResult(
+        token="A" * 1000, chunk_chars=260, total=4, digest="a" * 64,
+        crc="a" * 8, sequence="QCAP", literal_marker=False,
+    )
+    with pytest.raises(ValueError, match="OPTICAL_PACKET_COUNT_TOO_LARGE"):
+        encode_result_chunks({"sequence": "QCAP", "ok": True}, prepared=prepared)
 
 
 def test_ec2_encoder_refuses_huge_single_token_without_encoding_second_copy(monkeypatch):
@@ -803,7 +830,7 @@ def test_ec2_sparse_index_input_budget_checked_before_iteration(monkeypatch):
     import easychange.remote.optical_protocol as optical
 
     result=Result(True,"read",{"text":"small"},sequence="QINDEXCAP")
-    monkeypatch.setattr(optical,"MAX_EC2_PACKETS",3)
+    monkeypatch.setattr(optical,"MAX_EC2_INDEX_REQUESTS",3)
     with pytest.raises(ValueError,match="OPTICAL_CHUNK_INDEX_REQUEST_TOO_LARGE"):
         encode_result_chunks(result,indexes=[0,0,0,0])
     with pytest.raises(ValueError,match="OPTICAL_CHUNK_INDEX_REQUEST_TOO_LARGE"):

@@ -20,16 +20,19 @@ OPTICAL_XZ_MIN_RAW_BYTES = 8192
 OPTICAL_XZ_MAX_RAW_BYTES = 262144
 OPTICAL_XZ_RATIO_PERCENT = 75
 # Decoder limits apply to untrusted QR strings, not to durable on-disk results.
-MAX_EC2_PACKETS = 200_000
+MAX_EC2_PACKETS = 4_096
+MAX_EC2_INDEX_REQUESTS = 200_000
 MAX_EC2_PACKET_TEXT_CHARS = 65_536
 # The desktop Qt renderer uses QR error correction M: Version 40 byte-mode
 # capacity is 2331 bytes. Keep outgoing EC2 envelopes renderable as QR.
 MAX_EC2_QR_RENDER_BYTES = 2331
 # Includes envelope overhead and duplicates: cap the complete untrusted QR set.
 MAX_EC2_PACKET_SET_CHARS = 64 * 1024 * 1024
-MAX_EC2_TOKEN_CHARS = 16 * 1024 * 1024
-MAX_EC2_COMPRESSED_BYTES = 12 * 1024 * 1024
-MAX_EC2_RESULT_BYTES = 16 * 1024 * 1024
+# Match MCP_PC_CONTROLLER's encoded-character and compressed-byte receive budgets.
+MAX_EC2_COMPRESSED_BYTES = 2 * 1024 * 1024
+MAX_EC2_TOKEN_CHARS = ((MAX_EC2_COMPRESSED_BYTES + 2) // 3) * 4
+# Keep outgoing payloads within MCP_PC_CONTROLLER's 8 MiB EC2 receive budget.
+MAX_EC2_RESULT_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +321,8 @@ def _transport_components(
     if size < 120:
         raise ValueError("chunk_chars must be >= 120")
     total = max(1, (len(token) + size - 1) // size)
+    if total > MAX_EC2_PACKETS:
+        raise ValueError("OPTICAL_PACKET_COUNT_TOO_LARGE")
     digest = hashlib.sha256(raw).hexdigest()
     crc = f"{binascii.crc32(raw) & 0xffffffff:08x}"
     data = value.get("data")
@@ -454,11 +459,11 @@ def encode_result_chunks(
 ) -> list[str]:
     """Encode only the EC2 packet window/indexes that are actually needed."""
     # Remote retransmission parameters can be invalid even for an otherwise
-    # valid 16 MiB result. Reject malformed index containers before the
+    # valid result. Reject malformed index containers before the
     # expensive JSON/zlib preparation stage.
     if indexes is not None and (
             not isinstance(indexes,(list,tuple))
-            or len(indexes)>MAX_EC2_PACKETS):
+            or len(indexes)>MAX_EC2_INDEX_REQUESTS):
         raise ValueError("OPTICAL_CHUNK_INDEX_REQUEST_TOO_LARGE")
     # Reject malformed indexes before serializing/compressing a large result.
     parsed_indexes = None
@@ -485,6 +490,8 @@ def encode_result_chunks(
     encoding = prepared.encoding
     size = prepared.chunk_chars
     total = prepared.total
+    if total < 1 or total > MAX_EC2_PACKETS:
+        raise ValueError("OPTICAL_PACKET_COUNT_TOO_LARGE")
     digest = prepared.digest
     crc = prepared.crc
     sequence = prepared.sequence

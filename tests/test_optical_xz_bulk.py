@@ -1,6 +1,7 @@
 """XZ EC2 optical framing: verified bulk savings without weakening CRC."""
 from __future__ import annotations
 import json
+import binascii
 from pathlib import Path
 import pytest
 from easychange.core.workspace import Workspace
@@ -60,3 +61,22 @@ def test_small_result_stays_original_zlib_protocol(tmp_path: Path):
         assert decode_result_chunks(packets)["ok"] is True
     finally:
         service.close()
+
+
+def test_truncated_xz_stream_is_rejected_after_fragment_crc_check():
+    value = {
+        "ok": True,
+        "command": "read",
+        "sequence": "QLABXZTRUNC",
+        "data": {"lines": [f"{i:04d} Simulation with utf8 action {i}" for i in range(900)]},
+    }
+    packets, _header = encode_result_bundle(value)
+    assert json.loads(packets[0])["e"] == "xz"
+
+    packet = json.loads(packets[-1])
+    packet["d"] = packet["d"][:-1]
+    packet["x"] = f"{binascii.crc32(packet['d'].encode('ascii')) & 0xffffffff:08x}"
+    packets[-1] = json.dumps(packet, separators=(",", ":"))
+
+    with pytest.raises(ValueError, match="invalid or oversized optical xz stream"):
+        decode_result_chunks(packets)
